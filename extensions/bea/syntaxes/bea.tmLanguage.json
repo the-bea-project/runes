@@ -1,0 +1,376 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Bea",
+  "scopeName": "source.bea",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#attributes"
+    },
+    {
+      "include": "#imports"
+    },
+    {
+      "include": "#definitions"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#labels"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#discards"
+    },
+    {
+      "include": "#functions"
+    },
+    {
+      "include": "#operators"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.documentation.bea",
+          "match": "///.*$"
+        },
+        {
+          "name": "comment.line.double-slash.bea",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "attributes": {
+      "patterns": [
+        {
+          "comment": "@derive(decoder, encoder): the derivers are modules",
+          "begin": "(@derive)\\s*(\\()",
+          "end": "\\)",
+          "beginCaptures": {
+            "1": {
+              "name": "storage.modifier.attribute.bea"
+            },
+            "2": {
+              "name": "punctuation.section.arguments.begin.bea"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.section.arguments.end.bea"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#comments"
+            },
+            {
+              "name": "entity.name.namespace.bea",
+              "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
+            }
+          ]
+        },
+        {
+          "comment": "@external(erlang, \"module\", \"function\"), @target(javascript)",
+          "begin": "(@(?:external|target))\\s*(\\()",
+          "end": "\\)",
+          "beginCaptures": {
+            "1": {
+              "name": "storage.modifier.attribute.bea"
+            },
+            "2": {
+              "name": "punctuation.section.arguments.begin.bea"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.section.arguments.end.bea"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#comments"
+            },
+            {
+              "name": "constant.language.target.bea",
+              "match": "\\b(erlang|javascript)\\b"
+            },
+            {
+              "include": "#strings"
+            }
+          ]
+        },
+        {
+          "name": "storage.modifier.attribute.bea",
+          "match": "@[a-z_][a-zA-Z0-9_]*"
+        }
+      ]
+    },
+    "imports": {
+      "patterns": [
+        {
+          "match": "\\b(import)\\s+([a-z_][a-z0-9_]*(?:/[a-z_][a-z0-9_]*)*)(?:\\s+(as)\\s+([a-z_][a-z0-9_]*))?",
+          "captures": {
+            "1": {
+              "name": "keyword.other.declaration.bea"
+            },
+            "2": {
+              "name": "entity.name.namespace.bea"
+            },
+            "3": {
+              "name": "keyword.other.declaration.bea"
+            },
+            "4": {
+              "name": "entity.name.namespace.bea"
+            }
+          }
+        }
+      ]
+    },
+    "definitions": {
+      "patterns": [
+        {
+          "match": "\\b(def)\\s+([a-z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.other.declaration.bea"
+            },
+            "2": {
+              "name": "entity.name.function.bea"
+            }
+          }
+        },
+        {
+          "match": "\\b(type)\\s+([A-Z][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.other.declaration.bea"
+            },
+            "2": {
+              "name": "entity.name.type.class.bea"
+            }
+          }
+        },
+        {
+          "match": "\\b(const)\\s+([a-z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.other.declaration.bea"
+            },
+            "2": {
+              "name": "variable.other.constant.bea"
+            }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.bea",
+          "match": "\\b(if|else|return|case|cond|use|assert)\\b"
+        },
+        {
+          "name": "keyword.other.debug.bea",
+          "match": "\\b(echo|todo|panic)\\b"
+        },
+        {
+          "name": "keyword.operator.logical.bea",
+          "match": "\\b(and|or|not)\\b"
+        },
+        {
+          "name": "keyword.other.declaration.bea",
+          "match": "\\b(def|fn|pub|opaque|import|type|const|as)\\b"
+        },
+        {
+          "name": "constant.language.boolean.bea",
+          "match": "\\b(True|False|Nil)\\b"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.bea",
+          "begin": "\"",
+          "end": "\"",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.begin.bea"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.bea"
+            }
+          },
+          "patterns": [
+            {
+              "name": "constant.character.escape.bea",
+              "match": "\\\\[nrtf\"\\\\#]"
+            },
+            {
+              "name": "constant.character.escape.unicode.bea",
+              "match": "\\\\u\\{[0-9a-fA-F]{1,6}\\}"
+            },
+            {
+              "name": "invalid.illegal.unknown-escape.bea",
+              "match": "\\\\."
+            },
+            {
+              "include": "#interpolation"
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.other.raw.bea",
+          "begin": "`",
+          "end": "`",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.begin.bea"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.bea"
+            }
+          }
+        }
+      ]
+    },
+    "interpolation": {
+      "comment": "\"total: #{int.to_string(n)}\"",
+      "name": "meta.interpolation.bea",
+      "contentName": "meta.embedded.line.bea source.bea",
+      "begin": "#\\{",
+      "end": "\\}",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.section.interpolation.begin.bea"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.interpolation.end.bea"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#braces"
+        },
+        {
+          "include": "$self"
+        }
+      ]
+    },
+    "braces": {
+      "comment": "Braces inside an interpolation (a map, a block) don't end it",
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#braces"
+        },
+        {
+          "include": "$self"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.bea",
+          "match": "\\b0[xX][0-9a-fA-F_]+\\b"
+        },
+        {
+          "name": "constant.numeric.binary.bea",
+          "match": "\\b0[bB][01_]+\\b"
+        },
+        {
+          "name": "constant.numeric.octal.bea",
+          "match": "\\b0[oO][0-7_]+\\b"
+        },
+        {
+          "comment": "Not after a dot: `pair.0.1` is two tuple indexes",
+          "name": "constant.numeric.float.bea",
+          "match": "(?<![.\\w])[0-9][0-9_]*\\.[0-9_]*(?:[eE][-+]?[0-9_]+)?"
+        },
+        {
+          "name": "constant.numeric.integer.bea",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.bea",
+          "match": "\\b(Int|Float|String|Bool|List|Result|Option|Dict|Set|BitArray|UtfCodepoint)\\b"
+        },
+        {
+          "name": "entity.name.type.bea",
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    },
+    "discards": {
+      "patterns": [
+        {
+          "name": "comment.unused.bea",
+          "match": "\\b_[a-zA-Z0-9_]*\\b"
+        }
+      ]
+    },
+    "labels": {
+      "patterns": [
+        {
+          "comment": "`name:` — a label, a field or an annotated name",
+          "name": "variable.parameter.bea",
+          "match": "\\b[a-z][a-zA-Z0-9_]*(?=\\s*:(?![:=]))"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "comment": "A call: the parenthesis is on the same line as the name",
+          "name": "entity.name.function.call.bea",
+          "match": "\\b[a-z_][a-zA-Z0-9_]*(?=[ \\t]*\\()"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.pipe.bea",
+          "match": "\\|>"
+        },
+        {
+          "name": "keyword.operator.arrow.bea",
+          "match": "->|<-"
+        },
+        {
+          "name": "keyword.operator.try.bea",
+          "match": "\\?"
+        },
+        {
+          "name": "keyword.operator.bea",
+          "match": "<>|==|!=|<=\\.|>=\\.|<=|>=|<\\.|>\\.|<<|>>|\\+\\.|-\\.|\\*\\.|/\\.|&&|\\|\\||\\.\\.|=|<|>|\\+|-|\\*|/|%|!|\\|"
+        }
+      ]
+    }
+  }
+}

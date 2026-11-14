@@ -1,0 +1,6 @@
+node_modules/
+.beabuild/
+dist/
+out/
+test/runes_test.gleam
+release/

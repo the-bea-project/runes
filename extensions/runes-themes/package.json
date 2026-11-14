@@ -1,0 +1,28 @@
+{
+  "name": "runes-themes",
+  "displayName": "Runes Themes",
+  "description": "Void (dark) and Glacier (light): the themes Runes ships with",
+  "version": "0.6.0",
+  "publisher": "runes",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.82.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Runes Void",
+        "uiTheme": "vs-dark",
+        "path": "./themes/void.json"
+      },
+      {
+        "label": "Runes Glacier",
+        "uiTheme": "vs",
+        "path": "./themes/glacier.json"
+      }
+    ]
+  }
+}

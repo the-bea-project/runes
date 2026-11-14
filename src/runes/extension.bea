@@ -1,0 +1,260 @@
+//// What a VSIX contributes, read from its package.json. Runes reads the
+//// declarative contributions: languages, grammars, colour themes and snippets.
+
+import gleam/dict
+import gleam/dynamic/decode.{type Decoder}
+import gleam/json
+import gleam/list
+import gleam/result
+import gleam/string
+
+pub type Language {
+  id: String,
+  name: String,
+  extensions: List(String),
+  filenames: List(String),
+  configuration: String,
+}
+
+pub type Grammar {
+  language: String,
+  scope: String,
+  path: String,
+  inject_to: List(String),
+}
+
+pub type Theme {
+  label: String,
+  ui: String,
+  path: String,
+}
+
+pub type Snippets {
+  language: String,
+  path: String,
+}
+
+pub type Extension {
+  id: String,
+  name: String,
+  publisher: String,
+  version: String,
+  description: String,
+  builtin: Bool,
+  languages: List(Language),
+  grammars: List(Grammar),
+  themes: List(Theme),
+  snippets: List(Snippets),
+  icon_themes: List(Theme),
+  /// Kinds of contribution Runes does not act on yet.
+  ignored: List(String),
+  /// The script the extension host runs, or "" when the extension is only data.
+  main: String,
+  /// The extension's own picture, as a path inside it, or "".
+  icon: String,
+  /// Commands it adds to the palette: the id to run and the title to show.
+  commands: List((String, String)),
+}
+
+/// What a language's configuration file says, as far as Runes uses it.
+pub type Config {
+  line_comment: String,
+  pairs: List((String, String)),
+}
+
+pub type Snippet {
+  name: String,
+  prefix: String,
+  body: String,
+  description: String,
+}
+
+def field(name: String, default: a, decoder: Decoder(a), next: fn(a) -> Decoder(b)) -> Decoder(b) {
+  decode.optional_field(name, default, decoder, next)
+}
+
+def strings() -> Decoder(List(String)) {
+  decode.list(decode.string)
+}
+
+def language() -> Decoder(Language) {
+  use id <- decode.field("id", decode.string)
+  use aliases <- field("aliases", [], strings())
+  use extensions <- field("extensions", [], strings())
+  use filenames <- field("filenames", [], strings())
+  use configuration <- field("configuration", "", decode.string)
+  decode.success(Language(
+    id:,
+    name: list.first(aliases) |> result.unwrap(id),
+    extensions:,
+    filenames:,
+    configuration:,
+  ))
+}
+
+def grammar() -> Decoder(Grammar) {
+  use language <- field("language", "", decode.string)
+  use scope <- decode.field("scopeName", decode.string)
+  use path <- decode.field("path", decode.string)
+  use inject_to <- field("injectTo", [], strings())
+  decode.success(Grammar(language:, scope:, path:, inject_to:))
+}
+
+def theme() -> Decoder(Theme) {
+  use label <- field("label", "", decode.string)
+  use id <- field("id", "", decode.string)
+  use ui <- field("uiTheme", "vs-dark", decode.string)
+  use path <- decode.field("path", decode.string)
+  decode.success(Theme(
+    label: case label, id {
+      "", "" -> path
+      "", _ -> id
+      _, _ -> label
+    },
+    ui:,
+    path:,
+  ))
+}
+
+def snippets() -> Decoder(Snippets) {
+  use language <- field("language", "", decode.string)
+  use path <- decode.field("path", decode.string)
+  decode.success(Snippets(language:, path:))
+}
+
+def command() -> Decoder((String, String)) {
+  use id <- decode.field("command", decode.string)
+  use title <- field("title", "", decode.string)
+  use category <- field("category", "", decode.string)
+  decode.success((id, case category, title {
+    _, "" -> id
+    "", _ -> title
+    _, _ -> category <> ": " <> title
+  }))
+}
+
+/// A list where entries Runes cannot read are skipped rather than fatal.
+def tolerant(decoder: Decoder(a)) -> Decoder(List(a)) {
+  decode.list(decode.one_of(decode.map(decoder, fn(x) { [x] }), [decode.success([])]))
+  |> decode.map(list.flatten)
+}
+
+type Contributes {
+  languages: List(Language),
+  grammars: List(Grammar),
+  themes: List(Theme),
+  snippets: List(Snippets),
+  icon_themes: List(Theme),
+  commands: List((String, String)),
+  kinds: List(String),
+}
+
+def contributes() -> Decoder(Contributes) {
+  use languages <- field("languages", [], tolerant(language()))
+  use grammars <- field("grammars", [], tolerant(grammar()))
+  use themes <- field("themes", [], tolerant(theme()))
+  use snippets <- field("snippets", [], tolerant(snippets()))
+  use icon_themes <- field("iconThemes", [], tolerant(theme()))
+  use commands <- field("commands", [], tolerant(command()))
+  use all <- decode.then(decode.dict(decode.string, decode.dynamic))
+  decode.success(Contributes(languages:, grammars:, themes:, snippets:, icon_themes:, commands:, kinds: dict.keys(all)))
+}
+
+const understood = [
+  "languages", "grammars", "themes", "snippets", "iconThemes", "commands", "configuration",
+  "configurationDefaults",
+]
+
+/// Reads an extension's package.json.
+pub def parse(id: String, manifest: String, builtin: Bool) -> Result(Extension, String) {
+  decoder = {
+    use name <- field("name", id, decode.string)
+    use display <- field("displayName", "", decode.string)
+    use publisher <- field("publisher", "unknown", decode.string)
+    use version <- field("version", "", decode.string)
+    use description <- field("description", "", decode.string)
+    use main <- field("main", "", decode.string)
+    use icon <- field("icon", "", decode.string)
+    use c <- field("contributes", Contributes([], [], [], [], [], [], []), contributes())
+    decode.success(Extension(
+      id:,
+      name: case display {
+        "" -> name
+        _ -> display
+      },
+      publisher:,
+      version:,
+      description:,
+      builtin:,
+      languages: c.languages,
+      grammars: c.grammars,
+      themes: c.themes,
+      snippets: c.snippets,
+      icon_themes: c.icon_themes,
+      ignored: list.filter(c.kinds, fn(k) { not list.contains(understood, k) }) |> list.sort(string.compare),
+      main:,
+      icon:,
+      commands: c.commands,
+    ))
+  }
+  json.parse(manifest, decoder)
+  |> result.map_error(fn(_) { "The package.json of " <> id <> " could not be read" })
+}
+
+/// Reads a language-configuration.json. Anything missing is simply not used.
+pub def config(text: String) -> Config {
+  pair = decode.one_of(
+    {
+      use open <- decode.field("open", decode.string)
+      use close <- decode.field("close", decode.string)
+      decode.success([(open, close)])
+    },
+    [
+      decode.list(decode.string)
+      |> decode.map(fn(both) {
+        case both {
+          [open, close] -> [(open, close)]
+          _ -> []
+        }
+      }),
+      decode.success([]),
+    ],
+  )
+  decoder = {
+    use line_comment <- field(
+      "comments",
+      "",
+      field("lineComment", "", decode.one_of(decode.string, [decode.at(["comment"], decode.string)]), decode.success),
+    )
+    use closing <- field("autoClosingPairs", [], decode.list(pair))
+    use brackets <- field("brackets", [], decode.list(pair))
+    decode.success(Config(
+      line_comment:,
+      pairs: case closing {
+        [] -> list.flatten(brackets)
+        _ -> list.flatten(closing)
+      },
+    ))
+  }
+  json.parse(text, decoder) |> result.unwrap(Config("", []))
+}
+
+/// Reads a snippets file: one entry per prefix.
+pub def snippet_list(text: String) -> List(Snippet) {
+  lines = decode.one_of(decode.string, [decode.list(decode.string) |> decode.map(string.join(_, "\n"))])
+  prefixes = decode.one_of(decode.string |> decode.map(fn(p) { [p] }), [strings()])
+  entry = {
+    use prefix <- field("prefix", [], prefixes)
+    use body <- field("body", "", lines)
+    use description <- field("description", "", lines)
+    decode.success((prefix, body, description))
+  }
+  json.parse(text, decode.dict(decode.string, decode.one_of(entry, [decode.success(([], "", ""))])))
+  |> result.unwrap(dict.new())
+  |> dict.to_list
+  |> list.flat_map(fn(item) {
+    (name, (prefixes, body, description)) = item
+    list.map(prefixes, fn(prefix) { Snippet(name:, prefix:, body:, description:) })
+  })
+  |> list.sort(fn(a, b) { string.compare(a.prefix, b.prefix) })
+}

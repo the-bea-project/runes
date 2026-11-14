@@ -1,0 +1,2858 @@
+//// Runes: what is drawn.
+
+import gleam/dict
+import gleam/dynamic/decode.{type Decoder}
+import gleam/float
+import gleam/int
+import gleam/list
+import gleam/option.{None, Some}
+import gleam/string
+import lustre/attribute.{class}
+import lustre/element.{type Element}
+import lustre/element/html
+import lustre/element/keyed
+import lustre/event
+import runes/app.{type Compare, type Group, type Model, type Msg, Closed, Menu, Palette, Pie}
+import runes/buffer
+import runes/doc.{type Doc}
+import runes/extension.{type Extension}
+import runes/git.{type Row}
+import runes/keymap
+import runes/layout.{type Edge, type Layout, Leaf, Split}
+import runes/settings.{type Slice}
+
+@external(javascript, "../runes_ffi.mjs", "tokens")
+def tokens(key: String, scope: String, version: Int, lines: List(String), first: Int, count: Int) -> List(List((String, String)))
+
+@external(javascript, "../runes_ffi.mjs", "icon")
+def file_icon(name: String, folder: Bool, open: Bool, language: String) -> (String, String, String, String)
+
+@external(javascript, "../runes_ffi.mjs", "when")
+def when(seconds: Int) -> String
+
+@external(javascript, "../runes_ffi.mjs", "month_grid")
+def month_grid(year: Int, month: Int) -> List(String)
+
+@external(javascript, "../runes_ffi.mjs", "month_name")
+def month_name(year: Int, month: Int) -> String
+
+@external(javascript, "../runes_ffi.mjs", "diff_rows")
+def diff_rows(
+  left: List(String),
+  right: List(String),
+  context: Int,
+  scope: String,
+) -> List((String, Int, String, Int, String, List((String, String)), List((String, String))))
+
+@external(javascript, "../runes_ffi.mjs", "markdown_html")
+def markdown_html(key: String, version: Int, lines: List(String)) -> String
+
+@external(javascript, "../runes_ffi.mjs", "markdown_text")
+def markdown_text(key: String, text: String) -> String
+
+@external(javascript, "../runes_ffi.mjs", "change_marks")
+def change_marks(key: String, version: Int, base_id: Int, base: List(String), lines: List(String)) -> List((Int, String))
+
+@external(javascript, "../runes_ffi.mjs", "change_at")
+def change_at(key: String, line: Int) -> (Int, Int, Int, Int, List(String), List(String))
+
+@external(javascript, "../runes_ffi.mjs", "extension_icon")
+def extension_icon(id: String, path: String) -> String
+
+def txt(s: String) -> Element(Msg) {
+  html.text(s)
+}
+
+/// The Runes mark: the rune raidho, an R drawn with straight cuts.
+pub const mark = "<path d='M8 3v18M8 4l8 5-8 5 8 7'/>"
+
+def icon(name: String) -> Element(Msg) {
+  path = case name {
+    "rune" -> mark
+    "files" -> "<path d='M5 3h9l5 5v13H5z'/><path d='M14 3v5h5'/>"
+    "search" -> "<circle cx='11' cy='11' r='6'/><path d='M16 16l5 5'/>"
+    "extensions" -> "<rect x='3' y='11' width='8' height='8' rx='1.5'/><rect x='11' y='11' width='8' height='8' rx='1.5'/><rect x='3' y='3' width='8' height='8' rx='1.5'/><rect x='14' y='2' width='7' height='7' rx='1.5' transform='rotate(12 17.5 5.5)'/>"
+    "chat" -> "<path d='M4 5h16v11H9l-5 4z'/>"
+    "theme" -> "<circle cx='12' cy='12' r='8'/><path d='M12 4a8 8 0 0 0 0 16z' fill='currentColor'/>"
+    "terminal" -> "<rect x='3' y='4' width='18' height='16' rx='2.5'/><path d='M7 9l3 3-3 3'/><path d='M12.5 15H17'/>"
+    "git" -> "<circle cx='7' cy='5' r='2.2'/><circle cx='7' cy='19' r='2.2'/><circle cx='17' cy='9' r='2.2'/><path d='M7 7.2v9.6'/><path d='M17 11.2c0 4-10 2-10 5.6'/>"
+    "refresh" -> "<path d='M19 8a8 8 0 1 0 1 6'/><path d='M20 3v5h-5'/>"
+    "minus" -> "<path d='M5 12h14'/>"
+    "left" -> "<path d='M14 6l-6 6 6 6'/>"
+    "settings" -> "<path d='M10.3 5.0L10.7 2.5L13.3 2.5L13.7 5.0L15.8 5.9L17.8 4.4L19.6 6.2L18.1 8.2L19.0 10.3L21.5 10.7L21.5 13.3L19.0 13.7L18.1 15.8L19.6 17.8L17.8 19.6L15.8 18.1L13.7 19.0L13.3 21.5L10.7 21.5L10.3 19.0L8.2 18.1L6.2 19.6L4.4 17.8L5.9 15.8L5.0 13.7L2.5 13.3L2.5 10.7L5.0 10.3L5.9 8.2L4.4 6.2L6.2 4.4L8.2 5.9z'/><circle cx='12' cy='12' r='3.1'/>"
+    "swap" -> "<path d='M4 8h15l-4-4M20 16H5l4 4'/>"
+    "open" -> "<path d='M13 5h6v6M19 5l-9 9'/><path d='M17 14v5H5V7h5'/>"
+    "edit" -> "<path d='M4 20l1-4L16 5l3 3L8 19z'/><path d='M14 7l3 3'/>"
+    "preview" -> "<rect x='3' y='4' width='18' height='16' rx='2'/><path d='M12 4v16'/><path d='M15 9h3M15 12h3M15 15h2'/>"
+    "remote" -> "<rect x='3' y='4' width='18' height='12' rx='2'/><path d='M8 20h8M12 16v4'/><path d='M8 8.5l2.5 2L8 12.5M12.5 12.5H16'/>"
+    "key" -> "<circle cx='8' cy='15' r='4'/><path d='M11 12l8-8M16 7l2 2M14 9l1.5 1.5'/>"
+    "clock" -> "<circle cx='12' cy='12' r='9'/><path d='M12 7v5l3 2'/>"
+    "dock" -> "<rect x='3' y='4' width='18' height='16' rx='2'/><path d='M3 14h18'/>"
+    "chevron" -> "<path d='M9 6l6 6-6 6'/>"
+    "split" -> "<rect x='3' y='4' width='18' height='16' rx='2'/><path d='M12 4v16'/>"
+    "maximize" -> "<path d='M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5'/>"
+    "close" -> "<path d='M6 6l12 12M18 6L6 18'/>"
+    "plus" -> "<path d='M12 5v14M5 12h14'/>"
+    "error" -> "<circle cx='12' cy='12' r='8'/><path d='M9 9l6 6M15 9l-6 6'/>"
+    "warning" -> "<path d='M12 4l9 16H3z'/><path d='M12 10v4M12 17v.5'/>"
+    "up" -> "<path d='M6 14l6-6 6 6'/>"
+    "down" -> "<path d='M6 10l6 6 6-6'/>"
+    _ -> "<circle cx='12' cy='12' r='3'/>"
+  }
+  element.unsafe_raw_html(
+    "",
+    "span",
+    [class("icon")],
+    "<svg viewBox='0 0 24 24' width='18' height='18' fill='none' stroke='currentColor' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'>"
+      <> path
+      <> "</svg>",
+  )
+}
+
+/// The mark, cut once into its tile and then traced now and again by a moving light.
+def logo(name: String) -> Element(Msg) {
+  element.unsafe_raw_html(
+    "",
+    "div",
+    [class(name), attribute.title("Runes")],
+    "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'>"
+      <> "<path class='rune-cut' pathLength='100' d='M8 3v18M8 4l8 5-8 5 8 7'/>"
+      <> "<path class='rune-light' pathLength='100' d='M8 3v18M8 4l8 5-8 5 8 7'/>"
+      <> "</svg>",
+  )
+}
+
+/// An extension's own picture when it has one, else its first letter.
+def badge(picture: String, name: String) -> Element(Msg) {
+  case picture {
+    "" -> html.div([class("badge")], [txt(string.uppercase(string.slice(name, 0, 1)))])
+    address -> html.div([class("badge pictured")], [html.img([attribute.src(address), attribute.alt(""), attribute.attribute("draggable", "false")])])
+  }
+}
+
+/// Enter in a field. Other keys are left alone: answering them with the text as it was
+/// when the view was last drawn could put stale text back into the field.
+def on_enter(msg: Msg) -> attribute.Attribute(Msg) {
+  event.on("keydown", {
+    use key <- decode.field("key", decode.string)
+    case key {
+      "Enter" -> decode.success(msg)
+      _ -> decode.failure(msg, "another key")
+    }
+  })
+}
+
+/// `count` whole numbers starting at `from`.
+def counting(from: Int, count: Int) -> List(Int) {
+  list.repeat(0, count) |> list.index_map(fn(_, i) { from + i })
+}
+
+def px(n: Int) -> String {
+  int.to_string(n) <> "px"
+}
+
+def ch(n: Int) -> String {
+  int.to_string(n) <> "ch"
+}
+
+def whole() -> Decoder(Int) {
+  decode.one_of(decode.int, [decode.float |> decode.map(float.round)])
+}
+
+def labelled(label: String) -> List(attribute.Attribute(Msg)) {
+  [attribute.title(label), attribute.attribute("aria-label", label)]
+}
+
+pub def view(model: Model) -> Element(Msg) {
+  html.div(
+    [
+      attribute.classes([
+        ("runes", True),
+        ("ready", model.ready),
+        ("side-right", model.settings.side_right),
+        ("dragging-tab", model.drag != None),
+      ]),
+      attribute.styles([
+        ("--side", case model.side {
+          "" -> "0px"
+          _ -> px(model.side_width)
+        }),
+        ("--panel", px(model.panel_height)),
+      ]),
+    ],
+    [
+      activity(model),
+      side(model),
+      prompt_view(model),
+      html.main([class("main")], [
+        html.div([class("area")], [tiles(model, model.layout, "")]),
+        panel(model),
+        status(model),
+      ]),
+      html.textarea(
+        [
+          attribute.id("runes-input"),
+          class("input"),
+          attribute.spellcheck(False),
+          attribute.autocomplete("off"),
+          attribute.attribute("autocapitalize", "off"),
+          attribute.attribute("aria-label", "Editor text"),
+        ],
+        "",
+      ),
+      overlay(model),
+      case model.toast {
+        "" -> element.none()
+        text -> html.div([class("toast"), attribute.role("status")], [txt(text)])
+      },
+    ],
+  )
+}
+
+// --- Activity bar and side bar ---------------------------------------------------------------
+
+def activity(model: Model) -> Element(Msg) {
+  button = fn(name: String, label: String, on: Bool, msg: Msg) {
+    html.button([attribute.classes([("act", True), ("on", on)]), event.on_click(msg), ..labelled(label)], [icon(name)])
+  }
+  errors = dict.values(model.diagnostics) |> list.flatten |> list.filter(fn(d) { d.severity == 1 }) |> list.length
+  changed = list.length(model.changes)
+  html.nav([class("activity")], [
+    logo("mark"),
+    button("files", "Explorer (Ctrl+Shift+E)", model.side == "explorer", app.SidePicked("explorer")),
+    button("search", "Search in Files (Ctrl+Shift+F)", model.side == "search", app.SidePicked("search")),
+    html.button(
+      [
+        attribute.classes([("act", True), ("on", model.side == "git")]),
+        event.on_click(app.Ran("workbench.view.scm")),
+        ..labelled("Source Control (Ctrl+Shift+G)")
+      ],
+      [icon("git"), case changed {
+        0 -> element.none()
+        n -> html.span([class("count-badge")], [txt(int.to_string(n))])
+      }],
+    ),
+    button("extensions", "Extensions (Ctrl+Shift+X)", model.side == "extensions", app.SidePicked("extensions")),
+    html.button(
+      [attribute.classes([("act", True), ("on", model.side == "ssh"), ("live", model.ssh_on != None)]), event.on_click(app.SidePicked("ssh")), ..labelled("SSH Workbench")],
+      [icon("remote")],
+    ),
+    button("chat", "Chat (Ctrl+Alt+I)", model.side == "chat", app.SidePicked("chat")),
+    html.button(
+      [
+        attribute.classes([("act", True), ("on", model.panel == "problems"), ("alert", errors > 0)]),
+        event.on_click(app.Ran("workbench.actions.view.problems")),
+        ..labelled("Problems (Ctrl+Shift+M)")
+      ],
+      [icon("warning")],
+    ),
+    html.div([class("grow")], []),
+    button("terminal", "Terminal (Ctrl+`)", model.panel == "terminal", app.Ran("workbench.action.terminal.toggleTerminal")),
+    button("settings", "Settings (Ctrl+,)", app.group(model, model.focus).active == app.settings_tab, app.Ran("workbench.action.openSettings")),
+  ])
+}
+
+def side(model: Model) -> Element(Msg) {
+  html.aside([class("side"), attribute.attribute("data-side", model.side)], case model.side {
+    "" -> []
+    name -> [
+      html.div([class("side-body")], case name {
+        "extensions" -> extensions(model)
+        "search" -> search(model)
+        "chat" -> chat(model)
+        "git" -> source_control(model)
+        "ssh" -> ssh_view(model)
+        _ -> explorer(model)
+      }),
+      html.div(
+        [class("edge edge-side"), event.on("mousedown", decode.success(app.EdgeGrabbed("side"))) |> event.prevent_default],
+        [],
+      ),
+    ]
+  })
+}
+
+def explorer(model: Model) -> List(Element(Msg)) {
+  [
+    html.header([], [
+      html.b([], [txt("Explorer")]),
+      html.button([class("link"), event.on_click(app.Ran("workbench.action.files.openFolder"))], [txt("Open Folder")]),
+    ]),
+    html.div([class("root")], [txt(string.uppercase(app.base_name(model.root)))]),
+    html.div([class("tree"), attribute.role("tree")], tree(model, model.root, 0, git_marks(model))),
+  ]
+}
+
+/// How each changed file stands with git, by full path, with "•" for every folder above one.
+def git_marks(model: Model) -> dict.Dict(String, String) {
+  list.fold(model.changes, dict.new(), fn(marks, change) {
+    (path, index, work) = change
+    letter = case index, work {
+      _, "?" -> "U"
+      "U", _ | _, "U" -> "!"
+      _, "D" | "D", _ -> "D"
+      "A", _ -> "A"
+      "R", _ -> "R"
+      _, _ -> "M"
+    }
+    parts = string.split(path, "/")
+    folders = list.take(parts, list.length(parts) - 1)
+    with_file = dict.insert(marks, model.root <> "/" <> path, letter)
+    list.fold(folders, (with_file, model.root), fn(state, part) {
+      folder = state.1 <> "/" <> part
+      (dict.insert(state.0, folder, "•"), folder)
+    }).0
+  })
+}
+
+def glyph(name: String, folder: Bool, open: Bool, language: String) -> Element(Msg) {
+  (character, color, family, image) = file_icon(name, folder, open, language)
+  case character, image, folder {
+    "", "", True -> icon("chevron")
+    "", "", False -> html.span([class("dot")], [])
+    "", src, _ -> html.img([class("file-icon"), attribute.src(src), attribute.alt("")])
+    _, _, _ -> html.span([class("file-icon"), attribute.styles([("font-family", family), ("color", color)])], [txt(character)])
+  }
+}
+
+def tree(model: Model, path: String, depth: Int, marks: dict.Dict(String, String)) -> List(Element(Msg)) {
+  entries = case dict.get(model.tree, path) {
+    Ok(found) -> found
+    Error(_) -> []
+  }
+  active = app.group(model, model.focus).active
+  list.flat_map(entries, fn(entry) {
+    (name, folder) = entry
+    full = path <> "/" <> name
+    open = list.contains(model.expanded, full)
+    mark = dict.get(marks, full) |> unwrap("")
+    row = html.button(
+      [
+        attribute.classes([("node", True), ("folder", folder), ("open", open), ("on", full == active), ("git", mark != ""), ("git-" <> mark, mark != "" and mark != "•" and mark != "!"), ("git-in", mark == "•"), ("git-conflict", mark == "!")]),
+        attribute.style("padding-left", px(8 + depth * 14)),
+        attribute.role("treeitem"),
+        attribute.attribute("data-path", full),
+        attribute.attribute("draggable", case folder {
+          True -> "false"
+          False -> "true"
+        }),
+        event.on("dragstart", decode.success(app.TabDragged(full, -1))),
+        event.on("dragend", decode.success(app.DragEnded)),
+        event.on_click(case folder {
+          True -> app.DirToggled(full)
+          False -> app.FileOpened(full)
+        }),
+      ],
+      [
+        case folder {
+          True -> html.span([class("twist")], [icon("chevron")])
+          False -> html.span([class("twist")], [])
+        },
+        case folder {
+          True -> element.none()
+          False -> glyph(name, False, False, app.language_of(model.langs, name))
+        },
+        html.span([class("name")], [txt(name)]),
+        case mark {
+          "" -> element.none()
+          letter -> html.span([class("git-mark"), attribute.title(case letter {
+            "U" -> "Untracked"
+            "A" -> "Added"
+            "D" -> "Deleted"
+            "R" -> "Renamed"
+            "!" -> "Conflict"
+            "•" -> "Contains changes"
+            _ -> "Modified"
+          })], [txt(letter)])
+        },
+      ],
+    )
+    case folder and open {
+      True -> [row, html.div([class("children")], tree(model, full, depth + 1, marks))]
+      False -> [row]
+    }
+  })
+}
+
+def option(label: String, title: String, on: Bool, msg: Msg) -> Element(Msg) {
+  html.button(
+    [attribute.classes([("opt", True), ("on", on)]), attribute.attribute("aria-pressed", case on {
+      True -> "true"
+      False -> "false"
+    }), event.on_click(msg), ..labelled(title)],
+    [txt(label)],
+  )
+}
+
+def search(model: Model) -> List(Element(Msg)) {
+  q = model.search
+  files = list.map(model.hits, fn(h) { h.path }) |> list.unique
+  [
+    html.header([], [html.b([], [txt("Search")])]),
+    html.div([class("search-form")], [
+      html.div([class("field")], [
+        html.input([
+          attribute.id("runes-search"),
+          attribute.placeholder("Search the folder"),
+          attribute.value(q.text),
+          attribute.spellcheck(False),
+          attribute.attribute("aria-label", "Search the folder"),
+          event.on_input(app.SearchTyped),
+          on_enter(app.SearchRan),
+        ]),
+        option("Aa", "Match case", q.match_case, app.SearchToggled("case")),
+        option("ab", "Match whole word", q.word, app.SearchToggled("word")),
+        option(".*", "Use regular expression", q.regex, app.SearchToggled("regex")),
+      ]),
+      html.div([class("field")], [
+        html.input([
+          attribute.placeholder("Replace"),
+          attribute.value(q.replace),
+          attribute.spellcheck(False),
+          attribute.attribute("aria-label", "Replace with"),
+          event.on_input(app.SearchReplaceTyped),
+        ]),
+        html.button(
+          [class("button small"), attribute.disabled(model.hits == []), event.on_click(app.SearchReplaceAll)],
+          [txt("Replace All")],
+        ),
+      ]),
+      html.p([class("hint")], [txt(case model.search_note {
+        "" -> "Press Enter to search."
+        note -> note
+      })]),
+    ]),
+    html.div(
+      [class("hits")],
+      list.flat_map(files, fn(path) {
+        mine = list.filter(model.hits, fn(h) { h.path == path })
+        [
+          html.div([class("hit-file")], [
+            glyph(app.base_name(path), False, False, app.language_of(model.langs, app.base_name(path))),
+            html.b([], [txt(app.base_name(path))]),
+            html.small([], [txt(app.relative(model, path))]),
+            html.span([class("count")], [txt(int.to_string(list.length(mine)))]),
+          ]),
+          ..list.map(list.take(mine, 200), fn(h) {
+            html.button([class("hit"), event.on_click(app.Jumped(h.path, h.line, h.col))], [
+              html.span([], [txt(buffer.cut(h.text, 0, h.col) |> string.trim_start)]),
+              html.mark([], [txt(buffer.cut(h.text, h.col, h.col + h.length))]),
+              html.span([], [txt(buffer.cut(h.text, h.col + h.length, 400))]),
+            ])
+          })
+        ]
+      }),
+    ),
+  ]
+}
+
+def extensions(model: Model) -> List(Element(Msg)) {
+  mine = list.filter(model.extensions, fn(e) { not e.builtin }) |> list.reverse
+  builtin = list.filter(model.extensions, fn(e) { e.builtin })
+  installed = list.map(model.extensions, fn(e) { string.lowercase(e.id) })
+  tab = fn(name: String, label: String, count: Int) {
+    html.button(
+      [attribute.classes([("ext-tab", True), ("on", model.ext_tab == name)]), attribute.role("tab"), event.on_click(app.ExtTab(name))],
+      [txt(label), html.span([class("count")], [txt(int.to_string(count))])],
+    )
+  }
+  [
+    html.header([], [
+      html.b([], [txt("Extensions")]),
+      html.button([class("button small"), event.on_click(app.InstallClicked)], [txt("Install VSIX…")]),
+    ]),
+    html.div([class("search-form")], [
+      html.div([class("field")], [
+        html.input([
+          attribute.id("runes-market"),
+          attribute.placeholder("Search the marketplace (Open VSX)"),
+          attribute.value(model.market_query),
+          attribute.spellcheck(False),
+          attribute.attribute("aria-label", "Search the marketplace"),
+          event.on_input(app.MarketTyped),
+          on_enter(app.MarketRan),
+        ]),
+        html.button([class("mini"), event.on_click(app.MarketRan), ..labelled("Search")], [icon("search")]),
+      ]),
+    ]),
+    html.div([class("ext-tabs"), attribute.role("tablist")], [
+      tab("installed", "Installed", list.length(mine)),
+      tab("market", "Marketplace", list.length(model.market)),
+      tab("builtin", "Built in", list.length(builtin)),
+    ]),
+    html.div([class("ext-scroll")], case model.ext_tab {
+      "market" -> [
+        case model.market_note {
+          "" -> element.none()
+          note -> html.p([class("hint")], [txt(note)])
+        },
+        case model.market, model.market_note {
+          [], "" -> html.p([class("hint")], [txt("Type above and press Enter to search Open VSX.")])
+          found, _ ->
+            html.div([class("ext-list")], list.map(found, fn(item) {
+              (namespace, name, display, description, version, downloads, picture) = item
+              have = list.contains(installed, string.lowercase(namespace <> "." <> name))
+              html.button([class("ext"), attribute.title("Open " <> display), event.on_click(app.MarketOpened(namespace, name))], [
+                badge(dict.get(model.icons, picture) |> unwrap(""), display),
+                html.div([class("ext-text")], [
+                  html.b([], [txt(display)]),
+                  html.small([], [txt(namespace <> " · " <> version <> " · " <> short(downloads) <> " installs")]),
+                  html.p([], [txt(description)]),
+                ]),
+                case have {
+                  True -> html.span([class("pill")], [txt("Installed")])
+                  False -> element.none()
+                },
+              ])
+            }))
+        },
+      ]
+      "builtin" -> [
+        html.p([class("hint")], [txt("Syntax colouring for common languages, the Runes Void theme and file icons. Nothing here runs code.")]),
+        html.div([class("ext-list compact")], list.map(builtin, row)),
+      ]
+      _ -> [
+        case mine {
+          [] -> html.p([class("hint")], [
+            txt("Nothing yet. Search the marketplace above, or drop a .vsix file on the window. Language servers, more themes and more languages are added this way."),
+          ])
+          _ -> keyed.div([class("ext-list")], list.map(mine, fn(e) { (e.id, row(e)) }))
+        },
+      ]
+    }),
+  ]
+}
+
+def section_title(name: String, count: Int) -> Element(Msg) {
+  html.div([class("section")], [html.b([], [txt(name)]), html.span([class("count")], [txt(int.to_string(count))])])
+}
+
+/// 1234567 as "1.2M".
+def short(n: Int) -> String {
+  cond {
+    n >= 1_000_000 -> int.to_string(n / 1_000_000) <> "." <> int.to_string(n % 1_000_000 / 100_000) <> "M"
+    n >= 1000 -> int.to_string(n / 1000) <> "k"
+    _ -> int.to_string(n)
+  }
+}
+
+/// What an extension brings, in a few words.
+def brings(e: Extension) -> String {
+  count = fn(n: Int, one: String, many: String) {
+    case n {
+      0 -> []
+      1 -> [one]
+      _ -> [int.to_string(n) <> " " <> many]
+    }
+  }
+  list.flatten([
+    count(list.length(e.grammars), "syntax", "syntaxes"),
+    count(list.length(e.themes), "theme", "themes"),
+    count(list.length(e.icon_themes), "file icons", "icon themes"),
+    count(list.length(e.snippets), "snippets", "snippet sets"),
+    case e.main {
+      "" -> []
+      _ -> ["runs code"]
+    },
+  ])
+  |> string.join(" · ")
+}
+
+/// One extension in a list. Clicking it opens its page, where it is installed or removed.
+def row(e: Extension) -> Element(Msg) {
+  html.button([attribute.classes([("ext", True), ("runs", e.main != "")]), attribute.title("Open " <> e.name), event.on_click(app.ExtOpened(e.id))], [
+    badge(extension_icon(e.id, e.icon), e.name),
+    html.div([class("ext-text")], [
+      html.b([], [txt(e.name)]),
+      html.small([], [txt(case e.builtin {
+        True -> brings(e)
+        False -> e.publisher <> " · " <> e.version <> " · " <> brings(e)
+      })]),
+      case e.builtin, e.description {
+        True, _ | _, "" -> element.none()
+        False, text -> html.p([], [txt(text)])
+      },
+    ]),
+  ])
+}
+
+/// An extension's own page: what it is, its readme, and the button that installs or removes it.
+def extension_view(model: Model, key: String) -> Element(Msg) {
+  installed = list.find(model.extensions, fn(e) { string.lowercase(e.id) == key })
+  case dict.get(model.pages, key) {
+    Error(_) -> html.div([class("page")], [html.p([class("hint pad")], [txt("This extension's page is no longer open. Open it again from the Extensions view.")])])
+    Ok(page) -> {
+      picture = case installed {
+        Ok(e) if e.icon != "" -> extension_icon(e.id, e.icon)
+        _ -> dict.get(model.icons, page.picture) |> unwrap("")
+      }
+      title = case installed {
+        Ok(e) -> e.name
+        Error(_) -> page.title
+      }
+      html.div([class("page ext-page")], [
+        html.div([class("page-inner")], [
+          html.div([class("ext-head")], [
+            badge(picture, title),
+            html.div([class("ext-about")], [
+              html.h1([], [txt(title)]),
+              html.small([], [txt(
+                page.namespace <> " · " <> case installed {
+                  Ok(e) -> e.version
+                  Error(_) -> page.version
+                } <> case page.installs {
+                  0 -> ""
+                  n -> " · " <> short(n) <> " installs"
+                } <> " · " <> page.namespace <> "." <> page.name,
+              )]),
+              html.p([], [txt(case installed {
+                Ok(e) if e.description != "" -> e.description
+                _ -> page.description
+              })]),
+              html.div([class("ext-actions")], case installed {
+                Ok(e) if e.builtin -> [html.span([class("pill")], [txt("Built in")])]
+                Ok(e) -> [
+                  html.span([class("pill on")], [txt("Installed")]),
+                  html.button([class("button small danger"), attribute.attribute("aria-label", "Uninstall " <> e.name), event.on_click(app.Removed(e.id))], [
+                    txt("Uninstall"),
+                  ]),
+                ]
+                Error(_) -> [
+                  html.button([class("button"), event.on_click(app.MarketInstalled(page.namespace, page.name))], [txt("Install")]),
+                  html.small([], [txt(model.market_note)]),
+                ]
+              }),
+            ]),
+          ]),
+          ..list.append(
+            case installed {
+              Ok(e) -> [
+                html.h2([], [txt("What it adds")]),
+                html.div([class("chips")], list.flatten([
+                  list.map(e.languages, fn(l) { html.span([class("chip")], [txt("language: " <> l.id)]) }),
+                  list.map(e.themes, fn(t) { html.span([class("chip")], [txt("theme: " <> t.label)]) }),
+                  list.map(e.icon_themes, fn(t) { html.span([class("chip")], [txt("file icons: " <> t.label)]) }),
+                  list.map(e.commands, fn(c) { html.span([class("chip")], [txt("command: " <> c.1)]) }),
+                  case e.snippets {
+                    [] -> []
+                    found -> [html.span([class("chip")], [txt(int.to_string(list.length(found)) <> " snippet sets")])]
+                  },
+                  case e.main {
+                    "" -> [html.span([class("chip")], [txt("data only: runs no code")])]
+                    _ -> [html.span([class("chip warn")], [txt("runs code")])]
+                  },
+                ])),
+              ]
+              Error(_) -> []
+            },
+            [
+              html.h2([], [txt("Readme")]),
+              case page.loading, page.readme {
+                True, _ -> html.p([class("lede")], [txt("Fetching the readme…")])
+                False, "" -> html.p([class("lede")], [txt("This extension has no readme.")])
+                False, text -> element.unsafe_raw_html("", "div", [class("markdown")], markdown_text("ext:" <> key, text))
+              },
+            ],
+          )
+        ]),
+      ])
+    }
+  }
+}
+
+/// A Markdown file, drawn. It follows the open file as it is typed.
+def preview_view(model: Model, path: String) -> Element(Msg) {
+  case app.find_doc(model, path) {
+    Some(d) ->
+      html.div([class("page markdown-page")], [
+        html.div([class("page-inner")], [element.unsafe_raw_html("", "div", [class("markdown")], markdown_html(path, d.version, d.lines))]),
+      ])
+    None -> html.div([class("page")], [html.p([class("hint pad")], [txt("The file this previews has been closed.")])])
+  }
+}
+
+// --- The SSH workbench -----------------------------------------------------------------------
+
+/// Saved sessions, the form that edits one, and the machine that is connected.
+def ssh_view(model: Model) -> List(Element(Msg)) {
+  field = fn(label: String, name: String, value: String, hint: String, id: String) {
+    html.label([class("ssh-field")], [
+      html.span([], [txt(label)]),
+      html.input([
+        attribute.id(id),
+        attribute.value(value),
+        attribute.placeholder(hint),
+        attribute.spellcheck(False),
+        attribute.autocomplete("off"),
+        attribute.attribute("aria-label", "SSH " <> name),
+        event.on_input(fn(text) { app.SshField(name, text) }),
+        on_enter(app.SshFormSaved),
+      ]),
+    ])
+  }
+  [
+    html.header([], [
+      html.b([], [txt("SSH")]),
+      html.button([class("button small"), event.on_click(app.SshEdit(""))], [txt("New session")]),
+    ]),
+    html.div([class("ext-scroll ssh")], [
+      case model.ssh_on {
+        Some((id, name)) ->
+          html.div([class("ssh-live")], [
+            html.div([class("ssh-live-head")], [
+              html.span([class("pill on")], [txt("Connected")]),
+              html.b([], [txt(name)]),
+            ]),
+            html.small([], [txt(case list.find(model.ssh, fn(s) { s.id == id }) {
+              Ok(s) -> s.user <> "@" <> s.host <> case s.port {
+                22 -> ""
+                port -> ":" <> int.to_string(port)
+              }
+              Error(_) -> ""
+            })]),
+            html.label([class("ssh-field")], [
+              html.span([], [txt("Folder")]),
+              html.div([class("field")], [
+                html.input([
+                  attribute.value(model.ssh_path),
+                  attribute.spellcheck(False),
+                  attribute.attribute("aria-label", "Folder on the connected machine"),
+                  event.on_input(app.SshPathTyped),
+                  on_enter(app.SshPathGo),
+                ]),
+                html.button([class("mini"), event.on_click(app.SshPathGo), ..labelled("Open this folder")], [icon("chevron")]),
+              ]),
+            ]),
+            html.p([class("hint")], [
+              txt("The explorer, search, source control and new terminals are all on " <> name <> ". Nothing was installed there. Language servers rest while connected: they run on this machine and could not see those files."),
+            ]),
+            html.button([class("button small danger"), event.on_click(app.SshDisconnect)], [txt("Disconnect")]),
+          ])
+        None -> element.none()
+      },
+      case model.ssh_note {
+        "" -> element.none()
+        note -> html.p([class("hint ssh-note"), attribute.role("status")], [txt(note)])
+      },
+      case model.ssh_form {
+        Some(s) ->
+          html.div([class("ssh-form")], [
+            html.b([], [txt(case s.id {
+              "" -> "New session"
+              _ -> "Edit session"
+            })]),
+            field("Name", "name", s.name, "build box", "runes-ssh-name"),
+            field("Host", "host", s.host, "host name or address", "runes-ssh-host"),
+            html.div([class("ssh-pair")], [
+              field("User", "user", s.user, "you", "runes-ssh-user"),
+              field("Port", "port", case s.port {
+                0 -> ""
+                port -> int.to_string(port)
+              }, "22", "runes-ssh-port"),
+            ]),
+            field("Key file (optional)", "key", s.key, "~/.ssh/id_ed25519", "runes-ssh-key"),
+            field("Folder to open (optional)", "folder", s.folder, "~/project", "runes-ssh-folder"),
+            html.div([class("ssh-actions")], [
+              html.button([class("button small"), event.on_click(app.SshFormSaved)], [txt("Save")]),
+              html.button([class("button small quiet"), event.on_click(app.SshFormClosed)], [txt("Cancel")]),
+            ]),
+          ])
+        None -> element.none()
+      },
+      case model.ssh {
+        [] -> html.p([class("hint")], [
+          txt("No sessions yet. A session is a machine, who to be on it, and a folder to open there. Passwords are asked for when connecting and never kept."),
+        ])
+        sessions ->
+          keyed.div([class("ssh-list")], list.map(sessions, fn(s) {
+            on = model.ssh_on |> option.map(fn(o) { o.0 == s.id }) |> option.unwrap(False)
+            busy = model.ssh_busy == s.id
+            (
+              s.id,
+              html.div([attribute.classes([("ssh-session", True), ("on", on)])], [
+                html.div([class("ssh-about")], [
+                  html.b([], [txt(s.name)]),
+                  html.small([], [txt(s.user <> "@" <> s.host <> case s.port {
+                    22 -> ""
+                    port -> ":" <> int.to_string(port)
+                  } <> case s.folder {
+                    "" -> ""
+                    folder -> " · " <> folder
+                  })]),
+                ]),
+                html.div([class("ssh-buttons")], [
+                  case on, busy {
+                    True, _ -> html.span([class("pill on")], [txt("Connected")])
+                    False, True -> html.span([class("pill")], [txt("Connecting…")])
+                    False, False ->
+                      html.button(
+                        [class("button small"), attribute.disabled(model.ssh_busy != ""), attribute.attribute("aria-label", "Connect to " <> s.name), event.on_click(app.SshConnect(s.id))],
+                        [txt("Connect")],
+                      )
+                  },
+                  html.button([class("mini"), event.on_click(app.SshEdit(s.id)), ..labelled("Edit " <> s.name)], [icon("edit")]),
+                  case s.known {
+                    True -> html.button([class("mini"), event.on_click(app.SshForgot(s.id)), ..labelled("Forget the key of " <> s.host <> ", to be asked about it again")], [icon("key")])
+                    False -> element.none()
+                  },
+                  html.button([class("mini"), event.on_click(app.SshRemoved(s.id)), ..labelled("Remove " <> s.name)], [icon("close")]),
+                ]),
+              ]),
+            )
+          }))
+      },
+      html.div([class("ssh-foot")], [
+        html.button([class("link"), event.on_click(app.SshImportClicked)], [txt("Add the hosts in ~/.ssh/config")]),
+        html.p([class("hint")], [
+          txt("Signing in tries your SSH agent, then your key files, then asks for a password. The first time, the machine's key is shown for you to accept; after that a different key is refused."),
+        ]),
+      ]),
+    ]),
+  ]
+}
+
+/// A question from the shell: a password, a passphrase, a path, or whether to trust a machine.
+def prompt_view(model: Model) -> Element(Msg) {
+  case model.prompt {
+    None -> element.none()
+    Some(p) ->
+      html.div([class("veil prompt-veil")], [
+        html.div([class("prompt"), attribute.role("dialog"), attribute.attribute("aria-label", p.title)], [
+          html.b([], [txt(p.title)]),
+          html.p([], [txt(p.detail)]),
+          case p.kind {
+            "confirm" -> element.none()
+            kind ->
+              html.input([
+                attribute.id("runes-prompt"),
+                attribute.type_(case kind {
+                  "secret" -> "password"
+                  _ -> "text"
+                }),
+                attribute.value(p.text),
+                attribute.spellcheck(False),
+                attribute.autocomplete("off"),
+                attribute.attribute("aria-label", p.title),
+                event.on_input(app.PromptTyped),
+                event.on("keydown", {
+                  use key <- decode.field("key", decode.string)
+                  case key {
+                    "Enter" -> decode.success(app.PromptAnswered(True))
+                    "Escape" -> decode.success(app.PromptAnswered(False))
+                    _ -> decode.failure(app.PromptAnswered(False), "another key")
+                  }
+                }) |> event.stop_propagation,
+              ])
+          },
+          html.div([class("prompt-actions")], [
+            html.button([class("button small quiet"), event.on_click(app.PromptAnswered(False))], [txt("Cancel")]),
+            html.button(
+              [class("button small"), attribute.id(case p.kind {
+                "confirm" -> "runes-prompt"
+                _ -> "runes-prompt-ok"
+              }), event.on_click(app.PromptAnswered(True))],
+              [txt(case p.kind {
+                "confirm" -> "Trust and connect"
+                "secret" -> "Sign in"
+                _ -> "OK"
+              })],
+            ),
+          ]),
+        ]),
+      ])
+  }
+}
+
+// --- Source control ------------------------------------------------------------------------------
+
+def source_control(model: Model) -> List(Element(Msg)) {
+  staged = list.filter(model.changes, fn(c) { c.1 != " " })
+  unstaged = list.filter(model.changes, fn(c) { c.2 != " " })
+  file = fn(change: (String, String, String), is_staged: Bool) {
+    (path, index, work) = change
+    letter = case is_staged, work {
+      True, _ -> index
+      False, "?" -> "U"
+      False, _ -> work
+    }
+    html.div([class("change")], [
+      html.span([class("state state-" <> letter)], [txt(letter)]),
+      html.button(
+        [class("change-name"), attribute.title("Show what changed in " <> path), event.on_click(app.CompareOpened("HEAD", "", path))],
+        [txt(app.base_name(path)), html.small([], [txt(" " <> path)])],
+      ),
+      html.button([class("mini"), event.on_click(app.FileOpened(model.root <> "/" <> path)), ..labelled("Open " <> path)], [icon("open")]),
+      html.button(
+        [class("mini"), event.on_click(app.GitStaged([path], not is_staged)), ..labelled(case is_staged {
+          True -> "Unstage " <> path
+          False -> "Stage " <> path
+        })],
+        [icon(case is_staged {
+          True -> "minus"
+          False -> "plus"
+        })],
+      ),
+    ])
+  }
+  [
+    html.header([], [
+      html.b([], [txt("Source Control")]),
+      html.span([], [
+        html.button([class("mini"), event.on_click(app.GitRefresh), ..labelled("Refresh")], [icon("refresh")]),
+        html.button([class("button small"), event.on_click(app.Ran("runes.gitGraph"))], [txt("Graph")]),
+      ]),
+    ]),
+    ..case model.repo {
+      False -> [html.p([class("hint")], [txt("This folder is not a git repository. Run `git init` in the terminal to start one.")])]
+      True -> [
+        html.div([class("branch-line")], [
+          icon("git"),
+          html.button([class("link branch-switch"), event.on_click(app.Ran("git.checkout")), ..labelled("Switch branch")], [
+            html.b([], [txt(model.branch)]),
+            icon("down"),
+          ]),
+          html.small([], [txt(case model.ahead, model.behind {
+            0, 0 -> ""
+            a, b -> "↑" <> int.to_string(a) <> " ↓" <> int.to_string(b)
+          })]),
+        ]),
+        html.div([class("chat-form commit-form")], [
+          html.textarea(
+            [
+              attribute.id("runes-commit"),
+              attribute.placeholder("Commit message. Ctrl+Enter commits what is staged."),
+              attribute.attribute("aria-label", "Commit message"),
+              attribute.property("value", string_json(model.message)),
+              event.on_input(app.GitMessageTyped),
+              event.on("keydown", {
+                use key <- decode.field("key", decode.string)
+                use ctrl <- decode.field("ctrlKey", decode.bool)
+                case key, ctrl {
+                  "Enter", True -> decode.success(app.GitCommitted)
+                  _, _ -> decode.failure(app.GitCommitted, "another key")
+                }
+              }),
+            ],
+            "",
+          ),
+          html.button([class("button"), attribute.disabled(staged == []), event.on_click(app.GitCommitted)], [
+            txt("Commit " <> int.to_string(list.length(staged)) <> " staged"),
+          ]),
+        ]),
+        html.div([class("ext-scroll")], [
+          html.div([class("section")], [
+            html.b([], [txt("Sessions")]),
+            html.span([class("count")], [txt(int.to_string(list.length(model.sessions)))]),
+            html.button([class("link"), event.on_click(app.Ran("runes.compare"))], [txt("Compare…")]),
+          ]),
+          case model.sessions {
+            [] -> html.p([class("hint")], [txt("Each commit or comparison you open is kept here as a session, with its own tab.")])
+            sessions ->
+              html.div([class("sessions")], list.map(sessions, fn(c) {
+                html.div([attribute.classes([("change", True), ("session", True), ("on", app.group(model, model.focus).active == app.diff_tab <> int.to_string(c.id))])], [
+                  html.span([class("state")], [icon("git")]),
+                  html.button([class("change-name"), event.on_click(app.SessionPicked(c.id))], [
+                    txt(app.session_title(model, c)),
+                    html.small([], [txt(" " <> int.to_string(list.length(c.files)) <> case list.length(c.files) {
+                      1 -> " file"
+                      _ -> " files"
+                    })]),
+                  ]),
+                  html.button([class("mini"), event.on_click(app.SessionClosed(c.id)), ..labelled("Close session " <> app.session_title(model, c))], [icon("close")]),
+                ])
+              }))
+          },
+          section_title("Staged", list.length(staged)),
+          html.div([], list.map(staged, file(_, True))),
+          html.div([class("section")], [
+            html.b([], [txt("Changes")]),
+            html.span([class("count")], [txt(int.to_string(list.length(unstaged)))]),
+            case unstaged {
+              [] -> element.none()
+              _ -> html.button([class("link"), event.on_click(app.GitStaged(list.map(unstaged, fn(c) { c.0 }), True))], [txt("Stage all")])
+            },
+          ]),
+          html.div([], list.map(unstaged, file(_, False))),
+          case model.changes {
+            [] -> html.p([class("hint")], [txt("No changes. The working tree matches the last commit.")])
+            _ -> element.none()
+          },
+        ]),
+      ]
+    }
+  ]
+}
+
+def chat(model: Model) -> List(Element(Msg)) {
+  [
+    html.header([], [
+      html.b([], [txt("Chat")]),
+      html.button([class("link"), event.on_click(app.ChatCleared)], [txt("New chat")]),
+    ]),
+    html.div([class("chat-log")], case model.chat {
+      [] -> [
+        html.p([class("hint")], [
+          txt(
+            "Ask about the open file or anything else. Runes talks to " <> model.settings.ai_provider
+            <> " with your own key: run \"Runes: Set AI API Key\" once to store it.",
+          ),
+        ]),
+      ]
+      messages ->
+        list.map(messages, fn(m) {
+          html.div([class("bubble " <> m.role)], [
+            html.small([], [txt(case m.role {
+              "user" -> "You"
+              "problem" -> "Problem"
+              _ -> "Assistant"
+            })]),
+            html.pre([], [txt(case m.text, model.chat_busy {
+              "", True -> "…"
+              text, _ -> text
+            })]),
+          ])
+        })
+    }),
+    html.div([class("chat-form")], [
+      html.textarea(
+        [
+          attribute.id("runes-chat"),
+          attribute.placeholder("Ask something. Ctrl+Enter sends."),
+          attribute.attribute("aria-label", "Message"),
+          attribute.property("value", model.draft |> string_json),
+          event.on_input(app.ChatTyped),
+          event.on("keydown", {
+            use key <- decode.field("key", decode.string)
+            use ctrl <- decode.field("ctrlKey", decode.bool)
+            case key, ctrl {
+              "Enter", True -> decode.success(app.ChatSent)
+              _, _ -> decode.failure(app.ChatSent, "another key")
+            }
+          }),
+        ],
+        "",
+      ),
+      html.div([class("chat-actions")], [
+        html.label([], [
+          html.input([attribute.type_("checkbox"), attribute.checked(model.chat_attach), event.on_check(fn(_) { app.ChatAttachToggled })]),
+          txt(" Attach the open file"),
+        ]),
+        html.button([class("button small"), attribute.disabled(model.chat_busy), event.on_click(app.ChatSent)], [
+          txt(case model.chat_busy {
+            True -> "Answering…"
+            False -> "Send"
+          }),
+        ]),
+      ]),
+    ]),
+  ]
+}
+
+@external(javascript, "../runes_ffi.mjs", "identity")
+def string_json(text: String) -> a
+
+// --- The tiled editor area -------------------------------------------------------------------
+
+def tiles(model: Model, at: Layout, path: String) -> Element(Msg) {
+  case model.maximized, at {
+    True, _ -> group_view(model, app.group(model, model.focus))
+    False, Leaf(id) -> group_view(model, app.group(model, id))
+    False, Split(row, ratio, first, second) ->
+      html.div(
+        [attribute.id("split-" <> path), attribute.classes([("split", True), ("across", row), ("stacked", not row)])],
+        [
+          html.div([class("pane"), attribute.style("flex", float.to_string(ratio) <> " 1 0")], [tiles(model, first, path <> "0")]),
+          html.div(
+            [
+              class("sash"),
+              attribute.role("separator"),
+              event.on("mousedown", decode.success(app.SashGrabbed(path, row))) |> event.prevent_default,
+            ],
+            [],
+          ),
+          html.div([class("pane"), attribute.style("flex", float.to_string(1.0 -. ratio) <> " 1 0")], [
+            tiles(model, second, path <> "1"),
+          ]),
+        ],
+      )
+  }
+}
+
+def group_view(model: Model, g: Group) -> Element(Msg) {
+  focused = g.id == model.focus
+  html.section(
+    [attribute.classes([("group", True), ("focused", focused)]), attribute.attribute("data-group", int.to_string(g.id))],
+    [
+      html.div([class("tabbar")], [
+        keyed.div(
+          [class("tabs"), attribute.role("tablist")],
+          list.filter_map(g.tabs, fn(path) {
+            case app.find_doc(model, path) {
+              None -> Error(Nil)
+              Some(d) ->
+                Ok((
+                  path,
+                  html.div(
+                    [
+                      attribute.classes([("tab", True), ("on", path == g.active), ("dirty", doc.dirty(d))]),
+                      attribute.attribute("draggable", "true"),
+                      attribute.attribute("data-path", path),
+                      event.on("dragstart", decode.success(app.TabDragged(path, g.id))),
+                      event.on("dragend", decode.success(app.DragEnded)),
+                    ],
+                    [
+                      html.button(
+                        [
+                          class("tab-name"),
+                          attribute.role("tab"),
+                          attribute.title(path),
+                          event.on_click(app.TabPicked(g.id, path)),
+                          // A terminal's tab is renamed where it is.
+                          ..case string.starts_with(path, app.terminal_tab) {
+                            True -> [event.on("dblclick", decode.success(app.TerminalRename(int.parse(string.drop_start(path, string.length(app.terminal_tab))) |> unwrap(0))))]
+                            False -> []
+                          }
+                        ],
+                        [
+                          case string.starts_with(path, app.terminal_tab) {
+                            True -> html.span([class("glyph")], [icon("terminal")])
+                            False -> glyph(d.name, False, False, d.language)
+                          },
+                          txt(d.name),
+                        ],
+                      ),
+                      html.button(
+                        [class("tab-close"), attribute.attribute("aria-label", "Close " <> d.name), event.on_click(app.TabClosed(g.id, path))],
+                        [html.span([class("unsaved")], []), html.span([class("cross")], [icon("close")])],
+                      ),
+                    ],
+                  ),
+                ))
+            }
+          }),
+        ),
+        html.div([class("tab-actions")], [
+          case app.find_doc(model, g.active) {
+            Some(d) if d.language == "markdown" ->
+              html.button([class("mini"), event.on_click(app.Ran("markdown.showPreviewToSide")), ..labelled("Open Preview to the Side")], [icon("preview")])
+            _ -> element.none()
+          },
+          html.button([class("mini"), event.on_click(app.Ran("workbench.action.splitEditor")), ..labelled("Split Editor Right (Ctrl+\\)")], [
+            icon("split"),
+          ]),
+          html.button(
+            [
+              attribute.classes([("mini", True), ("on", model.maximized)]),
+              event.on_click(app.GroupMaximized(g.id)),
+              ..labelled("Maximize Group (Ctrl+Alt+M)")
+            ],
+            [icon("maximize")],
+          ),
+        ]),
+      ]),
+      case app.find_doc(model, g.active) {
+        Some(d) if d.path == app.settings_tab -> special(g, focused, settings_view(model))
+        Some(d) if d.path == app.graph_tab -> special(g, focused, graph_view(model))
+        Some(d) if d.language == "runes" -> {
+          after = fn(prefix: String) { string.drop_start(d.path, string.length(prefix)) }
+          cond {
+            string.starts_with(d.path, app.terminal_tab) -> special(g, focused, terminal_tile(model, int.parse(after(app.terminal_tab)) |> unwrap(0)))
+            string.starts_with(d.path, app.extension_tab) -> special(g, focused, extension_view(model, after(app.extension_tab)))
+            string.starts_with(d.path, app.preview_tab) -> special(g, focused, preview_view(model, after(app.preview_tab)))
+            app.session_of(d.path) != 0 -> special(g, focused, diff_view(model, app.session(model, app.session_of(d.path))))
+            _ -> welcome(model)
+          }
+        }
+        Some(d) -> case string.starts_with(d.path, app.at_tab) {
+          True -> element.fragment([time_bar(model, string.drop_start(d.path, string.length(app.at_tab))), editor(model, g, d, focused)])
+          False -> editor(model, g, d, focused)
+        }
+        None -> welcome(model)
+      },
+      case model.drag {
+        None -> element.none()
+        Some(_) -> zones(model, g.id)
+      },
+    ],
+  )
+}
+
+/// A view that is not text. Clicking in it makes its group the one the keyboard and the
+/// commands act on, as clicking in an editor does.
+def special(g: Group, focused: Bool, body: Element(Msg)) -> Element(Msg) {
+  html.div(
+    [class("special"), ..case focused {
+      True -> []
+      False -> [event.on("mousedown", decode.success(app.GroupFocused(g.id)))]
+    }],
+    [body],
+  )
+}
+
+/// A terminal sitting among the editors: the same running shell, moved, not restarted.
+def terminal_tile(model: Model, id: Int) -> Element(Msg) {
+  keyed.div([class("term-tile")], [
+    (
+      int.to_string(id),
+      element.element(
+        "runes-terminal",
+        [
+          class("shown"),
+          attribute.attribute("term", int.to_string(id)),
+          attribute.attribute("cwd", model.root),
+          attribute.attribute("shell", model.settings.shell),
+          attribute.attribute("autofocus", ""),
+        ],
+        [],
+      ),
+    ),
+    (
+      "tools",
+      html.div([class("term-tools")], [
+        html.button([class("mini"), event.on_click(app.TerminalRename(id)), ..labelled("Rename this terminal")], [icon("edit")]),
+        html.button([class("mini"), event.on_click(app.TerminalMoved(id, False)), ..labelled("Move this terminal back into the panel")], [icon("dock")]),
+      ]),
+    ),
+    (
+      "rename",
+      case model.renaming {
+        Some((renamed, text)) if renamed == id ->
+          html.div([class("term-renaming")], [
+            html.input([
+              attribute.id("runes-rename"),
+              class("term-rename"),
+              attribute.value(text),
+              attribute.spellcheck(False),
+              attribute.attribute("aria-label", "Name of terminal " <> int.to_string(id)),
+              event.on_input(app.TerminalRenameTyped),
+              event.on("keydown", {
+                use key <- decode.field("key", decode.string)
+                case key {
+                  "Enter" -> decode.success(app.TerminalRenamed(True))
+                  "Escape" -> decode.success(app.TerminalRenamed(False))
+                  _ -> decode.failure(app.TerminalRenamed(False), "another key")
+                }
+              }) |> event.stop_propagation,
+              event.on_blur(app.TerminalRenamed(True)),
+            ]),
+          ])
+        _ -> element.none()
+      },
+    ),
+  ])
+}
+
+/// Where a dragged tab can be let go: the middle joins the group, an edge splits it.
+def zones(model: Model, group_id: Int) -> Element(Msg) {
+  zone = fn(edge: Edge, name: String) {
+    html.div(
+      [
+        attribute.classes([("zone", True), (name, True), ("over", model.drop == Some((group_id, edge)))]),
+        event.on("dragover", decode.success(app.DropHover(group_id, edge))) |> event.prevent_default,
+        event.on("drop", decode.success(app.Dropped(group_id, edge))) |> event.prevent_default,
+      ],
+      [],
+    )
+  }
+  html.div([class("zones")], [
+    zone(layout.Middle, "z-middle"),
+    zone(layout.Left, "z-left"),
+    zone(layout.Right, "z-right"),
+    zone(layout.Top, "z-top"),
+    zone(layout.Bottom, "z-bottom"),
+  ])
+}
+
+def welcome(model: Model) -> Element(Msg) {
+  key = fn(command: String, what: String) {
+    html.div([class("key-row")], [html.span([], [txt(what)]), html.kbd([], [txt(keymap.key_for(model.bindings, command))])])
+  }
+  html.div([class("welcome")], [
+    logo("logo"),
+    html.h1([], [txt("runes")]),
+    html.p([], [txt(case model.ready {
+      True -> "A code editor written in Gleam and JS."
+      False -> "Loading extensions…"
+    })]),
+    html.div([class("keys")], [
+      key("workbench.action.quickOpen", "Go to file"),
+      key("workbench.action.showCommands", "All commands"),
+      key("workbench.action.terminal.toggleTerminal", "Terminal"),
+      key("runes.pie", "Pie menu (or hold right click)"),
+      key("workbench.action.openSettings", "Settings"),
+    ]),
+  ])
+}
+
+// --- The text ---------------------------------------------------------------------------------
+
+def editor(model: Model, g: Group, d: Doc, focused: Bool) -> Element(Msg) {
+  row = app.row(model)
+  language = app.lang(model, d.language)
+  total = list.length(d.lines)
+  scrolled = app.top(model, g.id, d.path)
+  tall = app.height(model, g.id)
+  first = int.max(scrolled / row - 8, 0)
+  shown = tall / row + 18
+  rows = tokens(d.path, language.scope, d.version, d.lines, first, shown)
+  visible = d.lines |> list.drop(first) |> list.take(shown) |> list.index_map(fn(text, i) { (first + i, text) })
+  final = first + shown
+  gutter = int.max(string.length(int.to_string(total)), 2) + 4
+  cursor_line = buffer.line(d.lines, d.cursor.line)
+  caret_left = gutter + doc.vcol(cursor_line, d.cursor.col)
+  caret_top = d.cursor.line * row
+  problems = app.problems(model, d.path)
+  box = fn(key: String, name: String, n: Int, text: String, start: Int, end: Int) {
+    left = doc.vcol(text, start)
+    (
+      key,
+      html.div(
+        [
+          class(name),
+          attribute.styles([("top", px(n * row)), ("left", ch(gutter + left)), ("width", ch(int.max(doc.vcol(text, end) - left, 1)))]),
+        ],
+        [],
+      ),
+    )
+  }
+
+  // One band per line for each selection, the main cursor's and any further ones.
+  band = fn(range: (buffer.Pos, buffer.Pos), tag: String) {
+    (from, to) = buffer.ordered(range.0, range.1)
+    case from == to {
+      True -> []
+      False ->
+        list.filter(visible, fn(line) { line.0 >= from.line and line.0 <= to.line })
+        |> list.map(fn(line) {
+          (n, text) = line
+          start = case n == from.line {
+            True -> from.col
+            False -> 0
+          }
+          end = case n == to.line {
+            True -> to.col
+            False -> buffer.len(text) + 1
+          }
+          (
+            "s" <> tag <> int.to_string(n),
+            html.div(
+              [
+                class("sel"),
+                attribute.styles([
+                  ("top", px(n * row)),
+                  ("left", ch(gutter + doc.vcol(text, start))),
+                  ("width", ch(case n == to.line {
+                    True -> doc.vcol(text, end) - doc.vcol(text, start)
+                    False -> doc.vcol(text, buffer.len(text)) + 1 - doc.vcol(text, start)
+                  })),
+                ]),
+              ],
+              [],
+            ),
+          )
+        })
+    }
+  }
+  selected = list.index_map(doc.selections(d), fn(range, i) { band(range, int.to_string(i) <> ".") }) |> list.flatten
+  // The further cursors, drawn like the main one.
+  carets = list.index_map(d.more, fn(one, i) { (one.1, i) })
+    |> list.filter(fn(entry) { { entry.0 }.line >= first and { entry.0 }.line < final })
+    |> list.map(fn(entry) {
+      (at, i) = entry
+      (
+        "c" <> int.to_string(i),
+        html.div(
+          [
+            attribute.classes([("caret", True), ("extra", True), ("idle", not focused)]),
+            attribute.styles([("top", px(at.line * row)), ("left", ch(gutter + doc.vcol(buffer.line(d.lines, at.line), at.col)))]),
+          ],
+          [],
+        ),
+      )
+    })
+  found = case model.finding and focused {
+    False -> []
+    True ->
+      list.filter(model.matches, fn(m) { m.0 >= first and m.0 < final })
+      |> list.map(fn(m) {
+        box("f" <> int.to_string(m.0) <> "." <> int.to_string(m.1), "found", m.0, buffer.line(d.lines, m.0), m.1, m.1 + m.2)
+      })
+  }
+  squiggles = list.filter(problems, fn(p) { p.from.line >= first and p.from.line < final })
+    |> list.index_map(fn(p, i) {
+      text = buffer.line(d.lines, p.from.line)
+      end = case p.to.line == p.from.line {
+        True -> int.max(p.to.col, p.from.col + 1)
+        False -> buffer.len(text)
+      }
+      box("q" <> int.to_string(i), "squiggle sev-" <> int.to_string(p.severity), p.from.line, text, p.from.col, end)
+    })
+  marked = list.map(problems, fn(p) { (p.from.line, p.severity) })
+  // What differs from the last commit, drawn as a strip at the left edge.
+  changes = case dict.get(model.bases, d.path) {
+    Ok((base_id, base)) ->
+      change_marks(d.path, d.version, base_id, base, d.lines)
+      |> list.filter(fn(m) { m.0 >= first and m.0 < final })
+      |> list.map(fn(m) {
+        (
+          "g" <> int.to_string(m.0) <> m.1,
+          html.div(
+            [
+              class("gm gm-" <> m.1),
+              attribute.style("top", px(m.0 * row)),
+              attribute.title("Show what changed here"),
+              event.on("mousedown", decode.success(app.ChangePeeked(g.id, m.0))) |> event.stop_propagation,
+            ],
+            [],
+          ),
+        )
+      })
+    Error(_) -> []
+  }
+  // The change under a clicked mark, shown in place: what was committed, what is there now.
+  peek = case model.peek {
+    Some((path, line)) if path == d.path -> {
+      (which, total, _, last, old, now) = change_at(d.path, line)
+      case which {
+        0 -> []
+        _ -> [
+          (
+            "peek",
+            html.div(
+              [
+                class("peek"),
+                attribute.styles([("top", px({ last + 1 } * row)), ("left", ch(gutter))]),
+                event.on("mousedown", decode.success(app.GroupFocused(g.id))) |> event.stop_propagation,
+              ],
+              [
+                html.div([class("peek-head")], [
+                  html.b([], [txt("Change " <> int.to_string(which) <> " of " <> int.to_string(total))]),
+                  html.small([], [txt(case old, now {
+                    [], _ -> "added since the last commit"
+                    _, [] -> "removed since the last commit"
+                    _, _ -> "changed since the last commit"
+                  })]),
+                  html.span([class("grow")], []),
+                  html.button([class("mini"), event.on_click(app.ChangePeekMoved(-1)), ..labelled("Previous change (Shift+Alt+F3)")], [icon("up")]),
+                  html.button([class("mini"), event.on_click(app.ChangePeekMoved(1)), ..labelled("Next change (Alt+F3)")], [icon("down")]),
+                  html.button([class("button small danger"), event.on_click(app.ChangeReverted)], [txt("Revert")]),
+                  html.button([class("mini"), event.on_click(app.CompareOpened("HEAD", "", app.relative(model, d.path))), ..labelled("Open the whole comparison")], [
+                    icon("open"),
+                  ]),
+                  html.button([class("mini"), event.on_click(app.ChangePeekClosed), ..labelled("Close (Escape)")], [icon("close")]),
+                ]),
+                html.div([class("peek-body")], list.append(
+                  list.map(old, fn(text) { html.div([class("peek-line gone")], [html.span([class("sign")], [txt("−")]), txt(text)]) }),
+                  list.map(now, fn(text) { html.div([class("peek-line new")], [html.span([class("sign")], [txt("+")]), txt(text)]) }),
+                )),
+              ],
+            ),
+          ),
+        ]
+      }
+    }
+    _ -> []
+  }
+  lines = list.index_map(rows, fn(pieces, i) {
+    n = first + i
+    severity = list.fold(marked, 9, fn(worst, m) {
+      case m.0 == n {
+        True -> int.min(worst, m.1)
+        False -> worst
+      }
+    })
+    (
+      "l" <> int.to_string(n),
+      html.div(
+        [attribute.classes([("row", True), ("current", n == d.cursor.line)]), attribute.style("top", px(n * row))],
+        [
+          html.span([attribute.classes([("ln", True), ("bad", severity == 1), ("warn", severity == 2)]), attribute.style("width", ch(gutter - 2))], [
+            txt(int.to_string(n + 1)),
+          ]),
+          html.span(
+            [class("code"), attribute.style("left", ch(gutter))],
+            list.map(pieces, fn(piece) {
+              case piece.1 {
+                "" -> txt(piece.0)
+                style -> html.span([attribute.attribute("style", style)], [txt(piece.0)])
+              }
+            }),
+          ),
+        ],
+      ),
+    )
+  })
+  widest = list.fold(visible, 0, fn(most, line) { int.max(most, buffer.len(line.1)) })
+
+  html.div([class("editor")], [
+    html.div(
+      [attribute.id("scroller-" <> int.to_string(g.id)), class("scroller"), event.on("scroll", decode.success(app.Scrolled(g.id)))],
+      [
+        keyed.div(
+          [
+            attribute.id("content-" <> int.to_string(g.id)),
+            class("content"),
+            attribute.attribute("data-gutter", int.to_string(gutter)),
+            attribute.attribute("data-group", int.to_string(g.id)),
+            attribute.styles([("height", px({ total + 14 } * row)), ("min-width", ch(gutter + widest + 16))]),
+            event.on("mousedown", {
+              use button <- decode.field("button", decode.int)
+              use x <- decode.field("clientX", whole())
+              use y <- decode.field("clientY", whole())
+              use shift <- decode.field("shiftKey", decode.bool)
+              use alt <- decode.field("altKey", decode.bool)
+              use clicks <- decode.field("detail", decode.int)
+              case button, alt {
+                0, True -> decode.success(app.CursorAdded(g.id, x, y))
+                0, False -> decode.success(app.MouseDown(g.id, x, y, shift, clicks))
+                _, _ -> decode.failure(app.Resized, "another button")
+              }
+            })
+              // Without this the click itself would take the keyboard away from the editor.
+              |> event.prevent_default,
+            event.on("mousemove", {
+              use buttons <- decode.field("buttons", decode.int)
+              use x <- decode.field("clientX", whole())
+              use y <- decode.field("clientY", whole())
+              case buttons {
+                1 -> decode.success(app.MouseDragged(g.id, x, y))
+                _ -> decode.failure(app.Resized, "not dragging")
+              }
+            }),
+          ],
+          list.flatten([
+            [("hl", html.div([class("line-hl"), attribute.style("top", px(caret_top))], []))],
+            selected,
+            found,
+            squiggles,
+            changes,
+            lines,
+            carets,
+            peek,
+            [
+              (
+                "caret",
+                html.div(
+                  [
+                    attribute.classes([
+                      ("caret", True),
+                      ("idle", not focused),
+                      ("beat-a", d.version % 2 == 0),
+                      ("beat-b", d.version % 2 == 1),
+                    ]),
+                    attribute.styles([("top", px(caret_top)), ("left", ch(caret_left))]),
+                  ],
+                  [],
+                ),
+              ),
+            ],
+            case focused {
+              True -> [("suggest", suggestions(model, d, gutter, row))]
+              False -> []
+            },
+            case model.hover {
+              Some(h) if h.group == g.id -> [
+                (
+                  "hover",
+                  html.div(
+                    [
+                      class("hover"),
+                      attribute.role("tooltip"),
+                      attribute.styles([
+                        ("top", px({ h.at.line + 1 } * row + 4)),
+                        ("left", ch(gutter + doc.vcol(buffer.line(d.lines, h.at.line), h.at.col))),
+                      ]),
+                    ],
+                    [html.pre([], [txt(h.text)])],
+                  ),
+                ),
+              ]
+              _ -> []
+            },
+          ]),
+        ),
+      ],
+    ),
+    case model.settings.minimap {
+      False -> element.none()
+      True ->
+        element.element(
+          "runes-minimap",
+          [
+            attribute.attribute("doc", d.path),
+            attribute.attribute("group", int.to_string(g.id)),
+            attribute.attribute("version", int.to_string(d.version)),
+            attribute.attribute("paint", int.to_string(model.paint)),
+            attribute.attribute("top", int.to_string(scrolled)),
+            attribute.attribute("view", int.to_string(tall)),
+            attribute.attribute("total", int.to_string(total)),
+            attribute.attribute(
+              "marks",
+              list.map(marked, fn(m) { int.to_string(m.0) <> ":" <> int.to_string(m.1) }) |> string.join(";"),
+            ),
+            attribute.attribute("aria-hidden", "true"),
+          ],
+          [],
+        )
+    },
+    case model.finding and focused {
+      True -> find_widget(model)
+      False -> element.none()
+    },
+  ])
+}
+
+def suggestions(model: Model, d: Doc, gutter: Int, row: Int) -> Element(Msg) {
+  case model.completion {
+    None -> element.none()
+    Some(c) -> {
+      line = buffer.line(d.lines, d.cursor.line)
+      html.div(
+        [
+          class("suggest"),
+          attribute.role("listbox"),
+          attribute.styles([("top", px({ d.cursor.line + 1 } * row + 4)), ("left", ch(gutter + doc.vcol(line, c.from)))]),
+        ],
+        list.index_map(c.items, fn(item, i) {
+          html.button(
+            [
+              attribute.classes([("option", True), ("on", i == c.index), ("snippet", item.snippet)]),
+              attribute.role("option"),
+              event.on("mousedown", decode.success(app.CompletionPicked(i))) |> event.prevent_default |> event.stop_propagation,
+            ],
+            [
+              html.span([class("kind")], [txt(case item.snippet {
+                True -> "▣"
+                False -> "abc"
+              })]),
+              html.b([], [txt(item.label)]),
+              html.small([], [txt(item.detail)]),
+            ],
+          )
+        }),
+      )
+    }
+  }
+}
+
+def find_widget(model: Model) -> Element(Msg) {
+  q = model.find
+  count = list.length(model.matches)
+  current = case app.doc(model) {
+    Some(d) -> {
+      (from, _) = doc.selection(d)
+      list.index_fold(model.matches, 0, fn(found, m, i) {
+        case m.0 == from.line and m.1 == from.col {
+          True -> i + 1
+          False -> found
+        }
+      })
+    }
+    None -> 0
+  }
+  html.div([class("find"), attribute.role("search")], [
+    html.button(
+      [attribute.classes([("mini", True), ("twist", True), ("open", model.replacing)]), event.on_click(app.FindToggled("replace")), ..labelled("Toggle Replace")],
+      [icon("chevron")],
+    ),
+    html.div([class("find-rows")], [
+      html.div([class("field")], [
+        html.input([
+          attribute.id("runes-find"),
+          attribute.placeholder("Find"),
+          attribute.value(q.text),
+          attribute.spellcheck(False),
+          attribute.attribute("aria-label", "Find"),
+          event.on_input(app.FindTyped),
+        ]),
+        option("Aa", "Match case", q.match_case, app.FindToggled("case")),
+        option("ab", "Match whole word", q.word, app.FindToggled("word")),
+        option(".*", "Use regular expression", q.regex, app.FindToggled("regex")),
+        html.small([class("count")], [txt(case count, q.text {
+          _, "" -> ""
+          0, _ -> "No results"
+          _, _ -> int.to_string(current) <> " of " <> int.to_string(count)
+        })]),
+        html.button([class("mini"), event.on_click(app.FindStep(-1)), ..labelled("Previous match (Shift+Enter)")], [icon("up")]),
+        html.button([class("mini"), event.on_click(app.FindStep(1)), ..labelled("Next match (Enter)")], [icon("down")]),
+        html.button([class("mini"), event.on_click(app.FindClosed), ..labelled("Close (Escape)")], [icon("close")]),
+      ]),
+      case model.replacing {
+        False -> element.none()
+        True ->
+          html.div([class("field")], [
+            html.input([
+              attribute.placeholder("Replace"),
+              attribute.value(q.replace),
+              attribute.spellcheck(False),
+              attribute.attribute("aria-label", "Replace with"),
+              event.on_input(app.ReplaceTyped),
+            ]),
+            html.button([class("button small"), event.on_click(app.Replaced(False))], [txt("Replace")]),
+            html.button([class("button small"), event.on_click(app.Replaced(True))], [txt("All")]),
+          ])
+      },
+    ]),
+  ])
+}
+
+// --- The panel and the status bar ----------------------------------------------------------------
+
+def panel(model: Model) -> Element(Msg) {
+  everything = dict.to_list(model.diagnostics)
+    |> list.flat_map(fn(entry) { list.map(entry.1, fn(d) { (entry.0, d) }) })
+    |> list.sort(fn(a, b) { int.compare((a.1).severity, (b.1).severity) })
+  docked = list.filter(model.terminals, fn(t) { not list.contains(model.terminal_tabs, t) })
+  tab = fn(name: String, label: String) {
+    html.button(
+      [attribute.classes([("ptab", True), ("on", model.panel == name)]), attribute.role("tab"), event.on_click(app.PanelPicked(name))],
+      [txt(label)],
+    )
+  }
+  html.section(
+    [attribute.classes([("panel", True), ("open", model.panel != "")])],
+    [
+      html.div([class("edge edge-panel"), event.on("mousedown", decode.success(app.EdgeGrabbed("panel"))) |> event.prevent_default], []),
+      html.div([class("panel-head")], [
+        tab("problems", "Problems " <> int.to_string(list.length(everything))),
+        tab("output", "Output"),
+        tab("terminal", "Terminal"),
+        html.div([class("grow")], []),
+        ..case model.panel {
+          "terminal" -> [
+            html.button([class("mini"), event.on_click(app.Ran("workbench.action.terminal.new")), ..labelled("New Terminal")], [icon("plus")]),
+            html.button([class("mini"), event.on_click(app.Ran("workbench.action.togglePanel")), ..labelled("Close Panel")], [icon("close")]),
+          ]
+          _ -> [
+            html.button([class("mini"), event.on_click(app.Ran("workbench.action.togglePanel")), ..labelled("Close Panel")], [
+              icon("close"),
+            ]),
+          ]
+        }
+      ]),
+      html.div([class("panel-body")], [
+        case model.panel {
+          "problems" ->
+            html.div([class("problems")], case everything {
+              [] -> [html.p([class("hint")], [txt("No problems have been reported. They come from language-server extensions.")])]
+              _ ->
+                list.map(everything, fn(entry) {
+                  (path, d) = entry
+                  html.button(
+                    [class("problem sev-" <> int.to_string(d.severity)), event.on_click(app.Jumped(path, d.from.line, d.from.col))],
+                    [
+                      icon(case d.severity {
+                        1 -> "error"
+                        _ -> "warning"
+                      }),
+                      html.span([class("message")], [txt(d.message |> string.split("\n") |> list.first |> unwrap(""))]),
+                      html.small([], [
+                        txt(
+                          app.relative(model, path) <> " [" <> int.to_string(d.from.line + 1) <> ", " <> int.to_string(d.from.col + 1) <> "]"
+                          <> case d.source {
+                            "" -> ""
+                            source -> " · " <> source
+                          },
+                        ),
+                      ]),
+                    ],
+                  )
+                })
+            })
+          "output" ->
+            html.pre([class("output")], [txt(case model.output {
+              [] -> "Extensions write here."
+              lines -> string.join(lines, "\n")
+            })])
+          _ -> element.none()
+        },
+        // Terminals stay mounted while the panel shows something else, so they keep running.
+        keyed.div(
+          [attribute.classes([("terminals", True), ("shown", model.panel == "terminal")])],
+          list.map(docked, fn(id) {
+            (
+              int.to_string(id),
+              element.element(
+                "runes-terminal",
+                [
+                  attribute.classes([("shown", id == model.terminal)]),
+                  attribute.attribute("term", int.to_string(id)),
+                  attribute.attribute("cwd", model.root),
+                  attribute.attribute("shell", model.settings.shell),
+                  attribute.attribute("autofocus", ""),
+                ],
+                [],
+              ),
+            )
+          }),
+        ),
+        // One row per shell, in a list that scrolls, so the fortieth is as easy to reach as the first.
+        case model.panel {
+          "terminal" -> {
+            wanted = string.lowercase(string.trim(model.terminal_filter))
+            shown = list.filter(docked, fn(id) { wanted == "" or string.contains(string.lowercase(app.terminal_name(model, id)), wanted) })
+            html.div([class("term-side")], [
+              html.input([
+                attribute.id("runes-term-filter"),
+                class("term-filter"),
+                attribute.placeholder("Find a shell"),
+                attribute.value(model.terminal_filter),
+                attribute.spellcheck(False),
+                attribute.attribute("aria-label", "Find a shell by name"),
+                event.on_input(app.TerminalFilter),
+              ]),
+              html.div([class("term-list"), attribute.role("tablist"), attribute.attribute("aria-label", "Terminals")], case shown {
+                [] -> [html.p([class("hint")], [txt("No shell is called that.")])]
+                _ ->
+                  list.map(shown, fn(id) {
+                    name = app.terminal_name(model, id)
+                    number = int.to_string(id)
+                    html.div([attribute.classes([("term-tab", True), ("on", id == model.terminal)])], case model.renaming {
+                      Some((renamed, text)) if renamed == id -> [
+                        html.input([
+                          attribute.id("runes-rename"),
+                          class("term-rename"),
+                          attribute.value(text),
+                          attribute.spellcheck(False),
+                          attribute.attribute("aria-label", "Name of terminal " <> number),
+                          event.on_input(app.TerminalRenameTyped),
+                          event.on("keydown", {
+                            use key <- decode.field("key", decode.string)
+                            case key {
+                              "Enter" -> decode.success(app.TerminalRenamed(True))
+                              "Escape" -> decode.success(app.TerminalRenamed(False))
+                              _ -> decode.failure(app.TerminalRenamed(False), "another key")
+                            }
+                          }) |> event.stop_propagation,
+                          event.on_blur(app.TerminalRenamed(True)),
+                        ]),
+                      ]
+                      _ -> [
+                        html.button(
+                          [
+                            class("term-name"),
+                            attribute.role("tab"),
+                            attribute.title(name <> " (shell " <> number <> "). Double-click to rename."),
+                            event.on_click(app.TerminalPicked(id)),
+                            event.on("dblclick", decode.success(app.TerminalRename(id))),
+                          ],
+                          [icon("terminal"), html.span([], [txt(name)])],
+                        ),
+                        html.button([class("mini"), event.on_click(app.TerminalRename(id)), ..labelled("Rename terminal " <> number)], [icon("edit")]),
+                        html.button([class("mini"), event.on_click(app.TerminalMoved(id, True)), ..labelled("Move terminal " <> number <> " into the editor area")], [
+                          icon("open"),
+                        ]),
+                        html.button([class("mini"), event.on_click(app.TerminalClosed(id)), ..labelled("Kill terminal " <> number)], [icon("close")]),
+                      ]
+                    })
+                  })
+              }),
+            ])
+          }
+          _ -> element.none()
+        },
+      ]),
+    ],
+  )
+}
+
+def unwrap(result: Result(a, b), fallback: a) -> a {
+  case result {
+    Ok(value) -> value
+    Error(_) -> fallback
+  }
+}
+
+def status(model: Model) -> Element(Msg) {
+  everything = dict.values(model.diagnostics) |> list.flatten
+  errors = list.filter(everything, fn(d) { d.severity == 1 }) |> list.length
+  warnings = list.filter(everything, fn(d) { d.severity == 2 }) |> list.length
+  html.footer([class("status")], list.flatten([
+    [
+      // On another machine: said plainly, in the corner, the whole time.
+      case model.ssh_on {
+        Some((_, name)) ->
+          html.button([class("seg remote"), event.on_click(app.SidePicked("ssh")), ..labelled("Connected over SSH. Open the workbench.")], [
+            icon("remote"),
+            txt("SSH: " <> name),
+          ])
+        None -> element.none()
+      },
+      case model.repo {
+        True ->
+          html.button([class("seg link branch"), event.on_click(app.Ran("git.checkout")), ..labelled("Switch branch")], [
+            icon("git"),
+            txt(model.branch),
+          ])
+        False -> element.none()
+      },
+      html.button([class("seg link counts"), event.on_click(app.Ran("workbench.actions.view.problems")), ..labelled("Problems")], [
+        html.span([attribute.classes([("n-errors", errors > 0)])], [icon("error"), txt(int.to_string(errors))]),
+        html.span([attribute.classes([("n-warnings", warnings > 0)])], [icon("warning"), txt(int.to_string(warnings))]),
+      ]),
+      html.div([class("grow")], []),
+    ],
+    case app.doc(model) {
+      None -> []
+      Some(d) if d.language == "runes" -> []
+      Some(d) -> {
+        (from, to) = doc.selection(d)
+        picked = buffer.len(buffer.slice(d.lines, from, to))
+        [
+          case d.more {
+            [] -> element.none()
+            more -> html.span([class("seg cursors")], [txt(int.to_string(list.length(more) + 1) <> " cursors")])
+          },
+          case picked {
+            0 -> element.none()
+            n -> html.span([class("seg")], [txt(int.to_string(n) <> " selected")])
+          },
+          html.button([class("seg link"), event.on_click(app.Ran("workbench.action.gotoLine"))], [
+            txt("Ln " <> int.to_string(d.cursor.line + 1) <> ", Col " <> int.to_string(d.cursor.col + 1)),
+          ]),
+          keyed.element("span", [class("seg")], [
+            (d.language, html.span([class("flip")], [txt(app.lang(model, d.language).name)])),
+          ]),
+        ]
+      }
+    },
+    [
+      html.button([class("seg link"), event.on_click(app.Ran("workbench.action.selectTheme"))], [txt(model.settings.theme)]),
+      case model.update {
+        Some((version, _)) -> html.button([class("seg link update"), event.on_click(app.UpdateOpened)], [txt("Update to " <> version)])
+        None -> html.span([class("seg")], [txt(model.version)])
+      },
+    ],
+  ]))
+}
+
+// --- Things that float over the window -------------------------------------------------------------
+
+def overlay(model: Model) -> Element(Msg) {
+  case model.overlay {
+    Closed -> element.none()
+    Palette(kind, query, index) -> {
+      found = app.entries(model)
+      html.div([class("veil"), event.on_click(app.OverlayClosed)], [
+        html.div(
+          [class("palette"), attribute.role("dialog"), event.on("click", decode.success(app.PaletteMoved(index))) |> event.stop_propagation],
+          [
+            html.input([
+              attribute.id("runes-palette"),
+              attribute.value(query),
+              attribute.spellcheck(False),
+              attribute.autocomplete("off"),
+              attribute.type_(case kind {
+                "ai-key" -> "password"
+                _ -> "text"
+              }),
+              attribute.placeholder(case kind {
+                "files" -> "Go to file"
+                "themes" -> "Pick a color theme"
+                "line" -> "Go to line"
+                "branches" -> "Switch to a branch"
+                "sessions" -> "Go to a session"
+                "terminals" -> "Go to a terminal"
+                "actions" -> "Pick a quick fix"
+                "ai-key" -> "Paste your API key, then press Enter"
+                _ -> "Run a command"
+              }),
+              attribute.attribute("aria-label", "Search"),
+              event.on_input(app.PaletteTyped),
+            ]),
+            keyed.div(
+              [class("results"), attribute.role("listbox")],
+              case found {
+                [] -> [("none", html.p([class("none")], [txt("Nothing matches.")]))]
+                _ ->
+                  list.index_map(found, fn(entry, i) {
+                    (
+                      entry.label <> entry.detail,
+                      html.button(
+                        [
+                          attribute.classes([("result", True), ("on", i == index)]),
+                          attribute.role("option"),
+                          attribute.style("animation-delay", int.to_string(int.min(i, 12) * 12) <> "ms"),
+                          event.on_click(entry.msg) |> event.stop_propagation,
+                          event.on("mousemove", decode.success(app.PaletteMoved(i))),
+                        ],
+                        [html.span([], [txt(entry.label)]), html.small([], [txt(entry.detail)])],
+                      ),
+                    )
+                  })
+              },
+            ),
+          ],
+        ),
+      ])
+    }
+    Pie(x, y, hover, _, path, back) -> {
+      slices = settings.level(model.settings.pie, path)
+      count = list.length(slices)
+      at = fn(decoded: fn(Int, Int) -> Msg) {
+        use px <- decode.field("clientX", whole())
+        use py <- decode.field("clientY", whole())
+        decode.success(decoded(px, py))
+      }
+      // The way here: a line through the centres of the pies above this one.
+      points = list.reverse([(x, y), ..back]) |> list.map(fn(point) { int.to_string(point.0) <> "," <> int.to_string(point.1) }) |> string.join(" ")
+      // A click anywhere picks by direction, so a slice is hit however far out the pointer is.
+      html.div([class("veil clear pie-veil"), event.on("click", at(fn(px, py) { app.PieEvent("click", px, py) }))], [
+        case back {
+          [] -> element.none()
+          _ -> element.unsafe_raw_html("", "div", [class("pie-trail")], "<svg aria-hidden='true'><polyline points='" <> points <> "'/></svg>")
+        },
+        keyed.div([], [
+          (
+            list.map(path, int.to_string) |> string.join("."),
+            html.div(
+              [class("pie"), attribute.role("menu"), attribute.styles([("left", px(x)), ("top", px(y))])],
+              [
+                html.div([attribute.classes([("pie-hub", True), ("deeper", path != [])])], case settings.slice_at(model.settings.pie, path) {
+                  Ok(parent) -> [icon("left"), html.small([], [txt(parent.label)])]
+                  Error(_) -> [icon("rune")]
+                }),
+                ..list.index_map(slices, fn(slice, i) {
+                  html.button(
+                    [
+                      attribute.classes([("slice", True), ("on", i == hover), ("more", slice.items != [])]),
+                      attribute.role("menuitem"),
+                      attribute.styles([
+                        ("--turn", float.to_string(int.to_float(i) /. int.to_float(int.max(count, 1))) <> "turn"),
+                        ("animation-delay", int.to_string(i * 18) <> "ms"),
+                      ]),
+                      event.on("click", at(fn(px, py) { app.PiePickedAt(i, px, py) })) |> event.stop_propagation,
+                    ],
+                    [html.span([], [txt(slice.label)])],
+                  )
+                })
+              ],
+            ),
+          ),
+        ]),
+      ])
+    }
+    Menu(x, y) ->
+      html.div([class("veil clear"), event.on_click(app.OverlayClosed)], [
+        html.div(
+          [class("menu"), attribute.role("menu"), attribute.styles([("left", px(x)), ("top", px(y))])],
+          list.append(
+            // What extensions can fix here comes first.
+            list.map(model.actions, fn(action) {
+              html.button([class("result fix"), attribute.role("menuitem"), event.on_click(app.ActionPicked(action.0)) |> event.stop_propagation], [
+                html.span([], [txt(action.1)]),
+                html.small([], [txt("quick fix")]),
+              ])
+            }),
+            list.map(app.menu, fn(command) {
+              html.button([class("result"), attribute.role("menuitem"), event.on_click(app.Ran(command)) |> event.stop_propagation], [
+                html.span([], [txt(app.title(command))]),
+                html.small([], [txt(keymap.key_for(model.bindings, command))]),
+              ])
+            }),
+          ),
+        ),
+      ])
+  }
+}
+
+/// The pie as a tree of rows: each slice, and under it the items of its submenu.
+def pie_rows(slices: List(Slice), above: List(Int)) -> List(Element(Msg)) {
+  count = list.length(slices)
+  list.index_map(slices, fn(slice, i) { (slice, i) })
+  |> list.flat_map(fn(entry) {
+    (slice, i) = entry
+    path = list.append(above, [i])
+    place = list.map(path, fn(n) { int.to_string(n + 1) }) |> string.join(".")
+    [
+      html.div([class("pie-row"), attribute.style("margin-left", px(list.length(above) * 26))], [
+        html.span([attribute.classes([("pie-n", True), ("sub", above != [])])], [txt(place)]),
+        html.input([
+          attribute.type_("text"),
+          attribute.value(slice.label),
+          attribute.attribute("aria-label", "Label of slice " <> place),
+          event.on_change(fn(value) { app.PieSet(path, "label", value) }),
+        ]),
+        case slice.items {
+          [] ->
+            html.select(
+              [attribute.attribute("aria-label", "Command of slice " <> place), event.on_change(fn(value) { app.PieSet(path, "command", value) })],
+              list.map(app.commands, fn(c) { html.option([attribute.value(c.0), attribute.selected(c.0 == slice.command)], c.1) }),
+            )
+          items -> html.span([class("pie-opens")], [txt("opens " <> int.to_string(list.length(items)) <> " items")])
+        },
+        html.button([class("mini"), attribute.disabled(i == 0), event.on_click(app.PieMoved(path, -1)), ..labelled("Move slice " <> place <> " earlier")], [
+          icon("up"),
+        ]),
+        html.button([class("mini"), attribute.disabled(i == count - 1), event.on_click(app.PieMoved(path, 1)), ..labelled("Move slice " <> place <> " later")], [
+          icon("down"),
+        ]),
+        html.button(
+          [class("mini"), attribute.disabled(list.length(slice.items) >= 12 or list.length(path) >= 4), event.on_click(app.PieAdded(path)), ..labelled("Add an item inside slice " <> place)],
+          [icon("plus")],
+        ),
+        html.button(
+          [class("mini"), attribute.disabled(above == [] and count <= 2), event.on_click(app.PieRemoved(path)), ..labelled("Remove slice " <> place)],
+          [icon("close")],
+        ),
+      ]),
+      ..pie_rows(slice.items, path)
+    ]
+  })
+}
+
+// --- The settings view -------------------------------------------------------------------------------
+
+def quoted(text: String) -> String {
+  "\"" <> string.replace(string.replace(text, "\\", "\\\\"), "\"", "\\\"") <> "\""
+}
+
+def setting(label: String, about: String, control: Element(Msg)) -> Element(Msg) {
+  html.label([class("setting")], [
+    html.span([class("setting-text")], [html.b([], [txt(label)]), html.small([], [txt(about)])]),
+    control,
+  ])
+}
+
+def choice(key: String, current: String, options: List(String)) -> Element(Msg) {
+  all = case list.contains(options, current) {
+    True -> options
+    False -> [current, ..options]
+  }
+  html.select(
+    [attribute.attribute("aria-label", key), event.on_change(fn(value) { app.SettingChanged(key, quoted(value)) })],
+    list.map(all, fn(o) { html.option([attribute.value(o), attribute.selected(o == current)], o) }),
+  )
+}
+
+def switch(key: String, on: Bool) -> Element(Msg) {
+  html.input([
+    attribute.type_("checkbox"),
+    class("switch"),
+    attribute.checked(on),
+    attribute.attribute("aria-label", key),
+    event.on_check(fn(value) {
+      app.SettingChanged(key, case value {
+        True -> "true"
+        False -> "false"
+      })
+    }),
+  ])
+}
+
+def settings_view(model: Model) -> Element(Msg) {
+  s = model.settings
+  themes = list.flat_map(model.extensions, fn(e) { list.map(e.themes, fn(t) { t.label }) })
+  icon_themes = list.flat_map(model.extensions, fn(e) { list.map(e.icon_themes, fn(t) { t.label }) })
+  pie = s.pie
+  html.div([class("page settings-page")], [
+    html.div([class("page-inner")], [
+      html.h1([], [txt("Settings")]),
+      html.p([class("lede")], [txt("One set of settings for the whole editor. Changes apply as you make them.")]),
+
+      html.h2([], [txt("Look")]),
+      setting("Colour theme", "Themes come from extensions.", choice("workbench.colorTheme", s.theme, themes)),
+      setting("File icons", "", choice("workbench.iconTheme", s.icon_theme, icon_themes)),
+      setting("Animations", "Caret, panels, tabs and the pie menu.", switch("runes.animations", s.animations)),
+      setting("Side bar", "Which side the explorer and other views sit on.", choice("workbench.sideBar.location", case s.side_right {
+        True -> "right"
+        False -> "left"
+      }, ["left", "right"])),
+
+      html.h2([], [txt("Text")]),
+      setting(
+        "Font",
+        "EnvyCodeR Nerd Font ships with Runes. Add a font's files to use it: Runes keeps its own copy, so the text looks the same on every machine.",
+        html.select(
+          [attribute.attribute("aria-label", "editor.fontFamily"), event.on_change(fn(value) { app.SettingChanged("editor.fontFamily", quoted(value)) })],
+          list.map(
+            case list.contains(["EnvyCodeR Nerd Font", ..model.fonts], s.font_family) {
+              True -> ["EnvyCodeR Nerd Font", ..model.fonts]
+              // A font named in settings.json that has not been added: shown, so the choice is not silently changed.
+              False -> list.append(["EnvyCodeR Nerd Font", ..model.fonts], [s.font_family])
+            },
+            fn(family) {
+              html.option([attribute.value(family), attribute.selected(family == s.font_family)], case family == s.font_family and not list.contains(["EnvyCodeR Nerd Font", ..model.fonts], family) {
+                True -> family <> " (not added to Runes)"
+                False -> family
+              })
+            },
+          ),
+        ),
+      ),
+      html.div([class("font-list")], list.append(
+        list.map(model.fonts, fn(family) {
+          html.span([class("chip font-chip"), attribute.style("font-family", "\"" <> family <> "\"")], [
+            txt(family),
+            html.button([class("mini"), event.on_click(app.FontRemoved(family)), ..labelled("Remove the font " <> family)], [icon("close")]),
+          ])
+        }),
+        [html.button([class("button small quiet"), event.on_click(app.FontAddClicked)], [icon("plus"), txt("Add font files…")])],
+      )),
+      setting("Font size", "In pixels. Ctrl and the mouse wheel also change it.", html.input([
+        attribute.type_("number"),
+        attribute.min("8"),
+        attribute.max("40"),
+        attribute.value(int.to_string(s.font_size)),
+        attribute.attribute("aria-label", "editor.fontSize"),
+        event.on_change(fn(value) {
+          case int.parse(value) {
+            Ok(n) -> app.SettingChanged("editor.fontSize", int.to_string(n))
+            Error(_) -> app.Resized
+          }
+        }),
+      ])),
+      setting("Minimap", "The overview at the right of each editor.", switch("editor.minimap.enabled", s.minimap)),
+
+      html.h2([], [txt("Pie menu")]),
+      html.p([class("lede")], [
+        txt("Hold the right mouse button, or press Ctrl+Shift+Space. The first slice points up; the rest follow clockwise. Let go, or click, anywhere in a slice's direction to pick it. A slice with items of its own opens them as another pie: drag on past it to go straight in."),
+      ]),
+      html.div([class("pie-editor")], pie_rows(pie, [])),
+      html.button([class("button small"), attribute.disabled(list.length(pie) >= 12), event.on_click(app.PieAdded([]))], [txt("Add a slice")]),
+
+      html.h2([], [txt("Terminal")]),
+      setting("Shell", "Leave empty for your login shell.", html.input([
+        attribute.type_("text"),
+        attribute.value(s.shell),
+        attribute.placeholder("/bin/zsh"),
+        attribute.spellcheck(False),
+        attribute.attribute("aria-label", "terminal.shell"),
+        event.on_change(fn(value) { app.SettingChanged("terminal.shell", quoted(value)) }),
+      ])),
+
+      html.h2([], [txt("AI chat")]),
+      setting("Provider", "", choice("runes.ai.provider", s.ai_provider, ["anthropic", "openai"])),
+      setting("Model", "Leave empty for the provider's default.", html.input([
+        attribute.type_("text"),
+        attribute.value(s.ai_model),
+        attribute.spellcheck(False),
+        attribute.attribute("aria-label", "runes.ai.model"),
+        event.on_change(fn(value) { app.SettingChanged("runes.ai.model", quoted(value)) }),
+      ])),
+      setting("API key", "Stored encrypted by the system keychain, never in a file you can read.", html.button(
+        [class("button small"), event.on_click(app.Ran("runes.ai.setKey"))],
+        [txt("Set key…")],
+      )),
+
+      html.h2([], [txt("Updates")]),
+      setting("Check for updates", "Looks for a newer release when Runes starts.", switch("runes.update.check", s.check_updates)),
+
+      html.p([class("lede foot")], [
+        txt("Key bindings and anything not listed here: "),
+        html.button([class("link"), event.on_click(app.Ran("workbench.action.openGlobalKeybindings"))], [txt("keybindings.json")]),
+        txt(" · "),
+        html.button([class("link"), event.on_click(app.Ran("workbench.action.openSettingsJson"))], [txt("settings.json")]),
+      ]),
+    ]),
+  ])
+}
+
+// --- The git graph -----------------------------------------------------------------------------------
+
+const lane_gap = 16
+
+const row_height = 30
+
+def lane_x(lane: Int) -> String {
+  int.to_string(12 + lane * lane_gap)
+}
+
+def lane_class(lane: Int) -> String {
+  (colour, shape) = git.style(lane)
+  "l" <> int.to_string(colour) <> " w" <> int.to_string(shape)
+}
+
+/// The marker of a lane: a colour, and a shape once the colours have gone round.
+def marker(lane: Int, x: String, y: Int, merge: Bool) -> String {
+  (_, shape) = git.style(lane)
+  hollow = case merge {
+    True -> " hollow"
+    False -> ""
+  }
+  name = "class='node " <> lane_class(lane) <> hollow <> "'"
+  cy = int.to_string(y)
+  case shape {
+    0 -> "<circle " <> name <> " cx='" <> x <> "' cy='" <> cy <> "' r='4.5'/>"
+    1 -> "<rect " <> name <> " x='-4' y='-4' width='8' height='8' transform='translate(" <> x <> " " <> cy <> ")'/>"
+    _ -> "<rect " <> name <> " x='-4' y='-4' width='8' height='8' transform='translate(" <> x <> " " <> cy <> ") rotate(45)'/>"
+  }
+}
+
+def lanes_svg(row: Row, width: Int) -> Element(Msg) {
+  mid = row_height / 2
+  at = lane_x(row.lane)
+  line = fn(lane: Int, path: String) { "<path class='" <> lane_class(lane) <> "' d='" <> path <> "'/>" }
+  through = list.map(row.through, fn(lane) { line(lane, "M" <> lane_x(lane) <> " 0V" <> int.to_string(row_height)) })
+  incoming = list.map(row.incoming, fn(lane) {
+    x = lane_x(lane)
+    line(lane, "M" <> x <> " 0C" <> x <> " " <> int.to_string(mid - 4) <> " " <> at <> " 4 " <> at <> " " <> int.to_string(mid))
+  })
+  outgoing = list.map(row.outgoing, fn(lane) {
+    x = lane_x(lane)
+    line(case lane == row.lane {
+      True -> row.lane
+      False -> lane
+    }, "M" <> at <> " " <> int.to_string(mid) <> "C" <> at <> " " <> int.to_string(row_height - 4) <> " " <> x <> " " <> int.to_string(mid + 4) <> " " <> x <> " " <> int.to_string(row_height))
+  })
+  size = int.to_string(24 + width * lane_gap)
+  element.unsafe_raw_html(
+    "",
+    "span",
+    [class("lanes"), attribute.style("width", size <> "px")],
+    "<svg width='" <> size <> "' height='" <> int.to_string(row_height) <> "' aria-hidden='true'>"
+      <> string.concat(list.flatten([through, incoming, outgoing]))
+      <> marker(row.lane, at, mid, list.length(row.commit.parents) > 1)
+      <> "</svg>",
+  )
+}
+
+def graph_view(model: Model) -> Element(Msg) {
+  width = list.fold(model.rows, 1, fn(most, row) { int.max(most, row.width) }) |> int.min(20)
+  legend = git.legend(model.rows)
+    |> list.fold([], fn(seen: List((String, Int)), entry) {
+      case list.any(seen, fn(s) { s.0 == entry.0 }) {
+        True -> seen
+        False -> [entry, ..seen]
+      }
+    })
+    |> list.reverse
+  // The whole history's days once they have been counted; until then, what is loaded.
+  days = case dict.size(model.days) {
+    0 -> list.fold(model.rows, dict.new(), fn(counts, row) {
+      day = app.day_of(row.commit.time)
+      dict.insert(counts, day, { dict.get(counts, day) |> unwrap(0) } + 1)
+    })
+    _ -> model.days
+  }
+  two = fn(n: Int) { string.pad_start(int.to_string(n), 2, "0") }
+  years = dict.keys(model.years) |> list.filter_map(int.parse) |> list.sort(int.compare)
+  lit = fn(count: Int, some: Int, many: Int) {
+    [("some", count > 0), ("many", count > some), ("lots", count > many)]
+  }
+  picked_day = list.find(model.rows, fn(row) { row.commit.hash == model.picked })
+    |> fn(found) {
+      case found {
+        Ok(row) -> app.day_of(row.commit.time)
+        Error(_) -> ""
+      }
+    }
+  (year, month) = model.calendar
+  html.div([class("page graph-page")], case model.repo, model.rows {
+    False, _ -> [html.p([class("lede pad")], [txt("This folder is not a git repository.")])]
+    True, [] -> [html.p([class("lede pad")], [txt("No commits yet. Stage something in Source Control and commit it.")])]
+    True, rows -> [
+      html.div([class("graph-main")], [
+        html.div([class("legend"), attribute.attribute("aria-label", "Branches")], list.flatten([
+          list.map(list.take(legend, 18), fn(entry) {
+            html.span([class("legend-item")], [
+              element.unsafe_raw_html("", "span", [class("legend-mark")], "<svg width='14' height='14' aria-hidden='true'>" <> marker(entry.1, "7", 7, False) <> "</svg>"),
+              txt(entry.0),
+            ])
+          }),
+          case list.length(legend) > 18 {
+            True -> [html.span([class("legend-item more")], [txt("+" <> int.to_string(list.length(legend) - 18) <> " more")])]
+            False -> []
+          },
+          [
+            html.span([class("grow")], []),
+            html.button([class("button small quiet branch-switch"), event.on_click(app.Ran("git.checkout")), ..labelled("Switch branch")], [
+              icon("git"),
+              txt(model.branch),
+              icon("down"),
+            ]),
+            html.span([class("legend-item more")], [txt(int.to_string(list.length(rows)) <> " commits")]),
+            html.button([class("mini"), event.on_click(app.GitRefresh), ..labelled("Refresh")], [icon("refresh")]),
+          ],
+        ])),
+        keyed.div([class("commits"), attribute.role("list")], list.map(rows, fn(row) {
+          c = row.commit
+          (
+            c.hash,
+            html.button(
+              [
+                attribute.id("commit-" <> c.hash),
+                attribute.classes([("commit", True), ("picked", c.hash == model.picked), ("marked", c.hash == model.marked)]),
+                attribute.role("listitem"),
+                event.on_click(app.CommitPicked(c.hash)),
+              ],
+              [
+                lanes_svg(row, width),
+                html.span([class("subject")], list.append(
+                  list.map(c.refs, fn(ref) {
+                    html.span([attribute.classes([("ref", True), ("tag", string.starts_with(ref, "tag: ")), (lane_class(row.lane), True)])], [
+                      txt(string.replace(ref, "tag: ", "")),
+                    ])
+                  }),
+                  [txt(c.subject)],
+                )),
+                html.span([class("who")], [txt(c.author)]),
+                html.span([class("when")], [txt(when(c.time))]),
+                html.span([class("hash")], [txt(string.slice(c.hash, 0, 7))]),
+              ],
+            ),
+          )
+        })),
+      ]),
+      html.aside([class("graph-side")], [
+        html.div([class("calendar")], [
+          html.div([class("cal-head")], [
+            html.button([class("mini"), event.on_click(app.CalendarMoved(case model.calendar_zoom {
+              "years" -> -120
+              _ -> -12
+            })), ..labelled(case model.calendar_zoom {
+              "years" -> "Ten years back"
+              _ -> "Previous year"
+            })], [icon("left"), icon("left")]),
+            case model.calendar_zoom {
+              "days" -> html.button([class("mini"), event.on_click(app.CalendarMoved(-1)), ..labelled("Previous month")], [icon("left")])
+              _ -> element.none()
+            },
+            // The title steps outwards: a month, then its year, then every year.
+            html.button(
+              [
+                class("cal-title"),
+                event.on_click(app.CalendarZoomed(case model.calendar_zoom {
+                  "days" -> "months"
+                  "months" -> "years"
+                  _ -> "days"
+                })),
+                ..labelled(case model.calendar_zoom {
+                  "days" -> "Show the months of " <> int.to_string(year)
+                  "months" -> "Show every year"
+                  _ -> "Back to " <> month_name(year, month)
+                })
+              ],
+              [txt(case model.calendar_zoom {
+                "days" -> month_name(year, month)
+                "months" -> int.to_string(year)
+                _ -> case years {
+                  [] -> "Years"
+                  [first, ..] -> int.to_string(first) <> " – " <> int.to_string(list.last(years) |> unwrap(first))
+                }
+              })],
+            ),
+            case model.calendar_zoom {
+              "days" -> html.button([class("mini"), event.on_click(app.CalendarMoved(1)), ..labelled("Next month")], [icon("chevron")])
+              _ -> element.none()
+            },
+            html.button([class("mini"), event.on_click(app.CalendarMoved(case model.calendar_zoom {
+              "years" -> 120
+              _ -> 12
+            })), ..labelled(case model.calendar_zoom {
+              "years" -> "Ten years on"
+              _ -> "Next year"
+            })], [icon("chevron"), icon("chevron")]),
+          ]),
+          case model.calendar_zoom {
+            "months" ->
+              html.div([class("cal-grid wide")], list.map(counting(1, 12), fn(m) {
+                count = dict.get(model.months, int.to_string(year) <> "-" <> two(m)) |> unwrap(0)
+                html.button(
+                  [
+                    attribute.classes([("cal-day", True), ("cal-month", True), ("picked", m == month), ..lit(count, 20, 80)]),
+                    attribute.title(month_name(year, m) <> ": " <> int.to_string(count) <> " commits"),
+                    event.on_click(app.CalendarSet(year, m, "days")),
+                  ],
+                  [txt(string.slice(month_name(year, m), 0, 3)), html.small([], [txt(case count {
+                    0 -> "·"
+                    n -> int.to_string(n)
+                  })])],
+                )
+              }))
+            "years" -> {
+              // The decade the calendar is in, widened to take in the first and last years with commits.
+              decade = year / 10 * 10
+              html.div([class("cal-grid wide")], list.map(counting(decade - 1, 12), fn(y) {
+                count = dict.get(model.years, int.to_string(y)) |> unwrap(0)
+                html.button(
+                  [
+                    attribute.classes([("cal-day", True), ("cal-month", True), ("picked", y == year), ..lit(count, 200, 1000)]),
+                    attribute.title(int.to_string(y) <> ": " <> int.to_string(count) <> " commits"),
+                    event.on_click(app.CalendarSet(y, month, "months")),
+                  ],
+                  [txt(int.to_string(y)), html.small([], [txt(case count {
+                    0 -> "·"
+                    n -> int.to_string(n)
+                  })])],
+                )
+              }))
+            }
+            _ ->
+              html.div([class("cal-grid")], list.append(
+                list.map(["M", "T", "W", "T", "F", "S", "S"], fn(d) { html.span([class("cal-day-name")], [txt(d)]) }),
+                list.map(month_grid(year, month), fn(day) {
+                  count = dict.get(days, day) |> unwrap(0)
+                  case day {
+                    "" -> html.span([class("cal-day empty")], [])
+                    _ ->
+                      html.button(
+                        [
+                          attribute.classes([("cal-day", True), ("picked", day == picked_day), ..lit(count, 3, 8)]),
+                          attribute.disabled(count == 0),
+                          attribute.title(case count {
+                            0 -> day
+                            1 -> day <> ": 1 commit"
+                            n -> day <> ": " <> int.to_string(n) <> " commits"
+                          }),
+                          event.on_click(app.DayPicked(day)),
+                        ],
+                        [txt(string.drop_start(day, 8) |> fn(d) {
+                          case d {
+                            "0" <> rest -> rest
+                            _ -> d
+                          }
+                        })],
+                      )
+                  }
+                }),
+              ))
+          },
+          case model.until {
+            "" -> html.p([class("hint")], [txt("Days with commits are lit; click one to go there. Click the title for the year, and again for every year.")])
+            day ->
+              html.p([class("hint until")], [
+                txt("Showing the history as it stood on " <> day <> ". "),
+                html.button([class("link"), event.on_click(app.GraphUntil(""))], [txt("Back to now")]),
+              ])
+          },
+        ]),
+        html.div([class("commit-detail")], case list.find(rows, fn(row) { row.commit.hash == model.picked }) {
+          Error(_) -> [html.p([class("hint")], [txt("Select a commit to see the files it changed.")])]
+          Ok(row) -> {
+            c = row.commit
+            [
+              html.b([class("detail-subject")], [txt(c.subject)]),
+              html.small([], [txt(c.author <> " · " <> when(c.time) <> " · " <> string.slice(c.hash, 0, 7))]),
+              html.div([class("detail-actions")], [
+                html.button([class("button small"), event.on_click(app.CompareOpened(c.hash <> "^", c.hash, ""))], [txt("Open as a session")]),
+                html.button([class("button small quiet"), event.on_click(app.CompareOpened(c.hash, "", ""))], [txt("Compare with my files")]),
+                case model.marked {
+                  "" -> html.button([class("button small quiet"), event.on_click(app.CommitMarked(c.hash))], [txt("Mark to compare")])
+                  marked if marked == c.hash -> html.button([class("button small quiet"), event.on_click(app.CommitMarked(""))], [txt("Unmark")])
+                  marked ->
+                    html.button([class("button small quiet"), event.on_click(app.CompareOpened(marked, c.hash, ""))], [
+                      txt("Compare with " <> string.slice(marked, 0, 7)),
+                    ])
+                },
+              ]),
+              section_title("Files changed", list.length(model.picked_files)),
+              html.div([class("detail-files")], list.map(model.picked_files, fn(f) {
+                html.div([class("change")], [
+                  html.span([class("state state-" <> f.0)], [txt(f.0)]),
+                  html.button([class("change-name"), attribute.title(f.1), event.on_click(app.CompareOpened(c.hash <> "^", c.hash, f.1))], [
+                    txt(app.base_name(f.1)),
+                    html.small([], [txt(" " <> f.1)]),
+                  ]),
+                ])
+              })),
+            ]
+          }
+        }),
+      ]),
+    ]
+  })
+}
+
+
+/// The strip above a file that is being read as it was: which commit, and the way to the
+/// versions before and after it.
+def time_bar(model: Model, file: String) -> Element(Msg) {
+  commits = dict.get(model.histories, file) |> unwrap([])
+  shown = dict.get(model.travel, file) |> unwrap("")
+  place = list.index_map(commits, fn(c, i) { (c, i) }) |> list.find(fn(e) { { e.0 }.0 == shown })
+  count = list.length(commits)
+  html.div([class("time-bar")], [
+    html.span([class("time-mark")], [icon("clock"), txt("Read-only")]),
+    html.button(
+      [class("button small quiet"), attribute.disabled(case place {
+        Ok((_, i)) -> i >= count - 1
+        Error(_) -> True
+      }), event.on_click(app.TimeStepped(file, 1)), ..labelled("The version before this one")],
+      [icon("left"), txt("Older")],
+    ),
+    html.button(
+      [class("button small quiet"), attribute.disabled(case place {
+        Ok((_, i)) -> i == 0
+        Error(_) -> True
+      }), event.on_click(app.TimeStepped(file, -1)), ..labelled("The version after this one")],
+      [txt("Newer"), icon("chevron")],
+    ),
+    case place {
+      Ok((c, i)) ->
+        html.div([class("time-about")], [
+          html.b([], [txt(c.3)]),
+          html.small([], [txt(c.1 <> " · " <> when(c.2) <> " · " <> string.slice(c.0, 0, 7) <> " · version " <> int.to_string(count - i) <> " of " <> int.to_string(count))]),
+        ])
+      Error(_) -> html.div([class("time-about")], [html.small([], [txt(app.brief(shown))])])
+    },
+    html.button([class("button small quiet"), event.on_click(app.CompareOpened(shown, "", file)), ..labelled("Compare this version with the file as it is now")], [
+      txt("Compare with now"),
+    ]),
+    html.button([class("button small quiet"), event.on_click(app.CompareOpened(shown <> "^", shown, file)), ..labelled("What this commit changed")], [
+      txt("What changed"),
+    ]),
+    html.button([class("button small"), event.on_click(app.FileOpened(model.root <> "/" <> file)), ..labelled("Open the file as it is on disk")], [txt("Open current")]),
+  ])
+}
+
+// --- Comparing -----------------------------------------------------------------------------------
+
+/// A session: two versions of the files side by side. One commit against the one before it,
+/// two branches, a branch against the files as they are now, or two files on disk.
+def diff_view(model: Model, c: Compare) -> Element(Msg) {
+  id = c.id
+  commit = app.session_commit(c)
+  about = list.find(model.rows, fn(row) { row.commit.hash == commit })
+  // The point in the history the session's right-hand side shows.
+  at = case c.to {
+    "" -> "HEAD"
+    to -> to
+  }
+  // The file as it is on disk now: what "open the file" goes to, and what names the language.
+  on_disk = case c.files_mode {
+    True -> c.to
+    False -> c.file
+  }
+  rows = case c.left, c.right {
+    [], [] -> []
+    left, right -> diff_rows(left, right, case c.whole {
+      True -> -1
+      False -> 3
+    }, app.lang(model, app.language_of(model.langs, app.base_name(on_disk))).scope)
+  }
+  pieces = fn(found: List((String, String))) {
+    list.map(found, fn(piece) {
+      case piece.1 {
+        "" -> txt(piece.0)
+        style -> html.span([attribute.attribute("style", style)], [txt(piece.0)])
+      }
+    })
+  }
+  added = list.filter(rows, fn(r) { r.0 == "+" or r.0 == "~" }) |> list.length
+  removed = list.filter(rows, fn(r) { r.0 == "-" or r.0 == "~" }) |> list.length
+  field = fn(left: Bool, value: String, hint: String) {
+    html.input([
+      attribute.class("diff-ref"),
+      attribute.value(value),
+      attribute.placeholder(hint),
+      attribute.spellcheck(False),
+      attribute.autocomplete("off"),
+      attribute.attribute("list", case c.files_mode {
+        True -> "runes-files"
+        False -> "runes-refs"
+      }),
+      attribute.attribute("aria-label", case left {
+        True -> "Compare from"
+        False -> "Compare to"
+      }),
+      event.on_input(fn(text) { app.CompareTyped(id, left, text) }),
+      on_enter(app.CompareRan(id)),
+    ])
+  }
+  number = fn(n: Int) {
+    html.span([class("dn")], [txt(case n < 0 {
+      True -> ""
+      False -> int.to_string(n + 1)
+    })])
+  }
+  html.div([class("page diff-page")], [
+    html.div([class("diff-bar")], [
+      html.div([class("seg-pick")], [
+        html.button([attribute.classes([("on", not c.files_mode)]), event.on_click(case c.files_mode {
+          True -> app.CompareOption(id, "mode")
+          False -> app.CompareTyped(id, True, c.from)
+        })], [txt("History")]),
+        html.button([attribute.classes([("on", c.files_mode)]), event.on_click(case c.files_mode {
+          True -> app.CompareTyped(id, True, c.from)
+          False -> app.CompareOption(id, "mode")
+        })], [txt("Two files")]),
+      ]),
+      field(True, c.from, case c.files_mode {
+        True -> "a file"
+        False -> "branch, tag or commit"
+      }),
+      html.button([class("mini"), event.on_click(app.CompareOption(id, "swap")), ..labelled("Swap the two sides")], [icon("swap")]),
+      field(False, c.to, case c.files_mode {
+        True -> "another file"
+        False -> "my files as they are now"
+      }),
+      html.button([class("button small"), event.on_click(app.CompareRan(id))], [txt("Compare")]),
+      html.div([class("grow")], []),
+      ..list.append(
+        case commit {
+          "" -> []
+          _ -> [
+            html.button([class("button small quiet"), event.on_click(app.CompareStepped(id, 1)), ..labelled("The commit before this one")], [
+              icon("left"),
+              txt("Older"),
+            ]),
+            html.button([class("button small quiet"), event.on_click(app.CompareStepped(id, -1)), ..labelled("The commit after this one")], [
+              txt("Newer"),
+              icon("chevron"),
+            ]),
+          ]
+        },
+        [
+          html.button(
+            [attribute.classes([("button", True), ("small", True), ("quiet", True), ("on", c.whole)]), event.on_click(app.CompareOption(id, "whole"))],
+            [txt(case c.whole {
+              True -> "Only changes"
+              False -> "Whole file"
+            })],
+          ),
+        ],
+      )
+    ]),
+    html.datalist([attribute.id("runes-refs")], list.map(model.refs, fn(r) { html.option([attribute.value(r.1)], r.0) })),
+    html.datalist([attribute.id("runes-files")], list.take(model.files, 600) |> list.map(fn(f) { html.option([attribute.value(app.relative(model, f))], "") })),
+    case about {
+      Ok(row) ->
+        html.div([class("diff-commit")], [
+          html.b([], [txt(row.commit.subject)]),
+          html.small([], [txt(row.commit.author <> " · " <> when(row.commit.time) <> " · " <> string.slice(commit, 0, 7))]),
+        ])
+      Error(_) -> element.none()
+    },
+    html.div([class("diff-body")], [
+      case c.files_mode {
+        True -> element.none()
+        False ->
+          html.aside([class("diff-files")], [
+            // What changed, or everything there was at that point: the whole tree, to read as it stood.
+            html.div([class("seg-pick browse")], [
+              html.button([attribute.classes([("on", not c.everything)]), event.on_click(app.CompareBrowse(id, False))], [
+                txt("Changed " <> int.to_string(list.length(c.files))),
+              ]),
+              html.button([attribute.classes([("on", c.everything)]), event.on_click(app.CompareBrowse(id, True))], [txt("All files")]),
+            ]),
+            ..case c.everything {
+              False ->
+                list.map(c.files, fn(f) {
+                  html.div([attribute.classes([("change", True), ("on", f.1 == c.file)])], [
+                    html.span([class("state state-" <> f.0)], [txt(f.0)]),
+                    html.button([class("change-name"), attribute.title(f.1), event.on_click(app.CompareFilePicked(id, f.1))], [
+                      txt(app.base_name(f.1)),
+                      html.small([], [txt(" " <> f.1)]),
+                    ]),
+                  ])
+                })
+              True -> {
+                all = dict.get(model.trees, at) |> unwrap([])
+                wanted = string.lowercase(string.trim(c.filter))
+                found = case wanted {
+                  "" -> all
+                  _ -> list.filter(all, fn(f) { string.contains(string.lowercase(f), wanted) })
+                }
+                changed = list.map(c.files, fn(f) { f.1 })
+                [
+                  html.input([
+                    class("tree-filter"),
+                    attribute.placeholder("Find a file as it was at " <> app.brief(at)),
+                    attribute.value(c.filter),
+                    attribute.spellcheck(False),
+                    attribute.attribute("aria-label", "Find a file at this commit"),
+                    event.on_input(fn(text) { app.CompareFilter(id, text) }),
+                  ]),
+                  html.p([class("hint")], [txt(case list.length(found) {
+                    0 -> "No file is called that."
+                    n if n > 400 -> int.to_string(n) <> " files; the first 400 are listed. Type to narrow them."
+                    n -> int.to_string(n) <> " files. Click one to read it as it was."
+                  })]),
+                  ..list.take(found, 400) |> list.map(fn(f) {
+                    html.div([attribute.classes([("change", True), ("touched", list.contains(changed, f))])], [
+                      html.button([class("change-name"), attribute.title("Open " <> f <> " as it was at " <> app.brief(at)), event.on_click(app.TimeTravel(f, at))], [
+                        txt(app.base_name(f)),
+                        html.small([], [txt(" " <> f)]),
+                      ]),
+                    ])
+                  })
+                ]
+              }
+            }
+          ])
+      },
+      html.div([class("diff-main")], [
+        html.div([class("diff-head")], [
+          html.span([], [txt(case c.files_mode {
+            True -> c.from
+            False -> app.brief(c.from)
+          })]),
+          html.span([], [
+            txt(case c.files_mode, c.to {
+              True, to -> to
+              False, "" -> "my files"
+              False, to -> app.brief(to)
+            }),
+            html.small([class("diff-count")], [
+              html.span([class("plus")], [txt("+" <> int.to_string(added))]),
+              html.span([class("minus")], [txt("−" <> int.to_string(removed))]),
+            ]),
+            // Read the file where the session is, in the past; or go to the one on disk now.
+            case c.files_mode, c.file {
+              True, _ | _, "" -> element.none()
+              False, file ->
+                html.button([class("link open-file"), event.on_click(app.TimeTravel(file, at)), ..labelled("Open " <> file <> " as it was at " <> app.brief(at))], [
+                  icon("clock"),
+                  txt("Open as it was"),
+                ])
+            },
+            case on_disk {
+              "" -> element.none()
+              file ->
+                html.button(
+                  [
+                    class("link open-file"),
+                    event.on_click(app.FileOpened(case string.starts_with(file, "/") {
+                      True -> file
+                      False -> model.root <> "/" <> file
+                    })),
+                    ..labelled("Open " <> file <> " as it is on disk")
+                  ],
+                  [icon("open"), txt("Open file")],
+                )
+            },
+          ]),
+        ]),
+        case c.note, rows {
+          "", [] -> html.p([class("hint pad")], [txt(case c.file {
+            "" -> "Nothing to show yet. Say what to compare and press Enter."
+            _ -> "Both sides are empty, or this is not text."
+          })])
+          "", _ ->
+            html.div([class("diff-rows"), attribute.attribute("data-file", c.file)], list.append(
+              list.take(rows, 4000) |> list.map(fn(r) {
+                (kind, left_no, left, right_no, _, left_pieces, right_pieces) = r
+                case kind {
+                  "…" ->
+                    html.button([class("drow fold"), event.on_click(app.CompareOption(id, "whole"))], [
+                      txt("⋯ " <> left <> " unchanged " <> case left {
+                        "1" -> "line"
+                        _ -> "lines"
+                      }),
+                    ])
+                  _ ->
+                    html.div([class("drow k" <> case kind {
+                      "=" -> "same"
+                      "-" -> "gone"
+                      "+" -> "new"
+                      _ -> "both"
+                    })], [
+                      number(left_no),
+                      html.span([class("dt left")], pieces(left_pieces)),
+                      number(right_no),
+                      html.span([class("dt right")], pieces(right_pieces)),
+                    ])
+                }
+              }),
+              case list.length(rows) > 4000 {
+                True -> [html.p([class("hint pad")], [txt("This comparison is very long; the first 4000 rows are shown.")])]
+                False -> []
+              },
+            ))
+          note, _ -> html.p([class("hint pad")], [txt(note)])
+        },
+      ]),
+    ]),
+  ])
+}

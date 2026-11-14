@@ -1,0 +1,143 @@
+//// Text as a list of lines, and the edits an editor makes to it. Columns count
+//// UTF-16 units, as the browser does.
+
+import gleam/int
+import gleam/list
+import gleam/result
+import gleam/string
+
+@external(javascript, "../runes_ffi.mjs", "len")
+pub def len(text: String) -> Int
+
+@external(javascript, "../runes_ffi.mjs", "cut")
+pub def cut(text: String, from: Int, to: Int) -> String
+
+@external(javascript, "../runes_ffi.mjs", "word_edge")
+def word_edge(line: String, col: Int, forward: Bool) -> Int
+
+/// A place between two characters.
+pub type Pos {
+  line: Int,
+  col: Int,
+}
+
+pub def before(a: Pos, b: Pos) -> Bool {
+  a.line < b.line or { a.line == b.line and a.col < b.col }
+}
+
+/// Two places, the earlier one first.
+pub def ordered(a: Pos, b: Pos) -> (Pos, Pos) {
+  case before(b, a) {
+    True -> (b, a)
+    False -> (a, b)
+  }
+}
+
+pub def line(lines: List(String), n: Int) -> String {
+  lines |> list.drop(n) |> list.first |> result.unwrap("")
+}
+
+pub def last(lines: List(String)) -> Pos {
+  n = int.max(list.length(lines) - 1, 0)
+  Pos(n, len(line(lines, n)))
+}
+
+/// The nearest place that exists in the text.
+pub def clamp(lines: List(String), pos: Pos) -> Pos {
+  n = int.clamp(pos.line, 0, int.max(list.length(lines) - 1, 0))
+  Pos(n, int.clamp(pos.col, 0, len(line(lines, n))))
+}
+
+/// Puts text at a place. Gives the new lines and the place after the text.
+pub def insert(lines: List(String), at: Pos, text: String) -> (List(String), Pos) {
+  (head, rest) = list.split(lines, at.line)
+  (current, tail) = case rest {
+    [first | others] -> (first, others)
+    [] -> ("", [])
+  }
+  left = cut(current, 0, at.col)
+  right = cut(current, at.col, len(current))
+  case string.split(text, "\n") {
+    [] | [_] -> (
+      list.flatten([head, [left <> text <> right], tail]),
+      Pos(at.line, at.col + len(text)),
+    )
+    [first | more] -> {
+      count = list.length(more)
+      final = list.last(more) |> result.unwrap("")
+      middle = list.take(more, count - 1)
+      (
+        list.flatten([head, [left <> first], middle, [final <> right], tail]),
+        Pos(at.line + count, len(final)),
+      )
+    }
+  }
+}
+
+/// Removes what is between two places, the earlier one first.
+pub def delete(lines: List(String), from: Pos, to: Pos) -> List(String) {
+  (head, rest) = list.split(lines, from.line)
+  (middle, tail) = list.split(rest, to.line - from.line + 1)
+  first = list.first(middle) |> result.unwrap("")
+  final = list.last(middle) |> result.unwrap("")
+  list.flatten([head, [cut(first, 0, from.col) <> cut(final, to.col, len(final))], tail])
+}
+
+/// The text between two places, the earlier one first.
+pub def slice(lines: List(String), from: Pos, to: Pos) -> String {
+  middle = lines |> list.drop(from.line) |> list.take(to.line - from.line + 1)
+  case middle {
+    [] -> ""
+    [only] -> cut(only, from.col, to.col)
+    [first | more] -> {
+      count = list.length(more)
+      final = list.last(more) |> result.unwrap("")
+      list.flatten([[cut(first, from.col, len(first))], list.take(more, count - 1), [cut(final, 0, to.col)]])
+      |> string.join("\n")
+    }
+  }
+}
+
+pub def left(lines: List(String), pos: Pos) -> Pos {
+  cond {
+    pos.col > 0 -> Pos(pos.line, pos.col - 1)
+    pos.line > 0 -> Pos(pos.line - 1, len(line(lines, pos.line - 1)))
+    _ -> pos
+  }
+}
+
+pub def right(lines: List(String), pos: Pos) -> Pos {
+  cond {
+    pos.col < len(line(lines, pos.line)) -> Pos(pos.line, pos.col + 1)
+    pos.line < list.length(lines) - 1 -> Pos(pos.line + 1, 0)
+    _ -> pos
+  }
+}
+
+pub def word_left(lines: List(String), pos: Pos) -> Pos {
+  case pos.col {
+    0 -> left(lines, pos)
+    _ -> Pos(pos.line, word_edge(line(lines, pos.line), pos.col, False))
+  }
+}
+
+pub def word_right(lines: List(String), pos: Pos) -> Pos {
+  text = line(lines, pos.line)
+  case pos.col >= len(text) {
+    True -> right(lines, pos)
+    False -> Pos(pos.line, word_edge(text, pos.col, True))
+  }
+}
+
+/// The spaces and tabs a line starts with.
+pub def indent(text: String) -> String {
+  cut(text, 0, len(text) - len(string.trim_start(text)))
+}
+
+/// Where an offset into some text lands, when the text starts at a place.
+pub def advance(from: Pos, text: String, offset: Int) -> Pos {
+  case string.split(cut(text, 0, offset), "\n") {
+    [] | [_] -> Pos(from.line, from.col + offset)
+    parts -> Pos(from.line + list.length(parts) - 1, len(list.last(parts) |> result.unwrap("")))
+  }
+}

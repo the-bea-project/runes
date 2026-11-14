@@ -1,0 +1,254 @@
+//// settings.json, as in VS Code: a flat object of dotted keys. Anything missing or
+//// of the wrong type falls back to its default, so a bad file never stops the editor.
+
+import gleam/dict
+import gleam/dynamic.{type Dynamic}
+import gleam/dynamic/decode.{type Decoder}
+import gleam/float
+import gleam/int
+import gleam/json
+import gleam/list
+import gleam/result
+
+/// One slice of the pie menu. A slice with `items` opens them as a pie of its own, and its
+/// command is not used.
+pub type Slice {
+  label: String,
+  command: String,
+  items: List(Slice),
+}
+
+pub type Settings {
+  font_size: Int,
+  font_family: String,
+  minimap: Bool,
+  theme: String,
+  icon_theme: String,
+  side_right: Bool,
+  animations: Bool,
+  pie: List(Slice),
+  ai_provider: String,
+  ai_model: String,
+  ai_base_url: String,
+  check_updates: Bool,
+  shell: String,
+}
+
+pub const default_pie = [
+  Slice("Go to File", "workbench.action.quickOpen", []),
+  Slice("Split Right", "workbench.action.splitEditor", []),
+  Slice("Terminal", "workbench.action.terminal.toggleTerminal", []),
+  Slice("Find", "actions.find", []),
+  Slice("Commands", "workbench.action.showCommands", []),
+  Slice("Problems", "workbench.actions.view.problems", []),
+  Slice("View", "", [
+    Slice("Side Bar", "workbench.action.toggleSidebarVisibility", []),
+    Slice("Panel", "workbench.action.togglePanel", []),
+    Slice("Maximize", "runes.toggleMaximizeGroup", []),
+    Slice("Settings", "workbench.action.openSettings", []),
+  ]),
+  Slice("Git", "", [
+    Slice("Changes", "workbench.view.scm", []),
+    Slice("Graph", "runes.gitGraph", []),
+    Slice("Compare", "runes.compare", []),
+    Slice("Branch", "git.checkout", []),
+  ]),
+]
+
+pub const defaults = Settings(
+  font_size: 14,
+  font_family: "EnvyCodeR Nerd Font",
+  minimap: True,
+  theme: "Runes Void",
+  icon_theme: "vs-seti",
+  side_right: False,
+  animations: True,
+  pie: default_pie,
+  ai_provider: "anthropic",
+  ai_model: "",
+  ai_base_url: "",
+  check_updates: True,
+  shell: "",
+)
+
+/// The file a new user starts with.
+pub const template = "{
+  // Runes reads the same kind of settings.json as VS Code. Save to apply.
+  \"editor.fontSize\": 14,
+  \"editor.fontFamily\": \"EnvyCodeR Nerd Font\",
+  \"editor.minimap.enabled\": true,
+  \"workbench.colorTheme\": \"Runes Void\",
+  \"workbench.iconTheme\": \"vs-seti\",
+  \"workbench.sideBar.location\": \"left\",
+
+  \"runes.animations\": true,
+
+  // The pie menu: hold the right mouse button, or press Ctrl+Shift+Space. A slice with
+  // \"items\" opens them as a pie of its own. The Settings page edits this as a tree.
+  \"runes.pie.items\": [
+    { \"label\": \"Go to File\", \"command\": \"workbench.action.quickOpen\" },
+    { \"label\": \"Split Right\", \"command\": \"workbench.action.splitEditor\" },
+    { \"label\": \"Terminal\", \"command\": \"workbench.action.terminal.toggleTerminal\" },
+    { \"label\": \"Find\", \"command\": \"actions.find\" },
+    { \"label\": \"Commands\", \"command\": \"workbench.action.showCommands\" },
+    { \"label\": \"Problems\", \"command\": \"workbench.actions.view.problems\" },
+    { \"label\": \"View\", \"items\": [
+      { \"label\": \"Side Bar\", \"command\": \"workbench.action.toggleSidebarVisibility\" },
+      { \"label\": \"Panel\", \"command\": \"workbench.action.togglePanel\" },
+      { \"label\": \"Maximize\", \"command\": \"runes.toggleMaximizeGroup\" },
+      { \"label\": \"Settings\", \"command\": \"workbench.action.openSettings\" }
+    ] },
+    { \"label\": \"Git\", \"items\": [
+      { \"label\": \"Changes\", \"command\": \"workbench.view.scm\" },
+      { \"label\": \"Graph\", \"command\": \"runes.gitGraph\" },
+      { \"label\": \"Compare\", \"command\": \"runes.compare\" },
+      { \"label\": \"Branch\", \"command\": \"git.checkout\" }
+    ] }
+  ],
+
+  // AI chat. \"anthropic\" or \"openai\". The key is set with the command
+  // \"Runes: Set AI API Key\" and is stored encrypted, never in this file.
+  \"runes.ai.provider\": \"anthropic\",
+  \"runes.ai.model\": \"\",
+
+  \"runes.update.check\": true,
+  // The shell terminals start. Empty means your login shell.
+  \"terminal.shell\": \"\"
+}
+"
+
+def number() -> Decoder(Float) {
+  decode.one_of(decode.float, [decode.int |> decode.map(int.to_float)])
+}
+
+def get(all: dict.Dict(String, Dynamic), key: String, decoder: Decoder(a), fallback: a) -> a {
+  dict.get(all, key)
+  |> result.try(fn(value) { decode.run(value, decoder) |> result.replace_error(Nil) })
+  |> result.unwrap(fallback)
+}
+
+def slice_decoder() -> Decoder(Slice) {
+  use label <- decode.field("label", decode.string)
+  use command <- decode.optional_field("command", "", decode.string)
+  use items <- decode.optional_field("items", [], decode.list(decode.recursive(slice_decoder)))
+  decode.success(Slice(label:, command:, items:))
+}
+
+// --- The pie as a tree. A path is the position at each level: [6, 1] is the second item
+// --- inside the seventh slice.
+
+/// The slices shown after walking down `path`: the top level for [].
+pub def level(slices: List(Slice), path: List(Int)) -> List(Slice) {
+  case path {
+    [] -> slices
+    [first, ..rest] -> case list.drop(slices, first) {
+      [slice, .._] -> level(slice.items, rest)
+      [] -> []
+    }
+  }
+}
+
+/// The slice at `path`.
+pub def slice_at(slices: List(Slice), path: List(Int)) -> Result(Slice, Nil) {
+  case path {
+    [] -> Error(Nil)
+    [only] -> list.drop(slices, only) |> list.first
+    [first, ..rest] -> case list.drop(slices, first) {
+      [slice, .._] -> slice_at(slice.items, rest)
+      [] -> Error(Nil)
+    }
+  }
+}
+
+/// Rewrites the list of slices found at `path` ([] for the top level).
+pub def change_level(slices: List(Slice), path: List(Int), change: fn(List(Slice)) -> List(Slice)) -> List(Slice) {
+  case path {
+    [] -> change(slices)
+    [first, ..rest] -> list.index_map(slices, fn(slice, i) {
+      case i == first {
+        True -> Slice(slice | items: change_level(slice.items, rest, change))
+        False -> slice
+      }
+    })
+  }
+}
+
+/// Rewrites the one slice at `path`.
+pub def change_slice(slices: List(Slice), path: List(Int), change: fn(Slice) -> Slice) -> List(Slice) {
+  case list.reverse(path) {
+    [] -> slices
+    [last, ..before] -> change_level(slices, list.reverse(before), fn(found) {
+      list.index_map(found, fn(slice, i) {
+        case i == last {
+          True -> change(slice)
+          False -> slice
+        }
+      })
+    })
+  }
+}
+
+pub def remove_slice(slices: List(Slice), path: List(Int)) -> List(Slice) {
+  case list.reverse(path) {
+    [] -> slices
+    [last, ..before] -> change_level(slices, list.reverse(before), fn(found) {
+      list.index_map(found, fn(slice, i) { (slice, i) }) |> list.filter(fn(p) { p.1 != last }) |> list.map(fn(p) { p.0 })
+    })
+  }
+}
+
+/// Swaps the slice at `path` with its neighbour `by` places along (-1 or 1).
+pub def move_slice(slices: List(Slice), path: List(Int), by: Int) -> List(Slice) {
+  case list.reverse(path) {
+    [] -> slices
+    [last, ..before] -> change_level(slices, list.reverse(before), fn(found) {
+      other = last + by
+      case other >= 0 and other < list.length(found), list.drop(found, last), list.drop(found, other) {
+        True, [mine, .._], [theirs, .._] -> list.index_map(found, fn(slice, i) {
+          cond {
+            i == last -> theirs
+            i == other -> mine
+            _ -> slice
+          }
+        })
+        _, _, _ -> found
+      }
+    })
+  }
+}
+
+pub def encode_pie(slices: List(Slice)) -> json.Json {
+  json.array(slices, fn(slice) {
+    // A slice that opens items keeps the command it had, for when the items are taken away.
+    case slice.items, slice.command {
+      [], command -> json.object([("label", json.string(slice.label)), ("command", json.string(command))])
+      items, "" -> json.object([("label", json.string(slice.label)), ("items", encode_pie(items))])
+      items, command -> json.object([("label", json.string(slice.label)), ("command", json.string(command)), ("items", encode_pie(items))])
+    }
+  })
+}
+
+/// Reads settings text (comments already removed). Unknown keys are ignored.
+pub def parse(text: String) -> Settings {
+  all = json.parse(text, decode.dict(decode.string, decode.dynamic)) |> result.unwrap(dict.new())
+  slice = slice_decoder()
+  d = defaults
+  Settings(
+    font_size: get(all, "editor.fontSize", number(), int.to_float(d.font_size)) |> float.round |> int.clamp(8, 40),
+    font_family: get(all, "editor.fontFamily", decode.string, d.font_family),
+    minimap: get(all, "editor.minimap.enabled", decode.bool, d.minimap),
+    theme: get(all, "workbench.colorTheme", decode.string, d.theme),
+    icon_theme: get(all, "workbench.iconTheme", decode.string, d.icon_theme),
+    side_right: get(all, "workbench.sideBar.location", decode.string, "left") == "right",
+    animations: get(all, "runes.animations", decode.bool, d.animations),
+    pie: case get(all, "runes.pie.items", decode.list(slice), d.pie) {
+      [] -> d.pie
+      items -> items
+    },
+    ai_provider: get(all, "runes.ai.provider", decode.string, d.ai_provider),
+    ai_model: get(all, "runes.ai.model", decode.string, d.ai_model),
+    ai_base_url: get(all, "runes.ai.baseUrl", decode.string, d.ai_base_url),
+    check_updates: get(all, "runes.update.check", decode.bool, d.check_updates),
+    shell: get(all, "terminal.shell", decode.string, d.shell),
+  )
+}

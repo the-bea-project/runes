@@ -1,0 +1,18 @@
+import gleam/io
+
+import lustre
+
+import runes/app
+import runes/view
+
+pub def main() -> Nil {
+  editor = lustre.application(app.init, app.update, view.view)
+  case lustre.start(editor, "#app", Nil) {
+    Ok(_) -> Nil
+    // `bea run` starts this in Node, where there is no window to draw in.
+    Error(_) ->
+      io.println(
+        "Runes is a desktop app, so `bea run` has nothing to show.\n\n" <> "  npm install      once\n" <> "  npm run build    bea build, then bundle into dist/\n" <> "  npm start        open the editor",
+      )
+  }
+}

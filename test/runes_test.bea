@@ -1,0 +1,446 @@
+import gleam/int
+import gleam/json
+import gleam/list
+import gleam/string
+import gleeunit
+import gleeunit/should
+import runes/app.{Compare}
+import runes/buffer.{type Pos, Pos}
+import runes/doc.{type Doc, Doc}
+import runes/extension
+import runes/git.{Commit}
+import runes/keymap
+import runes/layout.{Leaf, Split}
+import runes/settings.{Slice}
+
+pub def main() -> Nil {
+  gleeunit.main()
+}
+
+// --- buffer ----------------------------------------------------------------------------------
+
+pub def insert_within_a_line_test() {
+  (lines, end) = buffer.insert(["hello world"], Pos(0, 5), ",")
+  should.equal(lines, ["hello, world"])
+  should.equal(end, Pos(0, 6))
+}
+
+pub def insert_several_lines_test() {
+  (lines, end) = buffer.insert(["ab", "z"], Pos(0, 1), "1\n2\n3")
+  should.equal(lines, ["a1", "2", "3b", "z"])
+  should.equal(end, Pos(2, 1))
+}
+
+pub def insert_past_the_end_makes_a_line_test() {
+  (lines, _) = buffer.insert([], Pos(0, 0), "x")
+  should.equal(lines, ["x"])
+}
+
+pub def delete_across_lines_test() {
+  should.equal(buffer.delete(["one", "two", "three"], Pos(0, 2), Pos(2, 3)), ["onee"])
+}
+
+pub def delete_then_insert_round_trips_test() {
+  lines = ["pub def main() {", "  todo", "}"]
+  from = Pos(0, 4)
+  to = Pos(1, 3)
+  taken = buffer.slice(lines, from, to)
+  (back, _) = buffer.insert(buffer.delete(lines, from, to), from, taken)
+  should.equal(back, lines)
+}
+
+pub def slice_test() {
+  should.equal(buffer.slice(["one", "two", "three"], Pos(0, 1), Pos(2, 2)), "ne\ntwo\nth")
+  should.equal(buffer.slice(["one"], Pos(0, 1), Pos(0, 1)), "")
+}
+
+pub def clamp_keeps_positions_inside_the_text_test() {
+  should.equal(buffer.clamp(["ab", "c"], Pos(9, 9)), Pos(1, 1))
+  should.equal(buffer.clamp(["ab", "c"], Pos(-3, -3)), Pos(0, 0))
+  should.equal(buffer.clamp([], Pos(2, 2)), Pos(0, 0))
+}
+
+pub def left_and_right_cross_line_ends_test() {
+  should.equal(buffer.left(["ab", "c"], Pos(1, 0)), Pos(0, 2))
+  should.equal(buffer.right(["ab", "c"], Pos(0, 2)), Pos(1, 0))
+  should.equal(buffer.right(["ab", "c"], Pos(1, 1)), Pos(1, 1))
+}
+
+pub def word_motion_test() {
+  should.equal(buffer.word_right(["let total = 12"], Pos(0, 0)), Pos(0, 3))
+  should.equal(buffer.word_left(["let total = 12"], Pos(0, 9)), Pos(0, 4))
+}
+
+pub def advance_test() {
+  should.equal(buffer.advance(Pos(3, 4), "ab\ncd", 4), Pos(4, 1))
+  should.equal(buffer.advance(Pos(3, 4), "abc", 2), Pos(3, 6))
+}
+
+pub def ordered_test() {
+  should.equal(buffer.ordered(Pos(2, 1), Pos(1, 9)), (Pos(1, 9), Pos(2, 1)))
+}
+
+// --- layout ----------------------------------------------------------------------------------
+
+pub def split_puts_the_new_group_on_the_asked_side_test() {
+  should.equal(layout.split(Leaf(1), 1, 2, layout.Right), Split(True, 0.5, Leaf(1), Leaf(2)))
+  should.equal(layout.split(Leaf(1), 1, 2, layout.Top), Split(False, 0.5, Leaf(2), Leaf(1)))
+  should.equal(layout.split(Leaf(1), 7, 2, layout.Right), Leaf(1))
+}
+
+pub def groups_are_listed_in_reading_order_test() {
+  tree = layout.split(Leaf(1), 1, 2, layout.Right) |> layout.split(2, 3, layout.Bottom)
+  should.equal(layout.groups(tree), [1, 2, 3])
+}
+
+pub def removing_a_group_gives_its_space_to_the_sibling_test() {
+  tree = layout.split(Leaf(1), 1, 2, layout.Right) |> layout.split(2, 3, layout.Bottom)
+  should.equal(layout.remove(tree, 2), Split(True, 0.5, Leaf(1), Leaf(3)))
+  should.equal(layout.remove(Leaf(1), 1), Leaf(1))
+}
+
+pub def resize_reaches_nested_splits_and_stays_usable_test() {
+  tree = layout.split(Leaf(1), 1, 2, layout.Right) |> layout.split(2, 3, layout.Bottom)
+  should.equal(layout.resize(tree, "1", 0.7), Split(True, 0.5, Leaf(1), Split(False, 0.7, Leaf(2), Leaf(3))))
+  should.equal(layout.resize(tree, "", 0.01), Split(True, 0.1, Leaf(1), Split(False, 0.5, Leaf(2), Leaf(3))))
+  should.equal(layout.resize(tree, "000", 0.3), tree)
+}
+
+pub def next_wraps_round_test() {
+  tree = layout.split(Leaf(1), 1, 2, layout.Right)
+  should.equal(layout.next(tree, 2, 1), 1)
+  should.equal(layout.next(tree, 1, -1), 2)
+}
+
+// --- keymap ----------------------------------------------------------------------------------
+
+pub def defaults_follow_vs_code_test() {
+  should.equal(keymap.command(keymap.defaults, "ctrl+shift+p"), "workbench.action.showCommands")
+  should.equal(keymap.command(keymap.defaults, "ctrl+/"), "editor.action.commentLine")
+  should.equal(keymap.command(keymap.defaults, "ctrl+`"), "workbench.action.terminal.toggleTerminal")
+  should.equal(keymap.command(keymap.defaults, "ctrl+q"), "")
+}
+
+pub def chords_are_normalised_test() {
+  should.equal(keymap.normal("Shift+Ctrl+P"), "ctrl+shift+p")
+  should.equal(keymap.normal("alt+up"), "alt+arrowup")
+  should.equal(keymap.normal("cmd+s"), "ctrl+s")
+}
+
+pub def user_bindings_win_and_can_remove_defaults_test() {
+  user = keymap.parse("[{\"key\": \"Ctrl+Shift+D\", \"command\": \"editor.action.copyLinesDownAction\"}, {\"key\": \"ctrl+d\", \"command\": \"-editor.action.addSelectionToNextFindMatch\"}, {\"nonsense\": true}]")
+  merged = keymap.merge(user)
+  should.equal(keymap.command(merged, "ctrl+shift+d"), "editor.action.copyLinesDownAction")
+  should.equal(keymap.command(merged, "ctrl+d"), "")
+  should.equal(keymap.command(merged, "ctrl+s"), "workbench.action.files.save")
+}
+
+pub def a_broken_keybindings_file_changes_nothing_test() {
+  should.equal(keymap.merge(keymap.parse("not json")), keymap.defaults)
+}
+
+pub def keys_are_shown_readably_test() {
+  should.equal(keymap.key_for(keymap.defaults, "workbench.action.showCommands"), "Ctrl+Shift+P")
+  should.equal(keymap.key_for(keymap.defaults, "no.such.command"), "")
+}
+
+// --- settings --------------------------------------------------------------------------------
+
+pub def empty_settings_are_the_defaults_test() {
+  should.equal(settings.parse("{}"), settings.defaults)
+  should.equal(settings.parse("this is not json"), settings.defaults)
+}
+
+pub def settings_are_read_and_bounded_test() {
+  s = settings.parse("{\"editor.fontSize\": 400, \"workbench.colorTheme\": \"Demo Sunset\", \"workbench.sideBar.location\": \"right\", \"editor.minimap.enabled\": false}")
+  should.equal(s.font_size, 40)
+  should.equal(s.theme, "Demo Sunset")
+  should.equal(s.side_right, True)
+  should.equal(s.minimap, False)
+}
+
+pub def a_wrong_type_falls_back_to_the_default_test() {
+  s = settings.parse("{\"editor.fontSize\": \"big\", \"runes.pie.items\": 3}")
+  should.equal(s.font_size, 14)
+  should.equal(s.pie, settings.default_pie)
+}
+
+pub def the_pie_can_be_replaced_test() {
+  s = settings.parse("{\"runes.pie.items\": [{\"label\": \"Save\", \"command\": \"workbench.action.files.save\"}]}")
+  should.equal(s.pie, [Slice("Save", "workbench.action.files.save", [])])
+}
+
+pub def a_slice_can_hold_a_pie_of_its_own_test() {
+  s = settings.parse("{\"runes.pie.items\": [{\"label\": \"Git\", \"items\": [{\"label\": \"Graph\", \"command\": \"runes.gitGraph\"}, {\"label\": \"More\", \"items\": [{\"label\": \"Branch\", \"command\": \"git.checkout\"}]}]}]}")
+  should.equal(s.pie, [Slice("Git", "", [Slice("Graph", "runes.gitGraph", []), Slice("More", "", [Slice("Branch", "git.checkout", [])])])])
+  // What is written back reads the same.
+  again = settings.parse("{\"runes.pie.items\": " <> json.to_string(settings.encode_pie(s.pie)) <> "}")
+  should.equal(again.pie, s.pie)
+}
+
+/// Every slice either runs a command or opens items that do, all the way down.
+def sound(slices: List(settings.Slice)) -> Bool {
+  list.all(slices, fn(slice) {
+    case slice.items {
+      [] -> string.contains(slice.command, ".")
+      items -> sound(items)
+    }
+  })
+}
+
+pub def every_default_pie_slice_leads_to_a_command_test() {
+  should.be_true(sound(settings.default_pie))
+  should.be_true(list.any(settings.default_pie, fn(slice) { slice.items != [] }))
+}
+
+pub def the_pie_tree_is_walked_by_path_test() {
+  pie = [Slice("A", "a.a", []), Slice("B", "", [Slice("B1", "b.one", []), Slice("B2", "b.two", [])])]
+  should.equal(settings.level(pie, []), pie)
+  should.equal(settings.level(pie, [1]) |> list.map(fn(s) { s.label }), ["B1", "B2"])
+  should.equal(settings.level(pie, [0]), [])
+  should.equal(settings.level(pie, [7]), [])
+  should.equal(settings.slice_at(pie, [1, 1]), Ok(Slice("B2", "b.two", [])))
+  should.equal(settings.slice_at(pie, []), Error(Nil))
+}
+
+pub def the_pie_tree_is_edited_by_path_test() {
+  pie = [Slice("A", "a.a", []), Slice("B", "", [Slice("B1", "b.one", []), Slice("B2", "b.two", [])])]
+  renamed = settings.change_slice(pie, [1, 0], fn(s) { Slice(s | label: "First") })
+  should.equal(settings.level(renamed, [1]) |> list.map(fn(s) { s.label }), ["First", "B2"])
+  // Adding inside a plain slice turns it into a submenu.
+  grown = settings.change_level(pie, [0], fn(items) { list.append(items, [Slice("A1", "a.one", [])]) })
+  should.equal(settings.level(grown, [0]), [Slice("A1", "a.one", [])])
+  should.equal(settings.remove_slice(pie, [1, 0]) |> settings.level([1]) |> list.map(fn(s) { s.label }), ["B2"])
+  should.equal(settings.remove_slice(pie, [0]) |> list.map(fn(s) { s.label }), ["B"])
+  should.equal(settings.move_slice(pie, [1, 0], 1) |> settings.level([1]) |> list.map(fn(s) { s.label }), ["B2", "B1"])
+  // Off either end, nothing moves.
+  should.equal(settings.move_slice(pie, [0], -1), pie)
+  should.equal(settings.move_slice(pie, [1, 1], 1), pie)
+}
+
+// --- extension manifests ---------------------------------------------------------------------
+
+const manifest = "{\"name\": \"demo\", \"displayName\": \"Demo\", \"publisher\": \"me\", \"version\": \"1.2.3\", \"main\": \"./out/extension.js\", \"icon\": \"images/icon.png\",
+  \"contributes\": {
+    \"languages\": [{\"id\": \"demo\", \"aliases\": [\"Demo\"], \"extensions\": [\".demo\"], \"configuration\": \"./lc.json\"}, {\"broken\": true}],
+    \"grammars\": [{\"language\": \"demo\", \"scopeName\": \"source.demo\", \"path\": \"./demo.tmLanguage.json\"}],
+    \"themes\": [{\"label\": \"Demo Dark\", \"uiTheme\": \"vs-dark\", \"path\": \"./dark.json\"}],
+    \"iconThemes\": [{\"id\": \"demo-icons\", \"label\": \"Demo Icons\", \"path\": \"./icons.json\"}],
+    \"commands\": [{\"command\": \"demo.restart\", \"title\": \"Restart\", \"category\": \"Demo\"}, {\"command\": \"demo.plain\", \"title\": \"Plain\"}, {\"title\": \"no id\"}],
+    \"debuggers\": [{}]
+  }}"
+
+pub def a_manifest_is_read_test() {
+  e = extension.parse("me.demo", manifest, False) |> should.be_ok
+  should.equal(e.name, "Demo")
+  should.equal(e.version, "1.2.3")
+  should.equal(e.main, "./out/extension.js")
+  should.equal(list.map(e.languages, fn(l) { l.id }), ["demo"])
+  should.equal(list.map(e.grammars, fn(g) { g.scope }), ["source.demo"])
+  should.equal(list.map(e.themes, fn(t) { t.label }), ["Demo Dark"])
+  should.equal(list.map(e.icon_themes, fn(t) { t.label }), ["Demo Icons"])
+  should.equal(e.ignored, ["debuggers"])
+  should.equal(e.icon, "images/icon.png")
+  should.equal(e.commands, [("demo.restart", "Demo: Restart"), ("demo.plain", "Plain")])
+}
+
+pub def a_manifest_that_is_not_json_is_refused_test() {
+  extension.parse("x.y", "<html>", False) |> should.be_error
+}
+
+pub def a_language_configuration_is_read_test() {
+  c = extension.config("{\"comments\": {\"lineComment\": \"//\"}, \"autoClosingPairs\": [[\"(\", \")\"], {\"open\": \"\\\"\", \"close\": \"\\\"\", \"notIn\": [\"string\"]}]}")
+  should.equal(c.line_comment, "//")
+  should.equal(c.pairs, [("(", ")"), ("\"", "\"")])
+  should.equal(extension.config("garbage").pairs, [])
+}
+
+pub def snippets_are_read_test() {
+  found = extension.snippet_list("{\"Case\": {\"prefix\": [\"case\", \"match\"], \"body\": [\"case ${1:x} {\", \"}\"], \"description\": \"A case\"}, \"Bad\": 3}")
+  should.equal(list.map(found, fn(s) { s.prefix }), ["case", "match"])
+  should.equal(list.first(found) |> should.be_ok |> fn(s: extension.Snippet) { s.body }, "case ${1:x} {\n}")
+}
+
+// --- the git graph ---------------------------------------------------------------------------
+
+def commit(hash: String, parents: List(String)) -> git.Commit {
+  Commit(hash, parents, "ada", 0, [], hash)
+}
+
+pub def a_straight_history_stays_in_one_lane_test() {
+  rows = git.layout([commit("c", ["b"]), commit("b", ["a"]), commit("a", [])])
+  should.equal(list.map(rows, fn(r) { r.lane }), [0, 0, 0])
+  should.equal(list.map(rows, fn(r) { r.incoming }), [[], [0], [0]])
+  should.equal(list.map(rows, fn(r) { r.outgoing }), [[0], [0], []])
+  should.equal(list.map(rows, fn(r) { r.width }), [1, 1, 1])
+}
+
+pub def a_branch_and_its_merge_take_a_second_lane_test() {
+  // m merges f into the main line: m -> (c, f), c -> a, f -> a
+  rows = git.layout([commit("m", ["c", "f"]), commit("c", ["a"]), commit("f", ["a"]), commit("a", [])])
+  should.equal(list.map(rows, fn(r) { r.lane }), [0, 0, 1, 0])
+  // The merge sends one line down its own lane and one to the branch's.
+  should.equal(list.first(rows) |> should.be_ok |> fn(r: git.Row) { r.outgoing }, [0, 1])
+  // While c is drawn, the branch's lane passes by.
+  should.equal(list.drop(rows, 1) |> list.first |> should.be_ok |> fn(r: git.Row) { r.through }, [1])
+  // f joins the lane already heading for a, and a receives both lines.
+  should.equal(list.drop(rows, 2) |> list.first |> should.be_ok |> fn(r: git.Row) { r.outgoing }, [0])
+  should.equal(list.last(rows) |> should.be_ok |> fn(r: git.Row) { r.incoming }, [0])
+}
+
+pub def two_unmerged_branches_get_a_lane_each_and_free_lanes_are_reused_test() {
+  rows = git.layout([commit("x2", ["x1"]), commit("y1", ["a"]), commit("x1", ["a"]), commit("a", []), commit("z", [])])
+  should.equal(list.map(rows, fn(r) { r.lane }), [0, 1, 0, 1, 0])
+  should.equal(list.drop(rows, 3) |> list.first |> should.be_ok |> fn(r: git.Row) { r.incoming }, [1])
+}
+
+pub def lanes_past_the_eighth_reuse_a_colour_with_another_shape_test() {
+  should.equal(git.style(0), (0, 0))
+  should.equal(git.style(7), (7, 0))
+  should.equal(git.style(8), (0, 1))
+  should.equal(git.style(17), (1, 2))
+  should.be_true(git.style(3) != git.style(11))
+}
+
+pub def the_legend_names_branches_not_tags_test() {
+  rows = git.layout([Commit("b", ["a"], "ada", 0, ["main", "origin/main", "tag: v1", "origin/HEAD"], "b"), Commit("a", [], "ada", 0, [], "a")])
+  should.equal(git.legend(rows), [("main", 0), ("origin/main", 0)])
+}
+
+// --- Sessions ---------------------------------------------------------------------------------------
+
+pub def commit_names_are_cut_to_seven_test() {
+  hash = "a59a550d6b20b6fbcefc000924988ffea1bc8cd7"
+  should.equal(app.brief(hash), "a59a550")
+  should.equal(app.brief(hash <> "^"), "a59a550^")
+  should.equal(app.brief("feature/notes"), "feature/notes")
+}
+
+pub def a_session_knows_when_it_shows_one_commit_test() {
+  hash = "a59a550d6b20b6fbcefc000924988ffea1bc8cd7"
+  blank = Compare(1, False, "", "", "", [], "", [], [], False, "", False, "")
+  should.equal(app.session_commit(Compare(blank | from: hash <> "^", to: hash)), hash)
+  // Two branches, a branch against the working tree, and two files are not one commit.
+  should.equal(app.session_commit(Compare(blank | from: "main", to: "feature/notes")), "")
+  should.equal(app.session_commit(Compare(blank | from: "HEAD", to: "")), "")
+  should.equal(app.session_commit(Compare(blank | files_mode: True, from: "a^", to: "a")), "")
+}
+
+pub def tabs_know_their_session_test() {
+  should.equal(app.session_of(app.diff_tab <> "12"), 12)
+  should.equal(app.session_of(app.graph_tab), 0)
+  should.equal(app.session_of("/home/me/notes.md"), 0)
+}
+
+pub def quick_fix_is_on_ctrl_dot_test() {
+  should.equal(keymap.key_for(keymap.defaults, "editor.action.quickFix"), "Ctrl+.")
+}
+
+// --- Markdown ---------------------------------------------------------------------------------------
+
+@external(javascript, "./runes_ffi.mjs", "markdown")
+def markdown(text: String) -> String
+
+pub def markdown_is_drawn_test() {
+  should.equal(markdown("# Shop\n\nA **sample** _project_ with `code`."), "<h1>Shop</h1>\n<p>A <strong>sample</strong> <em>project</em> with <code>code</code>.</p>")
+  should.equal(markdown("- one\n- two\n  - inner\n\n1. first\n2. second"), "<ul><li>one</li><li>two<ul><li>inner</li></ul></li></ul>\n<ol><li>first</li><li>second</li></ol>")
+  should.equal(markdown("```bea\npub def a() { 1 < 2 }\n```"), "<pre class=\"md-code\" data-language=\"bea\"><code>pub def a() { 1 &lt; 2 }</code></pre>")
+  should.equal(markdown("| a | b |\n|---|---|\n| 1 | 2 |"), "<table><thead><tr><th>a</th><th>b</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>")
+  should.equal(markdown("> quoted\n\n---\n\n- [x] done\n- [ ] not yet"), "<blockquote><p>quoted</p></blockquote>\n<hr>\n<ul><li><span class=\"md-box done\"></span>done</li><li><span class=\"md-box\"></span>not yet</li></ul>")
+}
+
+/// Nothing a document says becomes markup of its own, and no address is ever followed by the page.
+pub def markdown_cannot_bring_markup_or_scripts_test() {
+  nasty = markdown("<script>alert(1)</script>\n\n<img src=x onerror=alert(1)>\n\n[click](javascript:alert(1)) and [ok](https://example.com/a?b=1&c=2)\n\n![pic](https://example.com/p.png) `<b>` \" onmouseover=\"x")
+  should.be_false(string.contains(nasty, "<script"))
+  should.be_false(string.contains(nasty, "alert(1)<"))
+  should.be_false(string.contains(markdown("a\n\n<style>p { display: none }</style>\n\nb"), "display"))
+  should.be_false(string.contains(nasty, "<img"))
+  should.be_false(string.contains(nasty, "onerror"))
+  should.be_false(string.contains(nasty, "javascript:"))
+  should.be_false(string.contains(nasty, " href="))
+  should.be_false(string.contains(nasty, "onmouseover=\""))
+  should.be_true(string.contains(nasty, "<a data-href=\"https://example.com/a?b=1&amp;c=2\""))
+  should.be_true(string.contains(nasty, "<span class=\"md-image\">pic</span>"))
+  should.be_true(string.contains(nasty, "<code>&lt;b&gt;</code>"))
+}
+
+// --- Several cursors ------------------------------------------------------------------------------
+
+def text(lines: List(String), at: Pos) -> Doc {
+  Doc("/t.txt", "t.txt", "plaintext", lines, at, at, -1, 0, 0, 0, [], [], False, False, [])
+}
+
+pub def every_occurrence_is_selected_test() {
+  d = doc.select_all_like(text(["foo bar foo", "x foo", "food"], Pos(0, 1)))
+  // The word under the cursor stays the main selection; the others follow in order.
+  should.equal((d.anchor, d.cursor), (Pos(0, 0), Pos(0, 3)))
+  should.equal(d.more, [(Pos(0, 8), Pos(0, 11)), (Pos(1, 2), Pos(1, 5)), (Pos(2, 0), Pos(2, 3))])
+  // A selection is looked for as it is, not as a word.
+  picked = doc.select_all_like(Doc(text(["a.b a.b", "a-b"], Pos(0, 3)) | anchor: Pos(0, 0)))
+  should.equal(list.length(doc.selections(picked)), 2)
+  // Nothing to look for: nothing happens.
+  should.equal(doc.select_all_like(text(["  ", "x"], Pos(0, 1))).more, [])
+}
+
+pub def typing_goes_to_every_cursor_and_undoes_as_one_test() {
+  start = doc.select_all_like(text(["foo bar foo", "x foo"], Pos(0, 0)))
+  typed = doc.each(start, fn(d) { doc.put(d, "quux", True) })
+  should.equal(typed.lines, ["quux bar quux", "x quux"])
+  // Each cursor sits after its own text, the ones later on a line moved along by the earlier ones.
+  should.equal(typed.cursor, Pos(0, 4))
+  should.equal(list.map(typed.more, fn(m) { m.1 }) |> list.sort(fn(a, b) { int.compare(a.line * 100 + a.col, b.line * 100 + b.col) }), [Pos(0, 13), Pos(1, 6)])
+  more = doc.each(typed, fn(d) { doc.put(d, "!", True) })
+  should.equal(more.lines, ["quux! bar quux!", "x quux!"])
+  // The whole of it is one step back, however many cursors there were.
+  should.equal(doc.undo(more).lines, ["foo bar foo", "x foo"])
+  should.equal(doc.undo(more).more, [])
+}
+
+pub def new_lines_at_several_cursors_keep_the_others_in_place_test() {
+  start = Doc(text(["ab", "cd", "ef"], Pos(0, 1)) | more: [(Pos(1, 1), Pos(1, 1)), (Pos(2, 1), Pos(2, 1))])
+  split = doc.each(start, doc.enter)
+  should.equal(split.lines, ["a", "b", "c", "d", "e", "f"])
+  should.equal([split.cursor, ..list.map(split.more, fn(m) { m.1 })] |> list.map(fn(p) { p.line }) |> list.sort(int.compare), [1, 3, 5])
+  marked = doc.each(split, fn(d) { doc.put(d, ">", True) })
+  should.equal(marked.lines, ["a", ">b", "c", ">d", "e", ">f"])
+}
+
+pub def cursors_that_meet_become_one_test() {
+  start = Doc(text(["ab"], Pos(0, 1)) | more: [(Pos(0, 2), Pos(0, 2))])
+  once = doc.each(start, fn(d) { doc.remove(d, buffer.left(d.lines, d.cursor), d.cursor) })
+  should.equal(once.lines, [""])
+  should.equal(once.more, [])
+}
+
+pub def the_next_occurrence_is_added_one_at_a_time_test() {
+  first = doc.add_next_like(text(["foo bar foo", "foo"], Pos(0, 9)))
+  // The first press selects the word.
+  should.equal((first.anchor, first.cursor, first.more), (Pos(0, 8), Pos(0, 11), []))
+  second = doc.add_next_like(first)
+  should.equal((second.anchor, second.cursor), (Pos(1, 0), Pos(1, 3)))
+  // It wraps round to the top, and stops when every one is taken.
+  third = doc.add_next_like(second)
+  should.equal((third.anchor, third.cursor), (Pos(0, 0), Pos(0, 3)))
+  should.equal(list.length(doc.selections(third)), 3)
+  should.equal(doc.add_next_like(third), third)
+}
+
+pub def cursors_are_added_above_below_and_by_hand_test() {
+  start = text(["abcdef", "ab", "abcdef"], Pos(0, 4))
+  down = doc.add_cursor_beside(doc.add_cursor_beside(start, 1), 1)
+  // A short line takes the cursor at its end; the next goes back to the column.
+  should.equal(down.more, [(Pos(1, 2), Pos(1, 2)), (Pos(2, 4), Pos(2, 4))])
+  should.equal(doc.add_cursor_beside(down, 1), down)
+  should.equal(doc.add_cursor_beside(start, -1), start)
+  clicked = doc.toggle_cursor(start, Pos(2, 1))
+  should.equal((clicked.cursor, clicked.more), (Pos(2, 1), [(Pos(0, 4), Pos(0, 4))]))
+  // Clicking a cursor again takes it away.
+  should.equal(doc.toggle_cursor(clicked, Pos(0, 4)).more, [])
+  should.equal(doc.single(down).more, [])
+}
+
+pub def select_all_occurrences_is_on_ctrl_shift_l_test() {
+  should.equal(keymap.key_for(keymap.defaults, "editor.action.selectHighlights"), "Ctrl+Shift+L")
+  should.equal(keymap.key_for(keymap.defaults, "editor.action.addSelectionToNextFindMatch"), "Ctrl+D")
+}

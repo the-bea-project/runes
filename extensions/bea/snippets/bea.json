@@ -1,0 +1,203 @@
+{
+  "Function": {
+    "prefix": "def",
+    "body": [
+      "def ${1:name}(${2}) {",
+      "\t$0",
+      "}"
+    ],
+    "description": "A private function"
+  },
+  "Public function": {
+    "prefix": "pubdef",
+    "body": [
+      "pub def ${1:name}(${2}) -> ${3:Nil} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "A public function with its return type"
+  },
+  "Function clauses": {
+    "prefix": "defc",
+    "body": [
+      "def ${1:name}(${2:pattern}) {",
+      "\t$3",
+      "}",
+      "",
+      "def ${1:name}(${4:_}) {",
+      "\t$0",
+      "}"
+    ],
+    "description": "A function written as clauses, one per shape of its arguments"
+  },
+  "Main function": {
+    "prefix": "main",
+    "body": [
+      "pub def main() {",
+      "\t$0",
+      "}"
+    ],
+    "description": "The entry point `bea run` calls"
+  },
+  "Record": {
+    "prefix": "record",
+    "body": [
+      "pub type ${1:Name} {",
+      "\t${2:field}: ${3:String},",
+      "}"
+    ],
+    "description": "A record: a type with one constructor of the same name"
+  },
+  "Type": {
+    "prefix": "type",
+    "body": [
+      "pub type ${1:Name} {",
+      "\t${2:First}",
+      "\t${3:Second}",
+      "}"
+    ],
+    "description": "A type with several constructors"
+  },
+  "Derived record": {
+    "prefix": "derive",
+    "body": [
+      "@derive(${1:decoder})",
+      "pub type ${2:Name} {",
+      "\t${3:field}: ${4:String},",
+      "}"
+    ],
+    "description": "A record whose functions are written by a deriver module"
+  },
+  "External function": {
+    "prefix": "external",
+    "body": [
+      "@external(${1|erlang,javascript|}, \"${2:module}\", \"${3:function}\")",
+      "pub def ${4:name}(${5}) -> ${6:Nil}"
+    ],
+    "description": "A function implemented in Erlang or JavaScript"
+  },
+  "Constant": {
+    "prefix": "const",
+    "body": "pub const ${1:name}: ${2:Int} = ${0:0}",
+    "description": "A module constant"
+  },
+  "Import": {
+    "prefix": "import",
+    "body": "import ${1:gleam/io}",
+    "description": "Import a module"
+  },
+  "case": {
+    "prefix": "case",
+    "body": [
+      "case ${1:value} {",
+      "\t${2:pattern} -> $3",
+      "\t_ -> $0",
+      "}"
+    ],
+    "description": "Match a value against patterns"
+  },
+  "cond": {
+    "prefix": "cond",
+    "body": [
+      "cond {",
+      "\t${1:condition} -> $2",
+      "\t_ -> $0",
+      "}"
+    ],
+    "description": "The first true condition wins"
+  },
+  "if": {
+    "prefix": "if",
+    "body": [
+      "if ${1:condition} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "if"
+  },
+  "if else": {
+    "prefix": "ife",
+    "body": [
+      "if ${1:condition} {",
+      "\t$2",
+      "} else {",
+      "\t$0",
+      "}"
+    ],
+    "description": "if / else, as an expression"
+  },
+  "Early return": {
+    "prefix": "ifr",
+    "body": [
+      "if ${1:condition} {",
+      "\treturn ${0:value}",
+      "}"
+    ],
+    "description": "Leave the function early"
+  },
+  "Guard": {
+    "prefix": "guard",
+    "body": "${1:condition} else ${0:fallback}",
+    "description": "A boolean guard: return the fallback unless the condition holds"
+  },
+  "Pattern guard": {
+    "prefix": "guardp",
+    "body": "${1:Ok(value)} = ${2:expression} else ${0:fallback}",
+    "description": "A guard: return the fallback when the value doesn't match the pattern"
+  },
+  "Try or else": {
+    "prefix": "tryelse",
+    "body": "${1:value} = ${2:expression}? else ${3:error} -> ${0:fallback}",
+    "description": "Unwrap an Ok, or return a fallback made from the error"
+  },
+  "Anonymous function": {
+    "prefix": "fn",
+    "body": "fn(${1:x}) { $0 }",
+    "description": "An anonymous function"
+  },
+  "Anonymous function clauses": {
+    "prefix": "fnc",
+    "body": [
+      "fn {",
+      "\t${1:pattern} -> $2",
+      "\t_ -> $0",
+      "}"
+    ],
+    "description": "An anonymous function written as clauses"
+  },
+  "use": {
+    "prefix": "use",
+    "body": "use ${1:value} <- ${0:function}",
+    "description": "Call a function with the rest of the block as its callback"
+  },
+  "Interpolation": {
+    "prefix": "interp",
+    "body": "#{${1:value}}",
+    "description": "Interpolate a String expression in a string"
+  },
+  "Map": {
+    "prefix": "map",
+    "body": "%{${1:\"key\"}: ${2:value}}",
+    "description": "A dict literal"
+  },
+  "Record update": {
+    "prefix": "update",
+    "body": "${1:Name}(${2:record} | ${3:field}: ${0:value})",
+    "description": "A copy of a record with some fields changed"
+  },
+  "echo": {
+    "prefix": "echo",
+    "body": "echo ${0:value}",
+    "description": "Print a value with where it is, for debugging"
+  },
+  "todo": {
+    "prefix": "todo",
+    "body": "todo as \"${0:not done yet}\"",
+    "description": "Code still to be written"
+  },
+  "Documentation comment": {
+    "prefix": "doc",
+    "body": "/// ${0}",
+    "description": "A doc comment for the definition below"
+  }
+}

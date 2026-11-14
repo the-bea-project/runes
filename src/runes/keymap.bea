@@ -1,0 +1,141 @@
+//// Key chords and the commands they run. The defaults follow VS Code.
+
+import gleam/dict
+import gleam/dynamic/decode
+import gleam/json
+import gleam/list
+import gleam/result
+import gleam/string
+
+pub type Binding {
+  key: String,
+  command: String,
+}
+
+/// VS Code's defaults for the commands Runes has.
+pub const defaults = [
+  Binding("ctrl+p", "workbench.action.quickOpen"),
+  Binding("ctrl+shift+p", "workbench.action.showCommands"),
+  Binding("f1", "workbench.action.showCommands"),
+  Binding("ctrl+s", "workbench.action.files.save"),
+  Binding("ctrl+n", "workbench.action.files.newUntitledFile"),
+  Binding("ctrl+o", "workbench.action.files.openFolder"),
+  Binding("ctrl+w", "workbench.action.closeActiveEditor"),
+  Binding("ctrl+b", "workbench.action.toggleSidebarVisibility"),
+  Binding("ctrl+j", "workbench.action.togglePanel"),
+  Binding("ctrl+`", "workbench.action.terminal.toggleTerminal"),
+  Binding("ctrl+shift+`", "workbench.action.terminal.new"),
+  Binding("ctrl+shift+e", "workbench.view.explorer"),
+  Binding("ctrl+shift+f", "workbench.view.search"),
+  Binding("ctrl+shift+x", "workbench.view.extensions"),
+  Binding("ctrl+shift+g", "workbench.view.scm"),
+  Binding("ctrl+shift+m", "workbench.actions.view.problems"),
+  Binding("ctrl+alt+i", "workbench.action.chat.open"),
+  Binding("ctrl+,", "workbench.action.openSettings"),
+  Binding("ctrl+k", "workbench.action.selectTheme"),
+  Binding("ctrl+\\", "workbench.action.splitEditor"),
+  Binding("ctrl+alt+\\", "workbench.action.splitEditorDown"),
+  Binding("ctrl+1", "workbench.action.focusFirstEditorGroup"),
+  Binding("ctrl+2", "workbench.action.focusSecondEditorGroup"),
+  Binding("ctrl+3", "workbench.action.focusThirdEditorGroup"),
+  Binding("ctrl+pagedown", "workbench.action.nextEditor"),
+  Binding("ctrl+pageup", "workbench.action.previousEditor"),
+  Binding("ctrl+tab", "workbench.action.nextEditor"),
+  Binding("ctrl+shift+i", "workbench.action.toggleDevTools"),
+  Binding("ctrl+=", "workbench.action.zoomIn"),
+  Binding("ctrl+-", "workbench.action.zoomOut"),
+  Binding("ctrl+0", "workbench.action.zoomReset"),
+  Binding("ctrl+f", "actions.find"),
+  Binding("ctrl+h", "editor.action.startFindReplaceAction"),
+  Binding("f3", "editor.action.nextMatchFindAction"),
+  Binding("shift+f3", "editor.action.previousMatchFindAction"),
+  Binding("ctrl+g", "workbench.action.gotoLine"),
+  Binding("ctrl+/", "editor.action.commentLine"),
+  Binding("ctrl+d", "editor.action.addSelectionToNextFindMatch"),
+  Binding("ctrl+shift+l", "editor.action.selectHighlights"),
+  Binding("ctrl+alt+arrowup", "editor.action.insertCursorAbove"),
+  Binding("ctrl+alt+arrowdown", "editor.action.insertCursorBelow"),
+  Binding("shift+alt+arrowdown", "editor.action.copyLinesDownAction"),
+  Binding("alt+arrowup", "editor.action.moveLinesUpAction"),
+  Binding("alt+arrowdown", "editor.action.moveLinesDownAction"),
+  Binding("ctrl+z", "undo"),
+  Binding("ctrl+shift+z", "redo"),
+  Binding("ctrl+y", "redo"),
+  Binding("ctrl+a", "editor.action.selectAll"),
+  Binding("ctrl+space", "editor.action.triggerSuggest"),
+  Binding("f12", "editor.action.revealDefinition"),
+  Binding("ctrl+.", "editor.action.quickFix"),
+  Binding("alt+f3", "editor.action.dirtydiff.next"),
+  Binding("shift+alt+f3", "editor.action.dirtydiff.previous"),
+  Binding("ctrl+shift+v", "markdown.showPreview"),
+  Binding("shift+alt+f", "editor.action.formatDocument"),
+  Binding("f8", "editor.action.marker.next"),
+  Binding("shift+f8", "editor.action.marker.prev"),
+  Binding("ctrl+shift+space", "runes.pie"),
+  Binding("ctrl+alt+m", "runes.toggleMaximizeGroup"),
+]
+
+/// Reads a keybindings.json: a list of `{ "key": …, "command": … }`. A command that
+/// starts with "-" removes a default, as in VS Code.
+pub def parse(text: String) -> List(Binding) {
+  entry = {
+    use key <- decode.field("key", decode.string)
+    use command <- decode.field("command", decode.string)
+    decode.success([Binding(normal(key), command)])
+  }
+  json.parse(text, decode.list(decode.one_of(entry, [decode.success([])])))
+  |> result.unwrap([])
+  |> list.flatten
+}
+
+/// A chord in one spelling: lower case, modifiers in the order ctrl, shift, alt.
+pub def normal(key: String) -> String {
+  parts = string.lowercase(key) |> string.replace("cmd", "ctrl") |> string.replace("meta", "ctrl") |> string.split("+")
+  mods = ["ctrl", "shift", "alt"] |> list.filter(list.contains(parts, _))
+  rest = list.filter(parts, fn(p) { not list.contains(["ctrl", "shift", "alt"], p) })
+    |> list.map(fn(p) {
+      case p {
+        "up" | "down" | "left" | "right" -> "arrow" <> p
+        "" -> "+"
+        _ -> p
+      }
+    })
+  string.join(list.append(mods, rest), "+")
+}
+
+/// The user's bindings laid over the defaults.
+pub def merge(user: List(Binding)) -> List(Binding) {
+  removed = list.filter_map(user, fn(b) {
+    case b.command {
+      "-" <> command -> Ok((b.key, command))
+      _ -> Error(Nil)
+    }
+  })
+  kept = list.filter(defaults, fn(b) { not list.contains(removed, (b.key, b.command)) })
+  list.append(list.filter(user, fn(b) { not string.starts_with(b.command, "-") }), kept)
+}
+
+/// The command a chord runs, or "".
+pub def command(bindings: List(Binding), chord: String) -> String {
+  list.find(bindings, fn(b) { b.key == chord }) |> result.map(fn(b) { b.command }) |> result.unwrap("")
+}
+
+/// The chord shown beside a command, or "".
+pub def key_for(bindings: List(Binding), command: String) -> String {
+  list.find(bindings, fn(b) { b.command == command })
+  |> result.map(fn(b) { pretty(b.key) })
+  |> result.unwrap("")
+}
+
+def pretty(key: String) -> String {
+  names = dict.from_list([("ctrl", "Ctrl"), ("shift", "Shift"), ("alt", "Alt"), ("arrowup", "↑"), ("arrowdown", "↓")])
+  string.split(key, "+")
+  |> list.map(fn(p) {
+    case dict.get(names, p), string.length(p) {
+      Ok(name), _ -> name
+      _, 1 -> string.uppercase(p)
+      _, _ -> string.capitalise(p)
+    }
+  })
+  |> string.join("+")
+}

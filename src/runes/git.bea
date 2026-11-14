@@ -1,0 +1,116 @@
+//// The commit graph: which lane each commit sits in, and the lines between them.
+//// Pure: it takes the commits `git log` lists (newest first) and lays them out.
+
+import gleam/int
+import gleam/list
+import gleam/result
+import gleam/string
+
+pub type Commit {
+  hash: String,
+  parents: List(String),
+  author: String,
+  /// Seconds since 1970.
+  time: Int,
+  /// Branches and tags that point here, e.g. "main", "origin/main", "tag: v1".
+  refs: List(String),
+  subject: String,
+}
+
+/// One line of the graph.
+pub type Row {
+  commit: Commit,
+  /// The lane the commit's node is drawn in.
+  lane: Int,
+  /// Lanes that pass straight by this row.
+  through: List(Int),
+  /// Lanes whose line comes down into the node (the commits above that have it as a parent).
+  incoming: List(Int),
+  /// Lanes the node's lines leave towards, one per parent.
+  outgoing: List(Int),
+  /// How many lanes are in use on this row.
+  width: Int,
+}
+
+def index_of(lanes: List(String), wanted: String) -> Result(Int, Nil) {
+  list.index_map(lanes, fn(lane, i) { (lane, i) })
+  |> list.find(fn(pair) { pair.0 == wanted })
+  |> result.map(fn(pair) { pair.1 })
+}
+
+def set(lanes: List(String), at: Int, value: String) -> List(String) {
+  padded = list.append(lanes, list.repeat("", int.max(0, at + 1 - list.length(lanes))))
+  list.index_map(padded, fn(lane, i) {
+    case i == at {
+      True -> value
+      False -> lane
+    }
+  })
+}
+
+/// The first lane nothing is waiting in.
+def free(lanes: List(String)) -> Int {
+  index_of(lanes, "") |> result.unwrap(list.length(lanes))
+}
+
+def trim(lanes: List(String)) -> List(String) {
+  list.reverse(lanes) |> list.drop_while(fn(lane) { lane == "" }) |> list.reverse
+}
+
+/// Lays the commits out. Each lane holds the hash it is waiting for: a commit takes the
+/// lane waiting for it (or a free one, if it is the tip of a branch) and hands the lane on
+/// to its first parent. Further parents, which make it a merge, get lanes of their own.
+pub def layout(commits: List(Commit)) -> List(Row) {
+  (rows, _) = list.fold(commits, ([], []), fn(state, commit) {
+    (rows, lanes) = state
+    waiting = list.index_map(lanes, fn(lane, i) { (lane, i) })
+      |> list.filter(fn(pair) { pair.0 == commit.hash })
+      |> list.map(fn(pair) { pair.1 })
+    lane = list.first(waiting) |> result.unwrap(free(lanes))
+    through = list.index_map(lanes, fn(l, i) { (l, i) })
+      |> list.filter(fn(pair) { pair.0 != "" and pair.0 != commit.hash })
+      |> list.map(fn(pair) { pair.1 })
+    // Every lane that was waiting for this commit ends here.
+    cleared = list.fold(waiting, set(lanes, lane, ""), fn(ls, i) { set(ls, i, "") })
+    (after, outgoing) = list.index_fold(commit.parents, (cleared, []), fn(acc, parent, n) {
+      (ls, out) = acc
+      case index_of(ls, parent), n {
+        // Another branch is already heading for this parent: join its lane.
+        Ok(at), _ -> (ls, [at, ..out])
+        Error(_), 0 -> (set(ls, lane, parent), [lane, ..out])
+        Error(_), _ -> {
+          // Keep the commit's own lane for its first parent even when that is still empty.
+          at = free(set(ls, lane, "taken"))
+          (set(ls, at, parent), [at, ..out])
+        }
+      }
+    })
+    row = Row(
+      commit:,
+      lane:,
+      through:,
+      incoming: waiting,
+      outgoing: list.reverse(outgoing),
+      width: int.max(int.max(list.length(lanes), list.length(after)), lane + 1),
+    )
+    ([row, ..rows], trim(after))
+  })
+  list.reverse(rows)
+}
+
+pub const colours = 8
+
+/// How a lane is told apart: a colour, and once the colours have all been used, a shape too.
+/// Lane 0 and lane 8 share a colour but not a shape, so the legend can still name each.
+pub def style(lane: Int) -> (Int, Int) {
+  (lane % colours, { lane / colours } % 3)
+}
+
+/// The branches in the graph and the lane each one's newest commit is in.
+pub def legend(rows: List(Row)) -> List((String, Int)) {
+  list.flat_map(rows, fn(row) {
+    row.commit.refs
+    |> list.filter(fn(ref) { not string.starts_with(ref, "tag: ") and ref != "HEAD" and not string.ends_with(ref, "/HEAD") })
+    |> list.map(fn(ref) { (ref, row.lane) })
+  })
+}

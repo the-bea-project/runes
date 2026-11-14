@@ -1,0 +1,84 @@
+# Builds the installers for Linux, Windows and macOS, each on its own system, and attaches
+# them to the GitHub release when a tag like v0.5.0 is pushed. It can also be run by hand
+# from the Actions tab, in which case the files are kept as workflow artifacts only.
+#
+# One setting is needed first: a repository variable BEA_URL (Settings > Secrets and
+# variables > Actions > Variables) holding the address of the Linux `bea` binary to build
+# with, from https://github.com/the-bea-project/bea/releases.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # The editor is the same JavaScript on every system, so it is built once.
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: erlef/setup-beam@v1
+        with: { otp-version: "27", gleam-version: "1.19.1", rebar3-version: "3" }
+      - name: Install Bea
+        env:
+          BEA_URL: ${{ vars.BEA_URL }}
+        run: |
+          test -n "$BEA_URL" || { echo "Set the repository variable BEA_URL to the address of the Linux bea binary."; exit 1; }
+          mkdir -p "$HOME/bin"
+          curl -fsSL "$BEA_URL" -o "$HOME/bin/bea"
+          chmod +x "$HOME/bin/bea"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - uses: actions/upload-artifact@v4
+        with: { name: dist, path: dist, retention-days: 3 }
+
+  installers:
+    needs: bundle
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, flag: --linux }
+          - { os: windows-latest, flag: --win }
+          - { os: macos-latest, flag: --mac }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: actions/download-artifact@v4
+        with: { name: dist, path: dist }
+      - run: npm ci
+      - run: npm run release -- ${{ matrix.flag }} --skip-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runes-${{ matrix.os }}
+          path: |
+            release/*.exe
+            release/*.zip
+            release/*.dmg
+            release/*.deb
+            release/*.AppImage
+            release/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: installers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { pattern: runes-*, path: release, merge-multiple: true }
+      - run: cd release && sha256sum * > SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

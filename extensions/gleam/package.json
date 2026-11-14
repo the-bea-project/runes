@@ -1,0 +1,49 @@
+{
+  "name": "gleam-syntax",
+  "displayName": "Gleam Syntax",
+  "description": "Syntax colouring, brackets and snippets for Gleam. The full extension, with the language server, is in the marketplace.",
+  "version": "2.13.1",
+  "publisher": "gleam",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.140.0"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "gleam",
+        "aliases": [
+          "Gleam",
+          "gleam"
+        ],
+        "extensions": [
+          ".gleam"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "gleam",
+        "scopeName": "source.gleam",
+        "path": "./syntaxes/gleam.tmLanguage.json"
+      },
+      {
+        "scopeName": "markdown.gleam.codeblock",
+        "path": "./syntaxes/gleam.codeblock.json",
+        "injectTo": [
+          "text.html.markdown"
+        ],
+        "embeddedLanguages": {
+          "meta.embedded.block.gleam": "gleam"
+        }
+      }
+    ],
+    "snippets": [
+      {
+        "language": "gleam",
+        "path": "./snippets.json"
+      }
+    ]
+  }
+}

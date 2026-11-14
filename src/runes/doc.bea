@@ -1,0 +1,667 @@
+//// An open file and the edits an editor makes to it. Pure: nothing here touches the window.
+
+import gleam/int
+import gleam/list
+import gleam/option.{type Option, None, Some}
+import gleam/order
+import gleam/result
+import gleam/string
+import runes/buffer.{type Pos, Pos}
+import runes/extension.{type Config, type Snippet}
+
+@external(javascript, "../runes_ffi.mjs", "vcol")
+pub def vcol(line: String, col: Int) -> Int
+
+@external(javascript, "../runes_ffi.mjs", "col_at")
+pub def col_at(line: String, column: Int) -> Int
+
+@external(javascript, "../runes_ffi.mjs", "index_of")
+pub def index_of(line: String, query: String, from: Int) -> Int
+
+@external(javascript, "../runes_ffi.mjs", "word_at")
+pub def word_at(line: String, col: Int) -> (Int, Int)
+
+@external(javascript, "../runes_ffi.mjs", "matches")
+def matches(line: String, query: String) -> List(Int)
+
+@external(javascript, "../runes_ffi.mjs", "words")
+pub def words(lines: List(String), prefix: String, around: Int) -> List(String)
+
+@external(javascript, "../runes_ffi.mjs", "expand_snippet")
+pub def expand_snippet(body: String, indent: String) -> (String, Int, Int)
+
+pub const line_height = 22
+
+const indent_unit = "  "
+
+/// What undo goes back to.
+pub type Snap {
+  lines: List(String),
+  cursor: Pos,
+  anchor: Pos,
+}
+
+/// An open file.
+pub type Doc {
+  path: String,
+  name: String,
+  language: String,
+  lines: List(String),
+  cursor: Pos,
+  /// The other end of the selection; the cursor itself when nothing is selected.
+  anchor: Pos,
+  /// The column Up and Down try to stay in, or -1.
+  goal: Int,
+  version: Int,
+  saved: Int,
+  top: Int,
+  undo: List(Snap),
+  redo: List(Snap),
+  /// The last edit was typing, so the next keystroke joins its undo step.
+  typing: Bool,
+  untitled: Bool,
+  /// Further cursors, each with its own selection: (anchor, cursor). `cursor` and `anchor`
+  /// above are the main one, which the view follows.
+  more: List((Pos, Pos)),
+}
+
+/// A language, as the installed extensions describe it.
+pub type Lang {
+  id: String,
+  name: String,
+  scope: String,
+  config: Config,
+  snippets: List(Snippet),
+  extensions: List(String),
+  filenames: List(String),
+}
+
+pub type Item {
+  label: String,
+  detail: String,
+  insert: String,
+  snippet: Bool,
+}
+
+pub type Completion {
+  from: Int,
+  items: List(Item),
+  index: Int,
+}
+
+
+pub def dirty(doc: Doc) -> Bool {
+  doc.version != doc.saved
+}
+
+pub def selection(doc: Doc) -> (Pos, Pos) {
+  buffer.ordered(doc.anchor, doc.cursor)
+}
+
+// --- Several cursors ---------------------------------------------------------------------
+
+/// How many lines two texts end with in common.
+def same_tail(old: List(String), new: List(String)) -> Int {
+  count_same(list.reverse(old), list.reverse(new), 0)
+}
+
+def count_same(a: List(String), b: List(String), so_far: Int) -> Int {
+  case a, b {
+    [x, ..rest_a], [y, ..rest_b] if x == y -> count_same(rest_a, rest_b, so_far + 1)
+    _, _ -> so_far
+  }
+}
+
+/// Where a position that lay after an edit is once the edit has been made.
+def after_edit(at: Pos, old: List(String), new: List(String)) -> Pos {
+  case old == new {
+    True -> at
+    False -> {
+      same = same_tail(old, new)
+      last_old = list.length(old) - same - 1
+      last_new = list.length(new) - same - 1
+      cond {
+        at.line > last_old -> Pos(at.line + last_new - last_old, at.col)
+        at.line == last_old and last_new >= 0 ->
+          Pos(last_new, int.max(at.col + buffer.len(buffer.line(new, last_new)) - buffer.len(buffer.line(old, last_old)), 0))
+        _ -> at
+      }
+    }
+  }
+}
+
+/// The start of a selection, for putting selections in order.
+def start_of(selection: (Pos, Pos)) -> Pos {
+  buffer.ordered(selection.0, selection.1).0
+}
+
+/// Every selection, the main one first.
+pub def selections(doc: Doc) -> List((Pos, Pos)) {
+  [(doc.anchor, doc.cursor), ..doc.more]
+}
+
+/// Drops further cursors that have run into the main one or into each other.
+def tidy(doc: Doc) -> Doc {
+  kept = list.fold(doc.more, [], fn(seen: List((Pos, Pos)), one) {
+    (from, to) = buffer.ordered(one.0, one.1)
+    clash = list.any([(doc.anchor, doc.cursor), ..seen], fn(other) {
+      (other_from, other_to) = buffer.ordered(other.0, other.1)
+      // Touching ends are fine; sharing a cursor, or overlapping, is not.
+      one.1 == other.1 or { buffer.before(from, other_to) and buffer.before(other_from, to) }
+    })
+    case clash {
+      True -> seen
+      False -> [one, ..seen]
+    }
+  })
+  Doc(doc | more: list.reverse(kept))
+}
+
+/// Does the same thing at every cursor. `op` is given the document with one cursor in
+/// place, and that cursor's number counting from the top of the file. The work goes from
+/// the last cursor to the first, so an edit never moves a place still to be visited, and
+/// the places already visited are moved along as the text before them changes. However
+/// many cursors there are, it is one step to undo.
+pub def each_with(doc: Doc, op: fn(Doc, Int) -> Doc) -> Doc {
+  case doc.more {
+    [] -> op(doc, 0)
+    more -> {
+      all = [(doc.anchor, doc.cursor, True), ..list.map(more, fn(m) { (m.0, m.1, False) })]
+        |> list.sort(fn(a, b) {
+          case start_of((a.0, a.1)) == start_of((b.0, b.1)), buffer.before(start_of((a.0, a.1)), start_of((b.0, b.1))) {
+            True, _ -> order.Eq
+            False, True -> order.Gt
+            False, False -> order.Lt
+          }
+        })
+      count = list.length(all)
+      (final, done) = list.index_fold(all, (Doc(doc | more: []), []), fn(state: (Doc, List((Pos, Pos, Bool))), one, i) {
+        (d, visited) = state
+        applied = op(Doc(d | anchor: one.0, cursor: one.1, goal: -1), count - 1 - i)
+        moved = list.map(visited, fn(v) { (after_edit(v.0, d.lines, applied.lines), after_edit(v.1, d.lines, applied.lines), v.2) })
+        (applied, [(applied.anchor, applied.cursor, one.2), ..moved])
+      })
+      main = list.find(done, fn(v) { v.2 }) |> result.unwrap((final.anchor, final.cursor, True))
+      others = list.filter(done, fn(v) { not v.2 }) |> list.map(fn(v) { (v.0, v.1) })
+      undo = case final.lines == doc.lines, doc.typing and final.typing {
+        True, _ | _, True -> doc.undo
+        False, False -> list.take([Snap(doc.lines, doc.cursor, doc.anchor), ..doc.undo], 300)
+      }
+      tidy(Doc(final | anchor: main.0, cursor: main.1, more: others, undo:, goal: -1))
+    }
+  }
+}
+
+pub def each(doc: Doc, op: fn(Doc) -> Doc) -> Doc {
+  each_with(doc, fn(d, _) { op(d) })
+}
+
+/// Back to the main cursor alone.
+pub def single(doc: Doc) -> Doc {
+  Doc(doc | more: [])
+}
+
+/// What "this text" means for the commands that look for more of it: the selection when it
+/// sits on one line, else the word the cursor is in. With it, whether a selection had to be made.
+def sought(doc: Doc) -> (Pos, Pos) {
+  (from, to) = selection(doc)
+  case from == to {
+    False -> (from, to)
+    True -> {
+      (start, end) = word_at(buffer.line(doc.lines, doc.cursor.line), doc.cursor.col)
+      (Pos(from.line, start), Pos(from.line, end))
+    }
+  }
+}
+
+/// Every place the text appears, in order.
+def places(doc: Doc, text: String) -> List((Pos, Pos)) {
+  size = buffer.len(text)
+  list.index_map(doc.lines, fn(line, n) { list.map(matches(line, text), fn(col) { (Pos(n, col), Pos(n, col + size)) }) })
+  |> list.flatten
+}
+
+/// Selects every occurrence of the selected text (or of the word under the cursor), with a
+/// cursor at the end of each. The one that was selected stays the main one.
+pub def select_all_like(doc: Doc) -> Doc {
+  (from, to) = sought(doc)
+  text = buffer.slice(doc.lines, from, to)
+  case from == to or from.line != to.line or string.trim(text) == "" {
+    True -> doc
+    False -> {
+      found = places(doc, text)
+      others = list.filter(found, fn(place) { place.0 != from })
+      Doc(doc | anchor: from, cursor: to, more: others, goal: -1, typing: False)
+    }
+  }
+}
+
+/// Adds the next occurrence of the selected text as another selection. With nothing
+/// selected it first selects the word under the cursor, as a first press does in VS Code.
+pub def add_next_like(doc: Doc) -> Doc {
+  (from, to) = sought(doc)
+  text = buffer.slice(doc.lines, from, to)
+  cond {
+    from == to or from.line != to.line or string.trim(text) == "" -> doc
+    doc.cursor == doc.anchor -> Doc(doc | anchor: from, cursor: to, goal: -1, typing: False)
+    _ -> {
+      taken = list.map(selections(doc), start_of)
+      free = list.filter(places(doc, text), fn(place) { not list.contains(taken, place.0) })
+      // The first one after the main selection, else the first in the file.
+      next = list.find(free, fn(place) { buffer.before(to, place.0) or to == place.0 }) |> result.lazy_or(fn() { list.first(free) })
+      case next {
+        Ok(place) -> Doc(doc | anchor: place.0, cursor: place.1, more: [(doc.anchor, doc.cursor), ..doc.more], goal: -1, typing: False)
+        Error(_) -> doc
+      }
+    }
+  }
+}
+
+/// Another cursor at a place; or, where one already is, takes it away.
+pub def toggle_cursor(doc: Doc, at: Pos) -> Doc {
+  at = buffer.clamp(doc.lines, at)
+  cond {
+    list.any(doc.more, fn(m) { m.1 == at }) -> Doc(doc | more: list.filter(doc.more, fn(m) { m.1 != at }))
+    doc.cursor == at -> case doc.more {
+      [next, ..rest] -> Doc(doc | anchor: next.0, cursor: next.1, more: rest)
+      [] -> doc
+    }
+    _ -> tidy(Doc(doc | anchor: at, cursor: at, more: [(doc.anchor, doc.cursor), ..doc.more], goal: -1, typing: False))
+  }
+}
+
+/// Another cursor on the line above (-1) or below (1) the outermost one, in the same column.
+pub def add_cursor_beside(doc: Doc, by: Int) -> Doc {
+  cursors = list.map(selections(doc), fn(s) { s.1 })
+  edge = list.fold(cursors, doc.cursor, fn(far, c) {
+    case by < 0, c.line < far.line, c.line > far.line {
+      True, True, _ | False, _, True -> c
+      _, _, _ -> far
+    }
+  })
+  line = edge.line + by
+  case line < 0 or line >= list.length(doc.lines) {
+    True -> doc
+    False -> {
+      column = vcol(buffer.line(doc.lines, doc.cursor.line), doc.cursor.col)
+      at = Pos(line, col_at(buffer.line(doc.lines, line), column))
+      tidy(Doc(doc | more: list.append(doc.more, [(at, at)]), typing: False))
+    }
+  }
+}
+
+// --- Editing ---------------------------------------------------------------------------
+
+/// A change to the text: remembers how to undo it.
+pub def edit(doc: Doc, lines: List(String), cursor: Pos, typing: Bool) -> Doc {
+  undo = case typing and doc.typing {
+    True -> doc.undo
+    False -> list.take([Snap(doc.lines, doc.cursor, doc.anchor), ..doc.undo], 300)
+  }
+  Doc(doc | lines:, cursor:, anchor: cursor, goal: -1, version: doc.version + 1, undo:, redo: [], typing:)
+}
+
+pub def move(doc: Doc, to: Pos, extend: Bool) -> Doc {
+  to = buffer.clamp(doc.lines, to)
+  Doc(doc | cursor: to, goal: -1, typing: False, anchor: case extend {
+    True -> doc.anchor
+    False -> to
+  })
+}
+
+pub def vertical(doc: Doc, by: Int, extend: Bool) -> Doc {
+  goal = case doc.goal < 0 {
+    True -> vcol(buffer.line(doc.lines, doc.cursor.line), doc.cursor.col)
+    False -> doc.goal
+  }
+  line = int.clamp(doc.cursor.line + by, 0, list.length(doc.lines) - 1)
+  moved = move(doc, Pos(line, col_at(buffer.line(doc.lines, line), goal)), extend)
+  Doc(moved | goal:)
+}
+
+/// Replaces the selection (or nothing) with text.
+pub def put(doc: Doc, text: String, typing: Bool) -> Doc {
+  (from, to) = selection(doc)
+  kept = case from == to {
+    True -> doc.lines
+    False -> buffer.delete(doc.lines, from, to)
+  }
+  (lines, end) = buffer.insert(kept, from, text)
+  edit(doc, lines, end, typing)
+}
+
+pub def remove(doc: Doc, from: Pos, to: Pos) -> Doc {
+  case from == to {
+    True -> doc
+    False -> edit(doc, buffer.delete(doc.lines, from, to), from, False)
+  }
+}
+
+pub def closer(lang: Lang, open: String) -> String {
+  list.find(lang.config.pairs, fn(p) { p.0 == open }) |> result.map(fn(p) { p.1 }) |> result.unwrap("")
+}
+
+pub def typed(doc: Doc, lang: Lang, text: String) -> Doc {
+  line = buffer.line(doc.lines, doc.cursor.line)
+  next = buffer.cut(line, doc.cursor.col, doc.cursor.col + 1)
+  previous = buffer.cut(line, doc.cursor.col - 1, doc.cursor.col)
+  close = closer(lang, text)
+  selected = doc.cursor != doc.anchor
+  closes = list.any(lang.config.pairs, fn(p) { p.1 == text })
+  quote = close == text
+  cond {
+    // Typing the closer that is already there steps over it.
+    not selected and closes and next == text -> move(doc, buffer.right(doc.lines, doc.cursor), False)
+    // An opener around a selection wraps it.
+    selected and close != "" -> {
+      (from, to) = selection(doc)
+      inside = buffer.slice(doc.lines, from, to)
+      wrapped = put(doc, text <> inside <> close, False)
+      Doc(wrapped | anchor: buffer.right(wrapped.lines, from), cursor: buffer.left(wrapped.lines, wrapped.cursor))
+    }
+    close != "" and { next == "" or next == " " or list.any(lang.config.pairs, fn(p) { p.1 == next }) }
+      and not { quote and is_word(previous) } -> {
+      both = put(doc, text <> close, True)
+      at = buffer.left(both.lines, both.cursor)
+      Doc(both | cursor: at, anchor: at)
+    }
+    _ -> put(doc, text, True)
+  }
+}
+
+pub def is_word(char: String) -> Bool {
+  char != "" and word_at(char, 0) != (0, 0)
+}
+
+pub def backspace(doc: Doc, lang: Lang, word: Bool) -> Doc {
+  (from, to) = selection(doc)
+  line = buffer.line(doc.lines, doc.cursor.line)
+  col = doc.cursor.col
+  before = buffer.cut(line, col - 1, col)
+  cond {
+    from != to -> remove(doc, from, to)
+    word -> remove(doc, buffer.word_left(doc.lines, doc.cursor), doc.cursor)
+    // Between an empty pair: take both.
+    before != "" and closer(lang, before) != "" and closer(lang, before) == buffer.cut(line, col, col + 1) ->
+      remove(doc, Pos(doc.cursor.line, col - 1), Pos(doc.cursor.line, col + 1))
+    // In the indentation: back one indent step.
+    col >= 2 and string.trim(buffer.cut(line, 0, col)) == "" and buffer.cut(line, col - 2, col) == indent_unit ->
+      remove(doc, Pos(doc.cursor.line, col - 2), doc.cursor)
+    _ -> remove(doc, buffer.left(doc.lines, doc.cursor), doc.cursor)
+  }
+}
+
+pub def enter(doc: Doc) -> Doc {
+  (from, _) = selection(doc)
+  line = buffer.line(doc.lines, from.line)
+  indent = buffer.indent(buffer.cut(line, 0, from.col))
+  before = buffer.cut(line, from.col - 1, from.col)
+  after = buffer.cut(line, doc.cursor.col, doc.cursor.col + 1)
+  opens = list.contains(["{", "[", "("], before)
+  case opens, doc.cursor == doc.anchor and list.contains(["}", "]", ")"], after) {
+    True, True -> {
+      spread = put(doc, "\n" <> indent <> indent_unit <> "\n" <> indent, False)
+      at = Pos(from.line + 1, buffer.len(indent) + 2)
+      Doc(spread | cursor: at, anchor: at)
+    }
+    True, False -> put(doc, "\n" <> indent <> indent_unit, False)
+    False, _ -> put(doc, "\n" <> indent, False)
+  }
+}
+
+/// Rewrites the lines the selection touches, keeping them selected.
+pub def rewrite(doc: Doc, change: fn(List(String)) -> List(String)) -> Doc {
+  (from, to) = selection(doc)
+  (head, rest) = list.split(doc.lines, from.line)
+  (middle, tail) = list.split(rest, to.line - from.line + 1)
+  changed = change(middle)
+  shift = fn(pos: Pos) {
+    was = buffer.len(buffer.line(middle, pos.line - from.line))
+    now = buffer.len(buffer.line(changed, pos.line - from.line))
+    Pos(pos.line, int.max(0, pos.col + now - was))
+  }
+  cursor = shift(doc.cursor)
+  edited = edit(doc, list.flatten([head, changed, tail]), cursor, False)
+  Doc(edited | anchor: shift(doc.anchor))
+}
+
+pub def comment(doc: Doc, lang: Lang) -> Doc {
+  mark = lang.config.line_comment
+  case mark {
+    "" -> doc
+    _ ->
+      rewrite(doc, fn(lines) {
+        written = list.filter(lines, fn(l) { string.trim(l) != "" })
+        all = written != [] and list.all(written, fn(l) { string.starts_with(string.trim_start(l), mark) })
+        list.map(lines, fn(l) {
+          indent = buffer.indent(l)
+          rest = string.trim_start(l)
+          case all, rest {
+            _, "" -> l
+            True, _ -> {
+              bare = string.drop_start(rest, string.length(mark))
+              indent <> case string.starts_with(bare, " ") {
+                True -> string.drop_start(bare, 1)
+                False -> bare
+              }
+            }
+            False, _ -> indent <> mark <> " " <> rest
+          }
+        })
+      })
+  }
+}
+
+pub def outdent(doc: Doc) -> Doc {
+  rewrite(doc, list.map(_, fn(l) {
+    cond {
+      string.starts_with(l, indent_unit) -> string.drop_start(l, 2)
+      string.starts_with(l, "\t") or string.starts_with(l, " ") -> string.drop_start(l, 1)
+      _ -> l
+    }
+  }))
+}
+
+pub def tab(doc: Doc, lang: Lang) -> Doc {
+  (from, to) = selection(doc)
+  line = buffer.line(doc.lines, doc.cursor.line)
+  (start, _) = word_at(line, doc.cursor.col)
+  word = buffer.cut(line, start, doc.cursor.col)
+  snippet = list.find(lang.snippets, fn(s) { s.prefix == word and word != "" })
+  case from.line != to.line, snippet {
+    True, _ -> rewrite(doc, list.map(_, fn(l) {
+      case l {
+        "" -> l
+        _ -> indent_unit <> l
+      }
+    }))
+    False, Ok(s) if from == to -> expand(doc, start, s.body)
+    False, _ -> put(doc, indent_unit, False)
+  }
+}
+
+/// Replaces the word that starts at a column with a snippet, selecting its first stop.
+pub def expand(doc: Doc, from: Int, body: String) -> Doc {
+  start = Pos(doc.cursor.line, from)
+  indent = buffer.indent(buffer.line(doc.lines, start.line))
+  (text, a, b) = expand_snippet(body, indent)
+  (lines, _) = buffer.insert(buffer.delete(doc.lines, start, doc.cursor), start, text)
+  edited = edit(doc, lines, buffer.advance(start, text, b), False)
+  Doc(edited | anchor: buffer.advance(start, text, a))
+}
+
+pub def move_line(doc: Doc, by: Int) -> Doc {
+  n = doc.cursor.line
+  target = n + by
+  case target < 0 or target >= list.length(doc.lines) {
+    True -> doc
+    False -> {
+      first = int.min(n, target)
+      (head, rest) = list.split(doc.lines, first)
+      case rest {
+        [a, b, ..tail] -> {
+          edited = edit(doc, list.flatten([head, [b, a], tail]), Pos(target, doc.cursor.col), False)
+          Doc(edited | anchor: Pos(target, doc.cursor.col))
+        }
+        _ -> doc
+      }
+    }
+  }
+}
+
+pub def duplicate(doc: Doc) -> Doc {
+  n = doc.cursor.line
+  (head, rest) = list.split(doc.lines, n)
+  case rest {
+    [line, ..tail] -> edit(doc, list.flatten([head, [line, line], tail]), Pos(n + 1, doc.cursor.col), False)
+    [] -> doc
+  }
+}
+
+pub def undo(doc: Doc) -> Doc {
+  case doc.undo {
+    [snap, ..older] ->
+      Doc(
+        doc
+        | lines: snap.lines,
+          cursor: snap.cursor,
+          anchor: snap.anchor,
+          undo: older,
+          redo: [Snap(doc.lines, doc.cursor, doc.anchor), ..doc.redo],
+          version: doc.version + 1,
+          typing: False,
+          goal: -1,
+          more: [],
+      )
+    [] -> doc
+  }
+}
+
+pub def redo(doc: Doc) -> Doc {
+  case doc.redo {
+    [snap, ..newer] ->
+      Doc(
+        doc
+        | lines: snap.lines,
+          cursor: snap.cursor,
+          anchor: snap.anchor,
+          redo: newer,
+          undo: [Snap(doc.lines, doc.cursor, doc.anchor), ..doc.undo],
+          version: doc.version + 1,
+          typing: False,
+          goal: -1,
+          more: [],
+      )
+    [] -> doc
+  }
+}
+
+/// Selects the next place the text appears, after the cursor, wrapping round.
+pub def find_next(doc: Doc, query: String) -> Doc {
+  (_, from) = selection(doc)
+  search = fn(lines: List(String), offset: Int, first_from: Int) {
+    list.index_fold(lines, None, fn(found, line, i) {
+      case found {
+        Some(_) -> found
+        None -> {
+          at = index_of(line, query, case i {
+            0 -> first_from
+            _ -> 0
+          })
+          case at < 0 {
+            True -> None
+            False -> Some(Pos(offset + i, at))
+          }
+        }
+      }
+    })
+  }
+  hit = search(list.drop(doc.lines, from.line), from.line, from.col)
+    |> option.lazy_or(fn() { search(doc.lines, 0, 0) })
+  case hit, query {
+    _, "" -> doc
+    Some(at), _ -> Doc(doc | anchor: at, cursor: Pos(at.line, at.col + buffer.len(query)), goal: -1, typing: False)
+    None, _ -> doc
+  }
+}
+
+/// What could be meant by the word being typed.
+pub def complete(doc: Doc, lang: Lang, always: Bool) -> Option(Completion) {
+  line = buffer.line(doc.lines, doc.cursor.line)
+  (start, _) = word_at(line, doc.cursor.col)
+  prefix = buffer.cut(line, start, doc.cursor.col)
+  case buffer.len(prefix) >= 2 or always {
+    False -> None
+    True -> {
+      snippets = lang.snippets
+        |> list.filter(fn(s) { string.starts_with(s.prefix, prefix) })
+        |> list.map(fn(s) { Item(s.prefix, s.name, s.body, True) })
+      found = words(doc.lines, prefix, doc.cursor.line)
+        |> list.filter(fn(w) { not list.any(snippets, fn(s) { s.label == w }) })
+        |> list.map(fn(w) { Item(w, "", w, False) })
+      case list.take(list.append(snippets, found), 10) {
+        [] -> None
+        items -> Some(Completion(from: start, items:, index: 0))
+      }
+    }
+  }
+}
+
+pub def accept(doc: Doc, completion: Completion) -> Doc {
+  case list.drop(completion.items, completion.index) {
+    [item, .._] if item.snippet -> expand(doc, completion.from, item.insert)
+    [item, .._] -> {
+      start = Pos(doc.cursor.line, completion.from)
+      (lines, end) = buffer.insert(buffer.delete(doc.lines, start, doc.cursor), start, item.insert)
+      edit(doc, lines, end, False)
+    }
+    [] -> doc
+  }
+}
+
+pub def editor_key(doc: Doc, lang: Lang, key: String, ctrl: Bool, shift: Bool, page: Int) -> Doc {
+  lines = doc.lines
+  at = doc.cursor
+  (from, to) = selection(doc)
+  collapse = not shift and from != to
+  case key, ctrl {
+    "ArrowLeft", False -> case collapse {
+      True -> move(doc, from, False)
+      False -> move(doc, buffer.left(lines, at), shift)
+    }
+    "ArrowRight", False -> case collapse {
+      True -> move(doc, to, False)
+      False -> move(doc, buffer.right(lines, at), shift)
+    }
+    "ArrowLeft", True -> move(doc, buffer.word_left(lines, at), shift)
+    "ArrowRight", True -> move(doc, buffer.word_right(lines, at), shift)
+    "ArrowUp", _ -> vertical(doc, -1, shift)
+    "ArrowDown", _ -> vertical(doc, 1, shift)
+    "PageUp", _ -> vertical(doc, 0 - page, shift)
+    "PageDown", _ -> vertical(doc, page, shift)
+    "Home", False -> {
+      text = buffer.line(lines, at.line)
+      first = buffer.len(buffer.indent(text))
+      move(doc, Pos(at.line, case at.col == first {
+        True -> 0
+        False -> first
+      }), shift)
+    }
+    "End", False -> move(doc, Pos(at.line, buffer.len(buffer.line(lines, at.line))), shift)
+    "Home", True -> move(doc, Pos(0, 0), shift)
+    "End", True -> move(doc, buffer.last(lines), shift)
+    "Backspace", _ -> backspace(doc, lang, ctrl)
+    "Delete", _ -> cond {
+      from != to -> remove(doc, from, to)
+      ctrl -> remove(doc, at, buffer.word_right(lines, at))
+      _ -> remove(doc, at, buffer.right(lines, at))
+    }
+    "Enter", _ -> enter(doc)
+    "Tab", _ -> case shift {
+      True -> outdent(doc)
+      False -> tab(doc, lang)
+    }
+    _, _ -> doc
+  }
+}
+

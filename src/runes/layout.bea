@@ -1,0 +1,93 @@
+//// How the editor area is tiled: a tree of splits whose leaves are editor groups.
+
+import gleam/float
+import gleam/int
+import gleam/list
+
+pub type Layout {
+  /// One editor group, by its id.
+  Leaf(group: Int)
+  /// Two layouts side by side (`row`) or stacked. `ratio` is the first one's share.
+  Split(row: Bool, ratio: Float, first: Layout, second: Layout)
+}
+
+/// Where a dragged tab lands in a group.
+pub type Edge {
+  Middle
+  Left
+  Right
+  Top
+  Bottom
+}
+
+/// Every group, in reading order.
+/// The arrangement without its sizes: which groups, in what order, split which way. Two
+/// layouts with the same shape differ only in where the sashes sit.
+pub def shape(layout: Layout) -> String {
+  case layout {
+    Leaf(id) -> int.to_string(id)
+    Split(row, _, first, second) -> case row {
+      True -> "[" <> shape(first) <> " | " <> shape(second) <> "]"
+      False -> "[" <> shape(first) <> " / " <> shape(second) <> "]"
+    }
+  }
+}
+
+pub def groups(layout: Layout) -> List(Int) {
+  case layout {
+    Leaf(group) -> [group]
+    Split(_, _, first, second) -> list.append(groups(first), groups(second))
+  }
+}
+
+/// Puts a new group next to an existing one.
+pub def split(layout: Layout, at: Int, new: Int, edge: Edge) -> Layout {
+  case layout {
+    Leaf(group) if group == at ->
+      case edge {
+        Middle -> layout
+        Left -> Split(True, 0.5, Leaf(new), layout)
+        Right -> Split(True, 0.5, layout, Leaf(new))
+        Top -> Split(False, 0.5, Leaf(new), layout)
+        Bottom -> Split(False, 0.5, layout, Leaf(new))
+      }
+    Leaf(_) -> layout
+    Split(row, ratio, first, second) -> Split(row, ratio, split(first, at, new, edge), split(second, at, new, edge))
+  }
+}
+
+/// Takes a group out; its sibling fills the space. The last group stays.
+pub def remove(layout: Layout, group: Int) -> Layout {
+  case layout {
+    Leaf(_) -> layout
+    Split(_, _, Leaf(g), second) if g == group -> second
+    Split(_, _, first, Leaf(g)) if g == group -> first
+    Split(row, ratio, first, second) -> Split(row, ratio, remove(first, group), remove(second, group))
+  }
+}
+
+/// Sets the ratio of the split at a path: "" is the root, "0" its first child, "01" and so on.
+pub def resize(layout: Layout, path: String, ratio: Float) -> Layout {
+  case layout, path {
+    Split(row, _, first, second), "" -> Split(row, float.clamp(ratio, 0.1, 0.9), first, second)
+    Split(row, old, first, second), "0" <> rest -> Split(row, old, resize(first, rest, ratio), second)
+    Split(row, old, first, second), "1" <> rest -> Split(row, old, first, resize(second, rest, ratio))
+    _, _ -> layout
+  }
+}
+
+/// The group after (or before) another, wrapping round.
+pub def next(layout: Layout, group: Int, by: Int) -> Int {
+  all = groups(layout)
+  count = list.length(all)
+  index = list.index_fold(all, 0, fn(found, g, i) {
+    case g == group {
+      True -> i
+      False -> found
+    }
+  })
+  case list.drop(all, { index + by + count } % count) {
+    [g, .._] -> g
+    [] -> group
+  }
+}
