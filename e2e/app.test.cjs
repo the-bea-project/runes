@@ -359,6 +359,16 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     await p.waitForSelector(".pie-hub");
     expect((await p.locator(".slice").count()) === 8, "expected 8 slices");
     await p.waitForTimeout(350);
+    // On pitch black the pie must not sink into it: its own ground, and slices lifted clear of that.
+    const stands = await p.evaluate(() => {
+      const lum = (c) => { const [r, g, b] = c.match(/[\d.]+/g).slice(0, 3).map((v) => { v = Number(v) / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+      const slice = getComputedStyle(document.querySelector(".slice:not(.on):not(:hover)"));
+      const ground = getComputedStyle(document.querySelector(".pie"), "::before");
+      return { slice: lum(slice.backgroundColor), text: lum(slice.color), border: slice.borderTopColor, ground: ground.width };
+    });
+    expect(stands.ground === "380px", "the pie has no ground of its own: " + stands.ground);
+    expect((stands.slice + 0.05) / 0.05 >= 1.4, "a slice is as dark as the black behind it: " + stands.slice);
+    expect((stands.text + 0.05) / (stands.slice + 0.05) >= 7, "slice text contrast: " + ((stands.text + 0.05) / (stands.slice + 0.05)).toFixed(1));
     await shot("pie");
     await p.locator(".slice", { hasText: "Problems" }).click();
     expect((await p.locator(".panel.open .ptab.on").textContent()).includes("Problems"), "the Problems slice did not open the panel");
@@ -538,6 +548,13 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
       };
     });
     expect(facts.white.length === 0, "pure white surfaces: " + facts.white.join());
+    // The side bar is a clear step darker than the editor, and the file icons are deepened to stand on it.
+    const side = await p.evaluate(() => {
+      const lum = (c) => { const [r, g, b] = c.match(/[\d.]+/g).slice(0, 3).map((v) => { v = Number(v) / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+      return { side: lum(getComputedStyle(document.querySelector(".side")).backgroundColor), editor: lum(getComputedStyle(document.documentElement).getPropertyValue("--bg") === "#e7eef1" ? "rgb(231, 238, 241)" : "rgb(0,0,0)"), icon: getComputedStyle(document.querySelector(".node .file-icon") ?? document.body).filter };
+    });
+    expect(side.editor - side.side > 0.12, "the side bar is not clearly darker than the editor: " + JSON.stringify(side));
+    expect(side.icon.includes("brightness"), "file icons are not deepened on a light theme: " + side.icon);
     expect(facts.text >= 4.5, "side bar text contrast is " + facts.text.toFixed(2));
     expect(facts.accent === "rgb(8, 122, 145)", "the accent should be the cyan: " + facts.accent);
     await shot("glacier");
@@ -763,10 +780,14 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
       await p.locator("#runes-ssh-user").fill("dev");
       await p.locator("#runes-ssh-port").fill(String(server.port));
       await p.locator("#runes-ssh-folder").fill("~/site");
+      // Signing in with a password only: no key is tried, so no key's passphrase is ever asked for.
+      await p.locator("#runes-ssh-auth").selectOption("password");
+      await until("the key field to go", async () => (await p.locator("#runes-ssh-key").count()) === 0, 2000);
       await p.locator(".ssh-form .button", { hasText: "Save" }).click();
       await until("the session to be listed", async () => (await p.locator(".ssh-session b").allTextContents()).includes("far box"), 4000);
       const kept = fs.readFileSync(path.join(profile, "ssh-sessions.json"), "utf8");
-      expect(kept.includes("far box") && !kept.includes("open-s3same"), "the session file is wrong");
+      expect(kept.includes("far box") && !kept.includes("open-s3same") && JSON.parse(kept)[0].auth === "password", "the session file is wrong");
+      expect((await p.locator(".ssh-session small").textContent()).endsWith("· password"), "the list does not say how it signs in");
       await shot("ssh-sessions");
       // A bad session says why, and saves nothing.
       await p.locator(".side header .button", { hasText: "New session" }).click();
@@ -799,6 +820,40 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
       await K("Control+End"); await p.keyboard.type("written from here"); await K("Control+s");
       await until("the save to land over there", async () => { try { return fs.readFileSync(path.join(site, "index.md"), "utf8").includes("written from here"); } catch { return false; } }, 6000);
       expect(fs.readdirSync(site).sort().join() === ".git,index.md,pages", "something was left behind: " + fs.readdirSync(site).join());
+      expect(server.log.filter((l) => /^(key|password):/.test(l)).every((l) => l === "password:dev"), "something other than the password was tried");
+      // Folders were listed ahead: with the machine now slow to answer, opening one does not wait for it.
+      process.env.SSHD_LIST_DELAY = "1500";
+      const before = Date.now();
+      await p.locator(".tree .node.folder", { hasText: "pages" }).click();
+      await until("the folder's files, at once", async () => (await p.locator(".tree .node .name").allTextContents()).includes("about.md"), 1200);
+      expect(Date.now() - before < 1200, "opening a folder waited for the machine");
+      process.env.SSHD_LIST_DELAY = "0";
+      // A file made from the explorer is made over there, folders and all, and opened.
+      await p.locator('.root-tools .mini[title="New file"]').click();
+      await p.locator("#runes-naming").fill("drafts/note.md"); await K("Enter");
+      await until("the new file over there, open here", async () => fs.existsSync(path.join(site, "pages/drafts/note.md")) && (await p.locator(".group.focused .tab.on").textContent()).includes("note.md"), 6000);
+      // What another program does over there shows up by itself.
+      fs.writeFileSync(path.join(site, "pages/arrived.md"), "x");
+      await until("a file made on the machine itself", async () => (await p.locator(".tree .node .name").allTextContents()).includes("arrived.md"), 12000);
+      // Deleting says there is no trash there, and waits for the answer.
+      await p.locator(".tree .node", { hasText: "arrived.md" }).click({ button: "right" });
+      await p.locator(".node-menu .result", { hasText: "Delete" }).click();
+      await until("the question", async () => ((await p.locator(".prompt b").textContent().catch(() => "")) ?? "") === "Delete arrived.md for good?", 4000);
+      expect((await p.locator(".prompt p").textContent()).includes("no trash"), "the question does not say it is for good");
+      expect((await p.locator(".node-menu .result", { hasText: "File Manager" }).count()) === 0, "this machine's file manager cannot show a far file");
+      await shot("ssh-delete");
+      await p.locator(".prompt .button", { hasText: "Cancel" }).click();
+      await p.waitForTimeout(300);
+      expect(fs.existsSync(path.join(site, "pages/arrived.md")), "declined, yet deleted");
+      await p.locator(".tree .node", { hasText: "arrived.md" }).click({ button: "right" });
+      await p.locator(".node-menu .result", { hasText: "Delete" }).click();
+      await p.locator(".prompt .button", { hasText: "Delete" }).click();
+      await until("the file to be gone, there and here", async () => !fs.existsSync(path.join(site, "pages/arrived.md")) && !(await p.locator(".tree .node .name").allTextContents()).includes("arrived.md"), 6000);
+      await p.locator(".tree .node.folder", { hasText: "drafts" }).click({ button: "right" });
+      await p.locator(".node-menu .result", { hasText: "Delete" }).click();
+      await p.locator(".prompt .button", { hasText: "Delete" }).click();
+      await until("the folder and its file to be gone", async () => !fs.existsSync(path.join(site, "pages/drafts")) && (await p.locator(".tab", { hasText: "note.md" }).count()) === 0, 6000);
+      await p.locator(".tree .node.folder", { hasText: "pages" }).click();
       // Git is the other machine's git.
       await until("the far branch and the change", async () => (await status()).includes("trunk"), 6000);
       await K("Control+Shift+g");
@@ -901,7 +956,19 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     await p.locator(".detail-actions .button", { hasText: "Open as a session" }).click();
     await p.waitForSelector(".diff-page .drow");
     expect((await p.locator(".diff-commit b").textContent()) === "More notes", "the session does not say which commit it shows");
-    expect((await p.locator(".drow.knew .right").allTextContents()).includes("more"), "the added line is not shown as added");
+    // One clean text by default: the added line among the others, marked as added.
+    expect((await p.locator(".diff-rows.one .drow.unew .right").allTextContents()).includes("more"), "the added line is not shown as added");
+    expect((await p.locator(".diff-rows .dt.left").count()) === 0 && (await p.locator(".drow.unew .ds").first().textContent()) === "+", "an added line should stand alone, with its sign");
+    const inline = await p.locator(".diff-rows .drow.usame .dt").first().evaluate((e) => e.getBoundingClientRect().width / e.closest(".diff-rows").getBoundingClientRect().width);
+    expect(inline > 0.75, "one text should have the width to itself: " + inline);
+    await shot("session-inline");
+    // Two sides, only when asked for; and back.
+    await p.locator(".diff-bar .split-toggle").click();
+    await until("old and new side by side", async () => (await p.locator(".diff-rows.one").count()) === 0 && (await p.locator(".drow.knew .right").allTextContents()).includes("more") && (await p.locator(".drow.knew .left").count()) > 0, 3000);
+    expect((await p.locator(".diff-bar .split-toggle").getAttribute("aria-pressed")) === "true", "the toggle does not say it is on");
+    await shot("session-split");
+    await p.locator(".diff-bar .split-toggle").click();
+    await until("one text again", async () => (await p.locator(".diff-rows.one").count()) === 1, 3000);
     expect((await p.locator(".diff-files .change").allTextContents()).some((t) => t.includes("notes.md")), "the changed file is not listed");
     expect((await p.locator(".group.focused .tab.on").textContent()).includes("More notes"), "the tab is not named after the commit");
     await shot("session");
@@ -963,7 +1030,7 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     await p.locator('.diff-ref[aria-label="Compare to"]').fill("main");
     await K("Enter");
     await until("what main has that the branch does not", async () => (await p.locator(".diff-files .change").allTextContents()).some((t) => t.includes("README.md")), 5000);
-    await until("the line added on main", async () => (await p.locator(".drow.knew .right").allTextContents()).includes("main line"), 5000);
+    await until("the line added on main", async () => (await p.locator(".drow.unew .right").allTextContents()).includes("main line"), 5000);
     await p.locator('.diff-ref[aria-label="Compare from"]').fill("no-such-branch");
     await K("Enter");
     await until("git's own explanation", async () => /no-such-branch|unknown revision|bad revision/i.test((await p.locator(".diff-main .hint").textContent().catch(() => "")) ?? ""), 5000);
@@ -972,7 +1039,7 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     await p.locator('.side .mini[title="Refresh"]').click();
     await until("the change to be listed", async () => (await p.locator(".side .change .change-name").allTextContents()).some((t) => t.includes("notes.md")), 5000);
     await p.locator(".side .change", { hasText: "src/notes.md" }).locator(".change-name").click();
-    await until("the local edit as an added line", async () => (await p.locator(".drow.knew .right").allTextContents()).includes("local edit"), 5000);
+    await until("the local edit as an added line", async () => (await p.locator(".drow.unew .right").allTextContents()).includes("local edit"), 5000);
     expect((await p.locator(".diff-head").textContent()).includes("my files"), "the right side should be the working tree");
     await shot("diff");
     execFileSync("git", ["checkout", "--", "src/notes.md"], { cwd: project });
@@ -981,7 +1048,7 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     await p.locator('.diff-ref[aria-label="Compare from"]').fill("README.md");
     await p.locator('.diff-ref[aria-label="Compare to"]').fill("src/notes.md");
     await K("Enter");
-    await until("the two files side by side", async () => (await p.locator(".drow .left").allTextContents()).includes("# Shop") && (await p.locator(".drow .right").allTextContents()).includes("# Notes"), 5000);
+    await until("the two files, one taken away and one put in", async () => (await p.locator(".drow .left").allTextContents()).includes("# Shop") && (await p.locator(".drow .right").allTextContents()).includes("# Notes"), 5000);
     await K("Control+w");
     await p.locator('.side .mini[title="Refresh"]').click();
   });
@@ -1016,6 +1083,9 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     const year = new Date().getFullYear(), month = new Date().toLocaleString("en", { month: "long" });
     await commands(); await p.keyboard.type("Git: Open Graph"); await K("Enter");
     await p.waitForSelector(".calendar .cal-title");
+    // A year is stepped with one sign, not two arrows laid over each other.
+    const signs = await p.evaluate(() => ["Previous year", "Next year"].map((t) => document.querySelector(`.cal-head .mini[title="${t}"]`)?.querySelectorAll("svg").length));
+    expect(signs.join() === "1,1", "year buttons hold " + signs.join() + " drawings");
     expect((await p.locator(".cal-title").textContent()) === month + " " + year, "got " + (await p.locator(".cal-title").textContent()));
     await p.locator(".cal-title").click();
     await until("the months of the year", async () => (await p.locator(".cal-month").count()) === 12 && (await p.locator(".cal-title").textContent()) === String(year), 3000);
@@ -1151,7 +1221,7 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     await p.locator('.side .mini[title="Refresh"]').click();
     await until("the change", async () => (await p.locator(".side .change .change-name").allTextContents()).some((t) => t.includes("shop.bea")), 5000);
     await p.locator(".side .change", { hasText: "src/shop.bea" }).locator(".change-name").click();
-    await until("coloured rows on both sides", async () => (await p.locator(".diff-rows .left span[style]").count()) > 3 && (await p.locator(".diff-rows .knew .right span[style]").count()) > 3, 8000);
+    await until("coloured rows, unchanged and added", async () => (await p.locator(".diff-rows .usame .right span[style]").count()) > 3 && (await p.locator(".diff-rows .unew .right span[style]").count()) > 3, 8000);
     const colours = await p.evaluate(() => {
       const colour = (word) => [...document.querySelectorAll(".diff-rows .right span[style]")].find((e) => e.textContent === word)?.style.color;
       return [colour("pub"), colour("triple"), colour("Int")];
@@ -1280,6 +1350,165 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     expect(!((await p.locator(".panel-body").textContent()) ?? "").includes("the shell has ended"), "a dead shell is still shown");
     for (let i = 0; i < 23; i++) { const t = p.locator(".term-list .term-tab").first(); await t.hover(); await t.locator('.mini[title^="Kill"]').click(); }
     await until("every shell to be gone", async () => (await p.locator(".term-list .term-tab").count()) === 0, 8000);
+  });
+
+  await check("the explorer makes, renames and deletes files and folders", async () => {
+    await K("Control+Shift+e");
+    const node = (name) => p.locator(".tree .node", { has: p.locator(".name", { hasText: new RegExp("^" + name.replace(/\./g, "\\.") + "$") }) });
+    const names = () => p.locator(".tree .node .name").allTextContents();
+    const at = (name) => path.join(project, name);
+    // Deleting asks; here the trash may not exist (a bare test machine), and then it asks once more.
+    const agree = async () => {
+      await p.locator(".prompt .button", { hasText: /Move to trash|Delete/ }).click();
+      await p.waitForTimeout(500);
+      if (await p.locator(".prompt").count()) await p.locator(".prompt .button", { hasText: "Delete" }).click();
+    };
+    if (await node("shop.bea").count()) await node("src").click();
+    await p.locator(".root-name").click();
+
+    // A new file, from the buttons over the tree: named in place, made empty, opened.
+    await p.locator('.root-tools .mini[title="New file"]').click();
+    await p.waitForSelector("#runes-naming");
+    await shot("explorer-naming");
+    await p.keyboard.type("made.txt"); await K("Enter");
+    await until("the file on disk, listed and open", async () => fs.existsSync(at("made.txt")) && (await names()).includes("made.txt") && (await p.locator(".group.focused .tab.on").textContent()).includes("made.txt"), 5000);
+    expect(fs.readFileSync(at("made.txt"), "utf8") === "", "a new file should be empty");
+    // Escape makes nothing; a name that would climb out of the folder is refused; a taken name is not overwritten.
+    await p.locator('.root-tools .mini[title="New file"]').click();
+    await p.locator("#runes-naming").fill("nope.txt"); await K("Escape");
+    await p.locator('.root-tools .mini[title="New file"]').click();
+    await p.locator("#runes-naming").fill("../escaped.txt"); await K("Enter");
+    await until("the refusal", async () => ((await p.locator(".toast").textContent().catch(() => "")) ?? "").includes("cannot be used"), 3000);
+    await K("Escape");
+    fs.writeFileSync(at("README.md"), fs.readFileSync(at("README.md"), "utf8"));
+    const readme = fs.readFileSync(at("README.md"), "utf8");
+    await p.locator('.root-tools .mini[title="New file"]').click();
+    await p.locator("#runes-naming").fill("README.md"); await K("Enter");
+    await until("being told it exists", async () => ((await p.locator(".toast").textContent().catch(() => "")) ?? "").includes("already exists"), 3000);
+    expect(!fs.existsSync(at("nope.txt")) && !fs.existsSync(path.join(work, "escaped.txt")) && fs.readFileSync(at("README.md"), "utf8") === readme, "something was made or overwritten that should not have been");
+
+    // A right click on a folder: a new folder inside it, with folders in between made on the way.
+    await node("src").click({ button: "right" });
+    await p.waitForSelector(".node-menu");
+    const items = await p.locator(".node-menu .result span:first-child").allTextContents();
+    expect(items.join() === "New File…,New Folder…,Rename…,Delete,Copy Path,Copy Relative Path,Show in the File Manager", "menu: " + items.join());
+    await shot("explorer-menu");
+    await p.locator(".node-menu .result", { hasText: "New Folder" }).click();
+    await p.locator("#runes-naming").fill("deep/inner"); await K("Enter");
+    await until("both folders, open in the tree", async () => fs.statSync(at("src/deep/inner"), { throwIfNoEntry: false })?.isDirectory() && (await names()).includes("deep") && (await names()).includes("inner"), 5000);
+
+    // Renaming an open file with unsaved text: the tab, the text and the edits move with it.
+    await node("made.txt").click();
+    await until("the file to have the keyboard", async () => (await p.locator(".group.focused .tab.on").textContent()).includes("made.txt"), 3000);
+    await p.locator(".group.focused .content").click({ position: { x: 200, y: 100 } });
+    await p.keyboard.type("kept through the rename");
+    await node("made.txt").click({ button: "right" });
+    await p.locator(".node-menu .result", { hasText: "Rename" }).click();
+    await p.waitForSelector("#runes-naming");
+    await until("the name selected, but not its ending", async () => (await p.evaluate(() => { const e = document.getElementById("runes-naming"); return e.value.slice(e.selectionStart, e.selectionEnd); })) === "made", 2000);
+    await p.keyboard.type("renamed"); await K("Enter");
+    await until("the new name on disk and on the tab", async () => fs.existsSync(at("renamed.txt")) && !fs.existsSync(at("made.txt")) && (await p.locator(".group.focused .tab.on").textContent()).includes("renamed.txt"), 5000);
+    expect((await lines())[0] === "kept through the rename", "the unsaved text was lost: " + (await lines()).join("|"));
+    await p.locator(".group.focused .content").click({ position: { x: 200, y: 100 } });
+    await K("Control+s");
+    await until("the save to go to the new name", async () => fs.readFileSync(at("renamed.txt"), "utf8").includes("kept through the rename"), 4000);
+    expect(!fs.existsSync(at("made.txt")), "saving brought the old name back");
+
+    // Deleting asks first. No means no.
+    await node("renamed.txt").click({ button: "right" });
+    await p.locator(".node-menu .result", { hasText: "Delete" }).click();
+    await until("the question", async () => /renamed\.txt/.test((await p.locator(".prompt b").textContent().catch(() => "")) ?? ""), 4000);
+    await shot("explorer-delete");
+    await p.locator(".prompt .button", { hasText: "Cancel" }).click();
+    await p.waitForTimeout(300);
+    expect(fs.existsSync(at("renamed.txt")), "declined, yet deleted");
+    await node("renamed.txt").click({ button: "right" });
+    await p.locator(".node-menu .result", { hasText: "Delete" }).click();
+    await p.waitForSelector(".prompt");
+    await agree();
+    await until("the file gone, its tab closed", async () => !fs.existsSync(at("renamed.txt")) && !(await names()).includes("renamed.txt") && (await p.locator(".tab", { hasText: "renamed.txt" }).count()) === 0, 6000);
+    await node("deep").click({ button: "right" });
+    await p.locator(".node-menu .result", { hasText: "Delete" }).click();
+    await p.waitForSelector(".prompt");
+    await agree();
+    await until("the folder gone with what was in it", async () => !fs.existsSync(at("src/deep")) && !(await names()).includes("deep") && !(await names()).includes("inner"), 6000);
+    // The open folder itself can be added to, but not renamed or deleted from here.
+    await p.locator(".tree.files").click({ button: "right", position: { x: 60, y: (await p.locator(".tree.files").boundingBox()).height - 12 } });
+    await p.waitForSelector(".node-menu");
+    const top = await p.locator(".node-menu .result span:first-child").allTextContents();
+    const fits = await p.locator(".node-menu").evaluate((e) => e.getBoundingClientRect().bottom <= window.innerHeight);
+    expect(fits, "a menu opened low in the tree runs off the window");
+    expect(top.includes("New File…") && !top.includes("Delete") && !top.includes("Rename…"), "menu of the open folder: " + top.join());
+    await K("Escape");
+    // What the window asks the shell for is checked there too.
+    const refused = await p.evaluate(async (outside) => {
+      const out = [];
+      for (const ask of [() => window.runesHost.fileCreate(outside, false), () => window.runesHost.fileRemove(outside), () => window.runesHost.fileRename(outside, outside + "2"), () => window.runesHost.fileRemove(outside.replace(/\/[^/]+$/, "") + "/shop")]) {
+        try { await ask(); out.push("allowed"); } catch (e) { out.push(String(e.message)); }
+      }
+      return out;
+    }, path.join(work, "outside.txt"));
+    expect(refused.every((r) => r.includes("outside the open folder")), "the shell let the window out of the folder: " + refused.join(" | "));
+    expect(!fs.existsSync(path.join(work, "outside.txt")) && fs.existsSync(project), "something outside the folder was touched");
+  });
+
+  await check("the explorer follows the disk: files made, changed and removed by other programs", async () => {
+    await K("Control+Shift+e");
+    const names = () => p.locator(".tree .node .name").allTextContents();
+    const node = (name) => p.locator(".tree .node", { has: p.locator(".name", { hasText: new RegExp("^" + name.replace(/\./g, "\\.") + "$") }) });
+    if (!(await node("shop.bea").count())) await node("src").click();
+    await until("the folder open", async () => (await names()).includes("shop.bea"), 3000);
+    // Nothing here touches the window: no click, no focus, no refresh.
+    fs.writeFileSync(path.join(project, "appeared.txt"), "one\n");
+    fs.mkdirSync(path.join(project, "src/arrived"));
+    await until("a new file and a new folder, by themselves", async () => (await names()).includes("appeared.txt") && (await names()).includes("arrived"), 5000);
+    await open("appeared.txt");
+    await until("the file open", async () => (await lines())[0] === "one", 4000);
+    fs.writeFileSync(path.join(project, "appeared.txt"), "two\n");
+    await until("its new text, read again", async () => (await lines())[0] === "two", 5000);
+    await until("quick open to know it", async () => { await K("Control+p"); await typing(); await p.keyboard.type("appeared"); await p.waitForTimeout(150); const found = await p.locator(".result").allTextContents(); await K("Escape"); return found.some((t) => t.includes("appeared.txt")); }, 5000);
+    fs.rmSync(path.join(project, "appeared.txt"));
+    fs.rmdirSync(path.join(project, "src/arrived"));
+    await until("both gone, by themselves", async () => !(await names()).includes("appeared.txt") && !(await names()).includes("arrived"), 5000);
+    await K("Control+w");
+    // A folder that is open in the tree and is removed takes its place in the tree with it.
+    fs.mkdirSync(path.join(project, "temp/inner"), { recursive: true });
+    await until("the folder", async () => (await names()).includes("temp"), 5000);
+    await node("temp").click();
+    await until("what is in it", async () => (await names()).includes("inner"), 3000);
+    fs.rmSync(path.join(project, "temp"), { recursive: true });
+    await until("all of it gone", async () => !(await names()).includes("temp") && !(await names()).includes("inner"), 5000);
+  });
+
+  await check("source control: changes are discarded, deleted files come back, new ones go — after asking", async () => {
+    execFileSync("git", ["checkout", "--", "."], { cwd: project });
+    execFileSync("git", ["clean", "-fdq"], { cwd: project });
+    const original = fs.readFileSync(path.join(project, "src/notes.md"), "utf8");
+    fs.appendFileSync(path.join(project, "src/notes.md"), "a change to throw away\n");
+    fs.rmSync(path.join(project, "src/many.txt"));
+    fs.writeFileSync(path.join(project, "scratch.txt"), "never committed\n");
+    await K("Control+Shift+g");
+    const listed = async () => (await p.locator(".side .change:not(.session) .change-name").allTextContents()).map((t) => t.split(" ")[0]).sort().join();
+    await until("the three changes, with nothing clicked", async () => (await listed()) === "many.txt,notes.md,scratch.txt", 6000);
+    const row = (name) => p.locator(".side .change:not(.session)", { hasText: name });
+    expect((await row("many.txt").locator(".discard").getAttribute("title")) === "Bring back src/many.txt" && (await row("scratch.txt").locator(".discard").getAttribute("title")).startsWith("Delete scratch.txt"), "the buttons do not say what they will do");
+    await shot("discard");
+    // No means no.
+    await row("notes.md").locator(".discard").click();
+    await until("the question", async () => ((await p.locator(".prompt b").textContent().catch(() => "")) ?? "") === "Discard the changes to src/notes.md?", 4000);
+    await p.locator(".prompt .button", { hasText: "Cancel" }).click();
+    await p.waitForTimeout(300);
+    expect(fs.readFileSync(path.join(project, "src/notes.md"), "utf8").includes("throw away"), "declined, yet discarded");
+    // One file: a deleted one comes back.
+    await row("many.txt").locator(".discard").click();
+    await p.locator(".prompt .button", { hasText: "Discard" }).click();
+    await until("the deleted file back", async () => fs.existsSync(path.join(project, "src/many.txt")) && (await listed()) === "notes.md,scratch.txt", 6000);
+    // The rest at once.
+    await p.locator(".side .section .link", { hasText: "Discard all" }).click();
+    await until("the question for both", async () => ((await p.locator(".prompt b").textContent().catch(() => "")) ?? "") === "Discard the changes to 2 files?", 4000);
+    await p.locator(".prompt .button", { hasText: "Discard" }).click();
+    await until("a clean tree", async () => (await listed()) === "" && fs.readFileSync(path.join(project, "src/notes.md"), "utf8") === original && !fs.existsSync(path.join(project, "scratch.txt")), 6000);
+    await K("Control+Shift+e");
   });
 
   await check("installing a VSIX with code asks first; declining installs nothing", async () => {

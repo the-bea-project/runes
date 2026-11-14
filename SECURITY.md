@@ -1,4 +1,4 @@
-# Security review of Runes 0.6.0
+# Security review of Runes 0.7.0
 
 What was checked, what was changed because of it, and what remains. Reviewed against the code
 in this repository; the automated checks named below are in `shell/shell.test.cjs` and
@@ -41,10 +41,15 @@ in this repository; the automated checks named below are in `shell/shell.test.cj
 | SSH passwords and passphrases leaking | They are typed into a hidden field in the window, held in memory for the one sign-in, and written nowhere: not the session file, the settings, or a log | unit test, end-to-end |
 | A session's fields, or a file name on the other machine, being read as a command or an option | Host and user are checked against strict patterns and may not start with `-`. Every word sent to the other machine's shell is single-quoted, and the tests use a folder with a quote in its name and a commit message with `$(...)` in it | unit test |
 | The window reaching this machine's files through the remote handlers, or the reverse | While connected, workspace paths go to the other machine; only paths inside Runes' own profile folder stay local. Git's checks that a path is inside the folder apply on both | unit test |
+| The explorer making, renaming or deleting something outside the open folder | The shell resolves every path it is given and refuses any that is not strictly inside the open folder (the folder itself cannot be renamed or deleted); creating never overwrites, and renaming never replaces an existing file | unit test, end-to-end: the handlers are called from the page with paths outside the folder |
+| Deleting by mistake | The shell asks in the window first. On this machine a file goes to the system trash; only if there is none is permanent deletion offered, with a second question. Over SSH the question says there is no trash | end-to-end |
+| Discard throwing away the wrong work | Only the named paths, which must lie inside the folder and may not start with `-`; git runs without a shell; the shell asks in the window first, every time | unit test, end-to-end |
+| A file name on the other machine read as a command when a folder is removed there | `rm -rf --` with the path single-quoted, after the same inside-the-folder check; without a shell the folder is taken apart over SFTP | unit test |
+| Watching for changes used to read outside the folder | Only folders inside the open folder are watched; the page is told which folder or file changed, never file contents | by reading |
 | A marketplace download from elsewhere | Extension names are checked, and the file must come from the registry's own address | unit test |
 | A half-written settings file | Runes' own files are written to a side file and renamed into place | e2e |
 | Mass rewrite by "replace in files" | A native confirmation naming the folder and both strings | review |
-| Dependencies | `npm audit`: 0 known vulnerabilities at the time of this build | `npm audit` |
+| Dependencies | What ships (`npm audit --omit=dev`): 0 known vulnerabilities at the time of this build. The release tooling, which is not shipped, has one moderate advisory: see below | `npm audit` |
 
 ## Changed during the review
 
@@ -58,6 +63,16 @@ in this repository; the automated checks named below are in `shell/shell.test.cj
 
 ## Known and accepted
 
+- **The questions before deleting and discarding are drawn in the window**, like the SSH
+  password question, so they protect against a slip of the hand, not against a compromised page: a
+  page that could run its own script could answer them itself. Such a page could already
+  overwrite any file in the open folder through the save handler, so this adds no new reach;
+  and the content security policy is what stops such script from running at all.
+- **A moderate advisory in the release tooling.** `minimatch`, pulled in by electron-builder,
+  can be made slow by a crafted pattern (GHSA-g3hv-75wg-m249). It runs only when building
+  installers, on patterns from this repository's own configuration, and is not part of the
+  app. The fix npm offers is an older electron-builder, so it is left until a newer one
+  carries the patched version.
 - **SSH host keys are kept in Runes' own list, not OpenSSH's `known_hosts`.** A machine you already trust from the command line is asked about once more in Runes. The SSH library (ssh2) and the tests' stand-in server come from the same project; Runes has not been run against a real OpenSSH server by its tests.
 
 

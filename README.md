@@ -1,12 +1,49 @@
-# Runes
+<p align="center">
+  <img src="logo.svg" width="112" height="112" alt="The Runes mark: the rune raidho, cut in mint on black">
+</p>
 
-A code editor written in Gleam and JS. Languages, themes,
-file icons and language servers all come from VS Code extensions (`.vsix`); Runes has none of
-its own. Apache-2.0.
+<h1 align="center">Runes</h1>
+
+<p align="center"><b>An elegant, minimal code editor.</b><br><i>Carve your code.</i></p>
+
+Languages, themes, file icons and language servers all come from VS Code extensions (`.vsix`);
+Runes has none of its own. Apache-2.0.
 
 Runes ships small. Built in are syntax colouring for about thirty languages (Bea and Gleam
-among them), one theme (Runes Void) and file icons. Language servers and everything else are installed
+among them), two themes (Runes Void, dark, and Runes Glacier, light) and file icons. Language servers and everything else are installed
 from the marketplace or from a `.vsix` file.
+
+## New in 0.7.0
+
+- **The explorer makes, renames and deletes.** Buttons over the tree and a right click on any
+  file or folder: New File, New Folder, Rename, Delete, Copy Path, Show in the File Manager.
+  Names are typed in place, and a name like `notes/today.md` makes the folders on the way.
+  Renaming an open file keeps its tab, its text and its unsaved edits. Deleting asks first and
+  moves to the trash (over SSH there is no trash, and the question says so). All of it is in
+  the command palette too, and works the same on a machine reached over SSH.
+- **The explorer follows the disk.** Files and folders made, renamed or removed by other
+  programs appear and disappear by themselves, open files that have no unsaved edits are read
+  again when they change, and source control is asked again. Only the folders the tree has
+  open are watched, so a large project costs nothing until it is looked at. Over SSH the open
+  folders are checked every few seconds, in one round trip.
+- **Discard in source control.** Each change has a discard button, and Changes has *Discard
+  all*: changed files go back to the last commit, deleted files come back, files that were
+  never committed are removed. It asks first, every time.
+- **SSH: folders open without the wait.** When a folder is shown, the folders inside it are
+  listed ahead (one level, a few at a time, skipping the likes of `node_modules`), so opening
+  one is answered from what is already known, then checked behind the scenes. See
+  [how that compares with VS Code](#what-ssh-sessions-do-not-do-yet).
+- **SSH: choose how to sign in.** A session can be set to a password only, a key file only, or
+  the agent only. Left on *whatever works*, a key in `~/.ssh` that needs a passphrase is no
+  longer asked about when the machine would take a password.
+- **Comparisons read as one text.** A session shows a commit's changes inline, removed lines
+  then added lines, with the whole width to themselves. *Split* puts old and new side by side
+  when that is wanted.
+- **Looks.** Runes Glacier's side bar is a clear step darker and file icons are deepened on
+  light themes, so they stand out. The pie menu has its own ground and lifted slices, so it
+  reads on pitch black. Menus are lifted off the black too and stay inside the window. The
+  calendar steps a year with one sign instead of two arrows laid over each other.
+- The mark is in the repository root as `logo.svg`.
 
 ## New in 0.6.0
 
@@ -45,6 +82,13 @@ VS Code solves this by installing a server on the other machine; Runes installs 
 which is why any machine that takes SSH works. Search uses the other machine's `grep` and
 `find` when it has them and falls back to reading files over SFTP when it does not. Jump
 hosts and port forwarding are not there yet.
+
+On speed: VS Code's server lists a folder on the far machine and sends the answer back in one
+round trip. Without a server, a listing over SFTP takes three or four, each as long as the
+machine is far. Runes makes up for that by listing one level ahead and keeping what it has
+seen for a minute, so the wait is paid before a folder is opened rather than when it is. The
+first listing after connecting, and a folder with more than a couple of dozen folders inside
+it, still wait for the machine.
 
 ## New in 0.5.0
 
@@ -164,7 +208,9 @@ hosts and port forwarding are not there yet.
 | Pie menu | Hold the right mouse button, or Ctrl+Shift+Space; slices and submenus are edited in Settings (`runes.pie.items`) |
 | AI chat | Claude or ChatGPT with your own key, streaming, optionally with the open file attached |
 | Themes | Runes Void (dark) and Runes Glacier (light); any VS Code colour or icon theme can be installed |
-| Source control | Stage, unstage, commit, switch branch; change marks in the gutter; side-by-side comparison of commits, branches and files, kept as sessions; a graph of every branch with a calendar |
+| Explorer | New file and folder, rename, delete (to the trash), copy path; follows changes made by other programs; files coloured by how they stand with git |
+| Source control | Stage, unstage, discard, commit, switch branch; change marks in the gutter; comparison of commits, branches and files, inline or side by side, kept as sessions; time travel through a file; a graph of every branch with a calendar |
+| SSH | Named sessions; the explorer, search, source control and terminals on the other machine, with nothing installed there |
 | Marketplace | Open VSX, searched and installed from inside the editor |
 | Font | EnvyCodeR Nerd Font, bundled (SIL Open Font License) |
 | Settings | A settings page (Ctrl+,) over `settings.json`; `keybindings.json` in VS Code's format |
@@ -227,7 +273,7 @@ Node and Electron glue and because extensions expect a Node `require("vscode")`.
 ## Tests
 
     npm test                           # Bea unit tests, shell unit tests, extension host test
-    xvfb-run -a npm run test:app       # 31 end-to-end checks of the real app (Playwright)
+    xvfb-run -a npm run test:app       # 56 end-to-end checks of the real app (Playwright)
     RUNES_ELECTRON=out/Runes-linux-x64/Runes xvfb-run -a npm run test:app   # the packaged app
 
 `npm run test:app` needs Playwright (`npm i -D playwright`), and `--no-sandbox` is passed
@@ -235,14 +281,15 @@ because CI containers run as root. See SECURITY.md for the security review.
 
 ## Not yet
 
-- Multiple cursors, code folding, bracket matching, word wrap.
+- Code folding, bracket matching, word wrap.
 - Rename, references, code actions, signature help, semantic highlighting (the providers are
   registered by extensions already; the editor does not call them yet).
 - Floating windows. Tiles split, resize, maximise and move, but stay inside the one window.
 - `.sublime-syntax` grammars. TextMate grammars (`.tmLanguage`, JSON or plist) are supported,
   which is what VS Code extensions ship.
-- Git: diffs, push and pull, branch switching, stash and discard are not there yet. Use the
-  terminal for those.
+- Git: push, pull, fetch and stash are not there yet. Use the terminal for those.
+- The explorer: dragging files between folders, copy and paste of files, and choosing several
+  at once.
 - Debugger.
 - Downloading and installing an update by itself. The check tells you and opens the release.
 - Windows and macOS builds have not been run. Nothing in the code is Linux-only, but only the

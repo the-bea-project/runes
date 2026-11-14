@@ -148,6 +148,7 @@ function leaveRemote(note) {
   if (!remote) return;
   const was = remoteSession;
   const gone = remote;
+  unwatch();
   remote = null; remoteSession = null;
   gone.end();
   git.over(null);
@@ -157,6 +158,85 @@ function leaveRemote(note) {
   if (window && !window.isDestroyed()) {
     window.setTitle("Runes");
     if (note) window.webContents.send("runes:ssh", { left: was?.name ?? "", folder, note });
+  }
+}
+
+// --- Files of the open folder, and noticing when they change ---------------------------------------
+
+/** A path the window names for changing: it must lie inside the open folder, and not be the folder itself. */
+function within(file) {
+  const P = remote ? path.posix : path;
+  text(file);
+  if (file.includes("\0") || !folder) throw new Error("Bad request");
+  const full = remote ? P.normalize(file) : P.resolve(file);
+  if (remote && !full.startsWith("/")) throw new Error("Bad request");
+  if (!full.startsWith(folder.endsWith(P.sep) ? folder : folder + P.sep) || full === folder) throw new Error("That is outside the open folder");
+  return full.endsWith(P.sep) ? full.slice(0, -1) : full;
+}
+
+// The explorer follows the disk. Only the folders it has open are watched, one cheap watch
+// each (and the repository's own folder, for commits and switches made elsewhere), so a
+// huge tree costs nothing until it is looked at. On another machine there is nothing to
+// watch with, so the same folders are asked their age every few seconds, in one round trip.
+const watches = new Map();
+let watched = [], ages = new Map(), poll = null, pending = null;
+function notice(dir, file, vcs) {
+  pending ??= { dirs: new Set(), files: new Set(), git: false, timer: setTimeout(() => {
+    const out = pending; pending = null;
+    if (window && !window.isDestroyed()) window.webContents.send("runes:fs", { dirs: [...out.dirs], files: [...out.files], git: out.git });
+  }, 120) };
+  if (dir) pending.dirs.add(dir);
+  if (file) pending.files.add(file);
+  if (vcs) pending.git = true;
+}
+function unwatch() {
+  for (const w of watches.values()) { try { w.close(); } catch {} }
+  watches.clear(); ages = new Map(); watched = [];
+  clearInterval(poll); poll = null;
+}
+function watch(dirs) {
+  const P = remote ? path.posix : path;
+  const wanted = [...new Set(dirs)].filter((d) => typeof d === "string" && d.length < 4096 && (d === folder || d.startsWith(folder + P.sep))).slice(0, 300);
+  if (remote) {
+    for (const w of watches.values()) { try { w.close(); } catch {} }
+    watches.clear();
+    watched = wanted;
+    for (const dir of [...ages.keys()]) if (!wanted.includes(dir)) ages.delete(dir);
+    poll ??= setInterval(async () => {
+      const on = remote;
+      if (!on || !watched.length || !window || window.isDestroyed() || window.isMinimized() || !window.isVisible()) return;
+      let found;
+      try { found = await on.times(watched); } catch { return; }
+      if (remote !== on) return;
+      for (const [dir, age] of found) {
+        const before = ages.get(dir);
+        // An age is told in whole seconds, so a change in the same second as the last one
+        // does not show in it. A folder first seen, or just changed, is therefore looked
+        // at once more on the next round, by its listing.
+        ages.set(dir, { age, warm: !before || before.age !== age });
+        if (before && before.age !== age) { on.forget(dir); notice(dir, "", false); }
+        else if (before?.warm) { const kept = on.lists.get(dir); if (kept?.entries && !kept.pending) on.refresh(dir, kept.entries); }
+      }
+    }, 4000);
+    return;
+  }
+  clearInterval(poll); poll = null; ages = new Map();
+  const all = new Set(wanted);
+  const vcs = folder && path.join(folder, ".git");
+  if (vcs && fsSync.existsSync(vcs)) all.add(vcs);
+  for (const [dir, w] of watches) if (!all.has(dir)) { try { w.close(); } catch {} watches.delete(dir); }
+  for (const dir of all) {
+    if (watches.has(dir)) continue;
+    try {
+      const w = fsSync.watch(dir, { persistent: false }, (kind, name) => {
+        if (dir === vcs) { if (name === "HEAD" || name === "index" || name === "ORIG_HEAD") notice("", "", true); return; }
+        if (name === ".git" || (name && /(\.swp|\.swx|~|\.runes-part|\.part)$/.test(name))) return;
+        if (kind === "rename" || !name) notice(dir, "", false); else notice("", path.join(dir, name), false);
+      });
+      // A watched folder that is itself removed: the folder above it has changed.
+      w.on("error", () => { try { w.close(); } catch {} watches.delete(dir); notice(path.dirname(dir), "", false); });
+      watches.set(dir, w);
+    } catch {}
   }
 }
 
@@ -213,6 +293,45 @@ const handlers = {
     const picked = await dialog.showSaveDialog(window, { defaultPath: path.join(folder || app.getPath("home"), path.basename(text(name))) });
     return picked.canceled ? "" : picked.filePath;
   },
+  // --- Changing the files of the open folder: only ever inside it ---
+  /** A new empty file or folder. Folders above it that are missing are made; nothing is overwritten. */
+  fileCreate: async (file, isFolder) => {
+    const full = within(file);
+    if (remote) return void (await remote.create(full, !!isFolder));
+    if (fsSync.existsSync(full)) throw new Error(path.basename(full) + " already exists");
+    if (isFolder) return void (await fs.mkdir(full, { recursive: true }));
+    await fs.mkdir(path.dirname(full), { recursive: true });
+    await fs.writeFile(full, "", { flag: "wx" });
+  },
+  fileRename: async (from, to) => {
+    const [a, b] = [within(from), within(to)];
+    if (remote) return void (await remote.rename(a, b));
+    // On a disk that ignores case, a change of case alone is the same file and is fine.
+    if (fsSync.existsSync(b) && a.toLowerCase() !== b.toLowerCase()) throw new Error(path.basename(b) + " already exists");
+    await fs.mkdir(path.dirname(b), { recursive: true });
+    await fs.rename(a, b);
+  },
+  /** Asks first. Here a file goes to the trash; on another machine there is none, and it says so. Resolves true when it is gone. */
+  fileRemove: async (file) => {
+    const full = within(file);
+    const name = (remote ? path.posix : path).basename(full);
+    if (remote) {
+      if (!(await question("confirm", "Delete " + name + " for good?", full + " on " + remoteSession.name + "\n\nThere is no trash on the other machine. A folder goes with everything in it. This cannot be undone.", "Delete"))) return false;
+      await remote.remove(full);
+      return true;
+    }
+    if (!(await question("confirm", "Move " + name + " to the trash?", full + "\n\nA folder goes with everything in it. You can bring it back from the trash.", "Move to trash"))) return false;
+    try { await shell.trashItem(full); }
+    catch {
+      if (!(await question("confirm", "Delete " + name + " for good?", "It could not be moved to the trash on this system.\n" + full + "\n\nThis cannot be undone.", "Delete"))) return false;
+      await fs.rm(full, { recursive: true, force: true });
+    }
+    return true;
+  },
+  fileReveal: (file) => { if (!remote) shell.showItemInFolder(within(file)); },
+  /** Which folders the explorer has open, so they can be followed. */
+  watchDirs: (dirs) => watch(Array.isArray(dirs) ? dirs : []),
+
   userFiles: async () => {
     await fs.mkdir(user(), { recursive: true });
     for (const [name, initial] of [["settings.json", ""], ["keybindings.json", "// Your key bindings, as in VS Code: [{ \"key\": \"ctrl+shift+d\", \"command\": \"editor.action.copyLinesDownAction\" }]\n[\n]\n"]]) {
@@ -276,6 +395,14 @@ const handlers = {
   gitStage: (paths) => git.stage(folder, paths),
   gitUnstage: (paths) => git.unstage(folder, paths),
   gitCommit: (message) => git.commit(folder, message),
+  /** Asks first: this is the one thing in source control that loses work. Resolves true when done. */
+  gitDiscard: async (paths) => {
+    if (!Array.isArray(paths) || !paths.length) throw new Error("Bad request");
+    const what = paths.length === 1 ? String(paths[0]) : paths.length + " files";
+    if (!(await question("confirm", "Discard the changes to " + what + "?", "Changed files go back to the last commit, deleted ones come back, and new files that were never committed are deleted.\n\nThis cannot be undone.", "Discard"))) return false;
+    await git.discard(folder, paths);
+    return true;
+  },
   gitFile: (at, name) => git.file(folder, text(at, 200), text(name)),
   gitChanged: (from, to) => git.changed(folder, text(from, 200), text(to, 200)),
   gitRefs: () => git.refs(folder),
@@ -313,7 +440,9 @@ const handlers = {
       if (!(await connected.isDirectory(root))) throw new Error(root + " is not a folder on " + session.name);
     } catch (e) { connected.end(); throw e; }
     if (remote) leaveRemote(""); else localFolder = folder;
+    unwatch();
     remote = connected; remoteSession = session;
+    connected.onStale = (dir) => { if (remote === connected) notice(dir, "", false); };
     folder = root;
     git.over(connected);
     // Extensions run here and could only see this machine's files, so they rest for now.
@@ -443,6 +572,7 @@ app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", () => {
+  unwatch();
   remote?.end();
   for (const term of terminals.values()) { try { term.kill(); } catch {} }
   host?.postMessage({ type: "stop" });

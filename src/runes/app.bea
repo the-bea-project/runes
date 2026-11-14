@@ -287,10 +287,37 @@ def git_status(done: fn(Bool, String, Int, Int, List((String, String, String))) 
 def git_log(limit: Int, until: String, done: fn(List((String, List(String), String, Int, List(String), String))) -> Nil) -> Nil
 
 @external(javascript, "../runes_ffi.mjs", "ssh_sessions")
-def ssh_sessions(done: fn(List((String, String, String, String, Int, String, String, Bool, Bool))) -> Nil) -> Nil
+def ssh_sessions(done: fn(List((String, String, String, String, Int, String, String, Bool, Bool, String))) -> Nil) -> Nil
 
 @external(javascript, "../runes_ffi.mjs", "ssh_save")
-def ssh_save(id: String, name: String, host: String, user: String, port: String, key: String, folder: String, done: fn(String) -> Nil) -> Nil
+def ssh_save(id: String, name: String, host: String, user: String, port: String, key: String, folder: String, auth: String, done: fn(String) -> Nil) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "file_create")
+def file_create(path: String, folder: Bool, done: fn(String) -> Nil) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "file_rename")
+def file_rename(from: String, to: String, done: fn(String) -> Nil) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "file_remove")
+def file_remove(path: String, done: fn(Bool, String) -> Nil) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "file_reveal")
+def file_reveal(path: String) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "copy_text")
+def copy_text(text: String) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "watch_dirs")
+def watch_dirs(dirs: List(String)) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "files_listen")
+def files_listen(on_change: fn(List(String), List(String), Bool) -> Nil) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "focus_stem")
+def focus_stem(id: String) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "git_discard")
+def git_discard(paths: List(String), done: fn(Bool, String) -> Nil) -> Nil
 
 @external(javascript, "../runes_ffi.mjs", "ssh_remove")
 def ssh_remove(id: String, done: fn() -> Nil) -> Nil
@@ -376,6 +403,16 @@ pub type Session {
   folder: String,
   /// Its key has been seen and accepted before.
   known: Bool,
+  /// How to sign in: "auto" (whatever works), or only by "password", "key" or "agent".
+  auth: String,
+}
+
+/// A name being typed in the explorer: of a new "file" or "folder" inside `at`, or the new
+/// name when `at` itself is being given one ("rename").
+pub type Naming {
+  kind: String,
+  at: String,
+  text: String,
 }
 
 /// A question from the shell, shown over the window until it is answered: a "secret"
@@ -441,6 +478,8 @@ pub type Compare {
   /// text typed to narrow that list.
   everything: Bool,
   filter: String,
+  /// Old and new side by side. Otherwise the changes read as one text, top to bottom.
+  split: Bool,
 }
 
 // --- The model -------------------------------------------------------------------------
@@ -495,6 +534,8 @@ pub type Overlay {
   Pie(x: Int, y: Int, hover: Int, hold: Bool, path: List(Int), back: List((Int, Int)))
   /// The menu a right click opens.
   Menu(x: Int, y: Int)
+  /// The menu of a file or folder in the explorer.
+  NodeMenu(x: Int, y: Int, path: String, folder: Bool)
 }
 
 pub type Hover {
@@ -616,6 +657,9 @@ pub type Model {
   /// The folder typed to go to on the connected machine.
   ssh_path: String,
   prompt: Option(Prompt),
+  /// The explorer: a name being typed, and the file or folder last pointed at.
+  naming: Option(Naming),
+  pointed: String,
   /// Time travel. For each file being looked at in the past (by its path in the
   /// repository): the commit shown, and every commit that changed the file, newest first.
   travel: Dict(String, String),
@@ -669,6 +713,20 @@ pub type Msg {
   DirRead(path: String, entries: List((String, Bool)))
   Walked(files: List(String))
   DirToggled(path: String)
+  /// Something asked of the explorer about a file or folder ("" for the one pointed at):
+  /// "newFile", "newFolder", "rename", "delete", "copyPath", "copyRelative", "reveal",
+  /// "refresh" or "collapse".
+  ExplorerDid(action: String, path: String)
+  NamingTyped(text: String)
+  NamingDone(keep: Bool)
+  FileMade(path: String, folder: Bool, problem: String)
+  FileMoved(from: String, to: String, problem: String)
+  FileGone(path: String, removed: Bool, problem: String)
+  /// The disk changed under the explorer: folders whose contents did, files whose text did,
+  /// and whether the repository itself moved.
+  FilesChanged(dirs: List(String), files: List(String), git: Bool)
+  GitDiscarded(paths: List(String))
+  GitDiscardDone(done: Bool, problem: String)
   FileOpened(path: String)
   FileRead(path: String, text: String, problem: String)
   Reloaded(path: String, text: String)
@@ -788,7 +846,7 @@ pub type Msg {
   GroupFocused(group: Int)
   GroupMaximized(group: Int)
   /// A mark in the gutter was clicked: show what changed there, in place.
-  SshListed(sessions: List((String, String, String, String, Int, String, String, Bool, Bool)))
+  SshListed(sessions: List((String, String, String, String, Int, String, String, Bool, Bool, String)))
   /// Start editing a saved session, or a new one for "".
   SshEdit(id: String)
   SshField(field: String, value: String)
@@ -842,6 +900,12 @@ pub const commands = [
   ("workbench.action.files.save", "File: Save"),
   ("workbench.action.files.newUntitledFile", "File: New Untitled File"),
   ("workbench.action.files.openFolder", "File: Open Folder…"),
+  ("explorer.newFile", "Explorer: New File…"),
+  ("explorer.newFolder", "Explorer: New Folder…"),
+  ("renameFile", "Explorer: Rename…"),
+  ("deleteFile", "Explorer: Delete…"),
+  ("workbench.files.action.refreshFilesExplorer", "Explorer: Refresh"),
+  ("workbench.files.action.collapseExplorerFolders", "Explorer: Collapse Folders"),
   ("workbench.action.closeActiveEditor", "View: Close Editor"),
   ("workbench.action.splitEditor", "View: Split Editor Right"),
   ("workbench.action.splitEditorDown", "View: Split Editor Down"),
@@ -1016,6 +1080,8 @@ pub def init(_flags: Nil) -> (Model, Effect(Msg)) {
     ssh_note: "",
     ssh_path: "",
     prompt: None,
+    naming: None,
+    pointed: "",
     travel: dict.new(),
     histories: dict.new(),
     trees: dict.new(),
@@ -1052,6 +1118,7 @@ pub def init(_flags: Nil) -> (Model, Effect(Msg)) {
       fn(id, kind, title, detail, initial) { dispatch(PromptShown(id, kind, title, detail, initial)) },
       fn(folder, note) { dispatch(SshLeft(folder, note)) },
     )
+    files_listen(fn(dirs, files, git) { dispatch(FilesChanged(dirs, files, git)) })
     load_fonts(fn(families) { dispatch(FontsLoaded(families, "")) })
     watch(fn(id, command) { dispatch(TerminalRan(id, command)) }, fn() { dispatch(WindowFocused) }, fn(id) { dispatch(TerminalClosed(id)) })
     ext_listen(
@@ -1127,6 +1194,77 @@ pub def language_of(langs: List(Lang), name: String) -> String {
 
 pub def base_name(path: String) -> String {
   string.replace(path, "\\", "/") |> string.split("/") |> list.last |> result.unwrap(path)
+}
+
+/// The folder a path is in.
+pub def dir_of(path: String) -> String {
+  parts = string.split(path, "/")
+  list.take(parts, int.max(list.length(parts) - 1, 0)) |> string.join("/")
+}
+
+/// Whether a path is a folder, or is somewhere inside it.
+pub def within(path: String, folder: String) -> Bool {
+  path == folder or string.starts_with(path, folder <> "/")
+}
+
+/// Whether the explorer knows a path to be a folder.
+pub def is_folder(model: Model, path: String) -> Bool {
+  path == model.root or dict.has_key(model.tree, path) or {
+    dict.get(model.tree, dir_of(path)) |> result.unwrap([]) |> list.contains((base_name(path), True))
+  }
+}
+
+/// The folder something new goes in when a path is pointed at: the folder itself, or the
+/// one the file is in. Nothing pointed at (or something outside) means the open folder.
+def folder_for(model: Model, path: String) -> String {
+  case path != "" and within(path, model.root), is_folder(model, path) {
+    False, _ -> model.root
+    True, True -> path
+    True, False -> dir_of(path)
+  }
+}
+
+/// The folders between the open folder and a path, outermost first.
+def above(model: Model, path: String) -> List(String) {
+  case within(path, model.root) and path != model.root {
+    False -> []
+    True -> list.append(above(model, dir_of(path)), [dir_of(path)])
+  }
+}
+
+/// What the explorer acts on when no path is named: what was pointed at, else the file being edited.
+def pointed_at(model: Model) -> String {
+  active = group(model, model.focus).active
+  case model.pointed, within(active, model.root) {
+    "", True -> active
+    pointed, _ -> pointed
+  }
+}
+
+/// Reads again the folders the explorer is showing, among these.
+def reread(model: Model, dirs: List(String)) -> Effect(Msg) {
+  shown = list.filter(dirs, fn(dir) { dict.has_key(model.tree, dir) and { dir == model.root or list.contains(model.expanded, dir) } })
+  effect.from(fn(dispatch) { list.each(shown, fn(dir) { read_dir(dir, fn(found) { dispatch(DirRead(dir, found)) }) }) })
+}
+
+def rewalk(model: Model) -> Effect(Msg) {
+  root = model.root
+  effect.from(fn(dispatch) { walk(root, fn(files) { dispatch(Walked(files)) }) })
+}
+
+/// Clean files follow the disk: these are read again, and replaced if they differ.
+def reload(model: Model, paths: List(String)) -> Effect(Msg) {
+  clean = list.filter(model.docs, fn(d) { on_disk(d) and d.version == d.saved and list.contains(paths, d.path) }) |> list.map(fn(d) { d.path })
+  effect.from(fn(dispatch) {
+    list.each(clean, fn(path) {
+      read_file(path, fn(text, failed) {
+        case failed {
+          "" -> dispatch(Reloaded(path, text))
+          _ -> Nil
+        }
+      })
+    })
+  })
 }
 
 /// A path as it reads inside the open folder.
@@ -1516,7 +1654,7 @@ def read_bases(model: Model) -> Effect(Msg) {
 }
 
 pub def session(model: Model, id: Int) -> Compare {
-  list.find(model.sessions, fn(c) { c.id == id }) |> result.unwrap(Compare(id, False, "HEAD", "", "", [], "", [], [], False, "", False, ""))
+  list.find(model.sessions, fn(c) { c.id == id }) |> result.unwrap(Compare(id, False, "HEAD", "", "", [], "", [], [], False, "", False, "", False))
 }
 
 /// What a terminal is called: the name it was given, else the last command it ran, else
@@ -1662,6 +1800,13 @@ def announce(model: Model) -> Effect(Msg) {
 }
 
 /// Reads the repository again. The graph keeps looking at the day it was taken back to.
+/// Only what has changed in the working tree: cheap enough to ask whenever a file is touched.
+def refresh_status() -> Effect(Msg) {
+  effect.from(fn(dispatch) {
+    git_status(fn(repo, branch, ahead, behind, files) { dispatch(GitStatus(repo, branch, ahead, behind, files)) })
+  })
+}
+
 def refresh_git(until: String) -> Effect(Msg) {
   effect.from(fn(dispatch) {
     git_status(fn(repo, branch, ahead, behind, files) { dispatch(GitStatus(repo, branch, ahead, behind, files)) })
@@ -1937,6 +2082,12 @@ pub def run(model: Model, command: String) -> (Model, Effect(Msg)) {
       _ -> (Model(closed | panel: ""), focus_editor())
     }
     "workbench.view.explorer" -> side("explorer")
+    "explorer.newFile" -> update(Model(closed | side: "explorer"), ExplorerDid("newFile", ""))
+    "explorer.newFolder" -> update(Model(closed | side: "explorer"), ExplorerDid("newFolder", ""))
+    "renameFile" -> update(Model(closed | side: "explorer"), ExplorerDid("rename", ""))
+    "deleteFile" -> update(closed, ExplorerDid("delete", ""))
+    "workbench.files.action.refreshFilesExplorer" -> update(closed, ExplorerDid("refresh", ""))
+    "workbench.files.action.collapseExplorerFolders" -> update(closed, ExplorerDid("collapse", ""))
     "workbench.view.extensions" -> side("extensions")
     "workbench.view.search" -> (Model(closed | side: "search"), effect.from(fn(_) { focus("runes-search") }))
     "workbench.action.chat.open" -> (Model(closed | side: "chat"), effect.from(fn(_) { focus("runes-chat") }))
@@ -2164,7 +2315,14 @@ def apply_edits(d: Doc, edits: List((Int, Int, Int, Int, String))) -> Doc {
 /// places, and each is put back at the scroll position it had: the window draws them
 /// afresh, and a fresh scroller starts at the top.
 pub def update(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
-  (next, effects) = step(model, msg)
+  (stepped, done) = step(model, msg)
+  (next, effects) = case stepped.expanded != model.expanded or stepped.root != model.root {
+    False -> (stepped, done)
+    True -> {
+      dirs = [stepped.root, ..list.filter(stepped.expanded, fn(dir) { dir != stepped.root })]
+      (stepped, effect.batch([done, effect.from(fn(_) { watch_dirs(dirs) })]))
+    }
+  }
   case layout.shape(next.layout) != layout.shape(model.layout) or next.maximized != model.maximized {
     False -> (next, effects)
     True -> {
@@ -2355,7 +2513,15 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
     }
     Hovered(group_id, at, text) -> (Model(model | hover: Some(Hover(group_id, at, text))), effect.none())
 
-    PieEvent(kind, x, y) -> case kind, model.overlay {
+    PieEvent(kind, x, y) -> case string.split(kind, "\n"), model.overlay {
+      ["node", path, what], _ -> {
+        at = case path {
+          "" -> model.root
+          _ -> path
+        }
+        (Model(model | overlay: NodeMenu(x, y, at, what == "folder"), pointed: path, completion: None, hover: None), effect.none())
+      }
+      _, _ -> case kind, model.overlay {
       "hold", _ -> (Model(model | overlay: Pie(x, y, -1, True, [], []), completion: None, hover: None), effect.none())
       "tap", Closed -> (Model(model | overlay: Menu(x, y), completion: None, hover: None, actions: []), ask_actions(model))
       "move", Pie(cx, cy, _, hold, path, back) | "drag", Pie(cx, cy, _, hold, path, back) -> {
@@ -2388,6 +2554,7 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
         }
       }
       _, _ -> (model, effect.none())
+      }
     }
     PiePicked(index) -> case model.overlay {
       Pie(cx, cy, _, _, _, _) -> update(model, PiePickedAt(index, cx, cy))
@@ -2404,14 +2571,201 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
       _ -> (model, effect.none())
     }
 
-    DirRead(path, found) -> (Model(model | tree: dict.insert(model.tree, path, found)), effect.none())
+    DirRead(path, found) -> {
+      // Folders that were open in here and are no longer listed have gone: so has all that was open inside them.
+      gone = list.filter(model.expanded, fn(dir) { dir != model.root and dir_of(dir) == path and not list.contains(found, (base_name(dir), True)) })
+      expanded = case gone {
+        [] -> model.expanded
+        _ -> list.filter(model.expanded, fn(dir) { not list.any(gone, fn(g) { within(dir, g) }) })
+      }
+      (Model(model | tree: dict.insert(model.tree, path, found), expanded:), effect.none())
+    }
     Walked(files) -> (Model(model | files:), effect.none())
     DirToggled(path) -> case list.contains(model.expanded, path) {
-      True -> (Model(model | expanded: list.filter(model.expanded, fn(p) { p != path })), effect.none())
+      True -> (Model(model | pointed: path, expanded: list.filter(model.expanded, fn(p) { p != path })), effect.none())
       False -> (
-        Model(model | expanded: [path, ..model.expanded]),
+        Model(model | pointed: path, expanded: [path, ..model.expanded]),
         effect.from(fn(dispatch) { read_dir(path, fn(found) { dispatch(DirRead(path, found)) }) }),
       )
+    }
+
+    ExplorerDid(action, named) -> {
+      path = case named {
+        "" -> pointed_at(model)
+        _ -> named
+      }
+      closed = Model(model | overlay: Closed)
+      inside = path != "" and path != model.root and within(path, model.root)
+      case action {
+        "newFile" | "newFolder" -> {
+          dir = folder_for(model, path)
+          kind = case action {
+            "newFile" -> "file"
+            _ -> "folder"
+          }
+          expanded = case list.contains(model.expanded, dir) {
+            True -> model.expanded
+            False -> [dir, ..model.expanded]
+          }
+          (
+            Model(closed | naming: Some(Naming(kind, dir, "")), expanded:),
+            effect.from(fn(dispatch) {
+              read_dir(dir, fn(found) { dispatch(DirRead(dir, found)) })
+              focus("runes-naming")
+            }),
+          )
+        }
+        "rename" if inside -> (Model(closed | naming: Some(Naming("rename", path, base_name(path)))), effect.from(fn(_) { focus_stem("runes-naming") }))
+        "delete" if inside -> (closed, effect.from(fn(dispatch) { file_remove(path, fn(removed, problem) { dispatch(FileGone(path, removed, problem)) }) }))
+        "rename" | "delete" -> toast(closed, "Point at a file or folder in the explorer first.")
+        "copyPath" -> (closed, effect.from(fn(_) { copy_text(path) }))
+        "copyRelative" -> (closed, effect.from(fn(_) { copy_text(relative(model, path)) }))
+        "reveal" -> (closed, effect.from(fn(_) { file_reveal(path) }))
+        "collapse" -> (Model(closed | expanded: [model.root], naming: None), effect.none())
+        "top" -> (Model(closed | pointed: model.root), effect.none())
+        _ -> (closed, effect.batch([reread(model, [model.root, ..model.expanded]), rewalk(model), refresh_git(model.until)]))
+      }
+    }
+    NamingTyped(text) -> (Model(model | naming: option.map(model.naming, fn(n) { Naming(n | text:) })), effect.none())
+    NamingDone(keep) -> {
+      name = model.naming |> option.map(fn(n) { string.trim(n.text) }) |> option.unwrap("")
+      parts = string.split(name, "/")
+      bad = string.starts_with(name, "/") or string.contains(name, "\n") or list.any(parts, fn(part) { part == "" or part == "." or part == ".." })
+      case model.naming, keep and name != "" {
+        None, _ -> (model, effect.none())
+        Some(_), False -> (Model(model | naming: None), effect.none())
+        Some(_), True if bad -> {
+          (told, timer) = toast(model, "That name cannot be used. A name may hold folders, as in notes/today.md, but no empty parts and no dots alone.")
+          (told, effect.batch([timer, effect.from(fn(_) { focus("runes-naming") })]))
+        }
+        Some(n), True -> case n.kind {
+          "rename" -> {
+            to = dir_of(n.at) <> "/" <> name
+            case to == n.at {
+              True -> (Model(model | naming: None), effect.none())
+              False -> (Model(model | naming: None), effect.from(fn(dispatch) { file_rename(n.at, to, fn(problem) { dispatch(FileMoved(n.at, to, problem)) }) }))
+            }
+          }
+          kind -> {
+            full = n.at <> "/" <> name
+            (Model(model | naming: None), effect.from(fn(dispatch) { file_create(full, kind == "folder", fn(problem) { dispatch(FileMade(full, kind == "folder", problem)) }) }))
+          }
+        }
+      }
+    }
+    FileMade(path, folder, problem) -> case problem {
+      "" -> {
+        // Every folder down to the new thing is opened, so it can be seen.
+        open = case folder {
+          True -> list.append(above(model, path), [path])
+          False -> above(model, path)
+        }
+        expanded = list.fold(open, model.expanded, fn(all, dir) {
+          case list.contains(all, dir) {
+            True -> all
+            False -> [dir, ..all]
+          }
+        })
+        shown = Model(model | expanded:, pointed: path)
+        reading = effect.batch([
+          effect.from(fn(dispatch) { list.each(open, fn(dir) { read_dir(dir, fn(found) { dispatch(DirRead(dir, found)) }) }) }),
+          rewalk(model),
+          refresh_status(),
+        ])
+        case folder {
+          True -> (shown, reading)
+          False -> {
+            (opened, opening) = update(shown, FileOpened(path))
+            (opened, effect.batch([reading, opening]))
+          }
+        }
+      }
+      _ -> toast(model, problem)
+    }
+    FileMoved(from, to, problem) -> case problem {
+      "" -> {
+        moved = fn(path: String) {
+          case path == from, string.starts_with(path, from <> "/") {
+            True, _ -> to
+            _, True -> to <> string.drop_start(path, string.length(from))
+            _, _ -> path
+          }
+        }
+        // Open files that moved keep their tabs, their text and their unsaved edits.
+        carried = list.filter(model.docs, fn(d) { on_disk(d) and moved(d.path) != d.path })
+        docs = list.map(model.docs, fn(d) {
+          case on_disk(d) and moved(d.path) != d.path {
+            True -> Doc(d | path: moved(d.path), name: base_name(moved(d.path)), language: language_of(model.langs, base_name(moved(d.path))))
+            False -> d
+          }
+        })
+        groups = list.map(model.groups, fn(g) { Group(g.id, list.map(g.tabs, moved), moved(g.active)) })
+        expanded = list.map(model.expanded, moved)
+        renamed = Model(model | docs:, groups:, expanded:, pointed: to)
+        again = list.filter(expanded, fn(dir) { within(dir, to) })
+        (renamed, effect.batch([
+          effect.from(fn(dispatch) {
+            list.each(list.append([dir_of(from), ..above(renamed, to)], again), fn(dir) { read_dir(dir, fn(found) { dispatch(DirRead(dir, found)) }) })
+            list.each(carried, fn(d) {
+              doc_closed(d.path)
+              doc_opened(moved(d.path), language_of(model.langs, base_name(moved(d.path))), d.lines)
+            })
+          }),
+          effect.batch(list.map(carried, fn(d) { read_base(renamed, moved(d.path)) })),
+          rewalk(model),
+          refresh_status(),
+        ]))
+      }
+      _ -> toast(model, problem)
+    }
+    FileGone(path, removed, problem) -> case problem, removed {
+      "", False -> (model, effect.none())
+      "", True -> {
+        // Tabs of what is gone are closed, one at a time, as if by hand.
+        open = list.flat_map(model.groups, fn(g) { list.filter(g.tabs, fn(tab) { within(tab, path) }) |> list.map(fn(tab) { (g.id, tab) }) })
+        (closed, closing) = list.fold(open, (model, effect.none()), fn(state, entry) {
+          case list.any((state.0).groups, fn(g) { g.id == entry.0 and list.contains(g.tabs, entry.1) }) {
+            True -> {
+              (next, more) = close(state.0, entry.0, entry.1)
+              (next, effect.batch([state.1, more]))
+            }
+            False -> state
+          }
+        })
+        tidy = Model(closed | expanded: list.filter(closed.expanded, fn(dir) { not within(dir, path) }), pointed: case within(closed.pointed, path) {
+          True -> ""
+          False -> closed.pointed
+        })
+        (tidy, effect.batch([closing, reread(tidy, [dir_of(path)]), rewalk(tidy), refresh_status()]))
+      }
+      _, _ -> toast(model, problem)
+    }
+    FilesChanged(dirs, files, git) -> (model, effect.batch([
+      reread(model, dirs),
+      reload(model, files),
+      case dirs {
+        [] -> effect.none()
+        _ -> rewalk(model)
+      },
+      case git {
+        True -> refresh_git(model.until)
+        False -> refresh_status()
+      },
+    ]))
+    GitDiscarded(paths) -> (model, effect.from(fn(dispatch) { git_discard(paths, fn(done, problem) { dispatch(GitDiscardDone(done, problem)) }) }))
+    GitDiscardDone(done, problem) -> case problem, done {
+      "", False -> (model, effect.none())
+      "", True -> (model, effect.batch([
+        refresh_git(model.until),
+        reread(model, [model.root, ..model.expanded]),
+        reload(model, list.map(model.docs, fn(d) { d.path })),
+        read_bases(model),
+        rewalk(model),
+      ]))
+      _, _ -> {
+        (told, timer) = toast(model, problem)
+        (told, effect.batch([timer, refresh_git(model.until)]))
+      }
     }
     FileOpened(path) -> case find_doc(model, path), path {
       _, "" -> (model, effect.none())
@@ -2621,6 +2975,7 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
     WindowFocused -> {
       clean = list.filter(model.docs, fn(d) { on_disk(d) and d.version == d.saved }) |> list.map(fn(d) { d.path })
       (model, effect.batch([
+        reread(model, [model.root, ..model.expanded]),
         case model.repo {
           True -> refresh_git(model.until)
           False -> effect.none()
@@ -2958,11 +3313,12 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
       c = session(model, id)
       case option {
         "whole" -> (set_session(model, Compare(c | whole: not c.whole)), effect.none())
+        "split" -> (set_session(model, Compare(c | split: not c.split)), effect.none())
         "swap" -> update(set_session(model, Compare(c | from: c.to, to: c.from)), CompareRan(id))
         _ -> (set_session(model, Compare(id, not c.files_mode, case c.files_mode {
           True -> "HEAD"
           False -> ""
-        }, "", "", [], "", [], [], c.whole, "", False, "")), effect.none())
+        }, "", "", [], "", [], [], c.whole, "", False, "", c.split)), effect.none())
       }
     }
     CompareStepped(id, by) -> {
@@ -3094,9 +3450,9 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
     }
     GroupFocused(group_id) -> (Model(model | focus: group_id), effect.none())
     // The button belongs to a group: that is the one to maximise, whichever had the keyboard.
-    SshListed(found) -> (Model(model | ssh: list.map(found, fn(s) { Session(s.0, s.1, s.2, s.3, s.4, s.5, s.6, s.7) })), effect.none())
+    SshListed(found) -> (Model(model | ssh: list.map(found, fn(s) { Session(s.0, s.1, s.2, s.3, s.4, s.5, s.6, s.7, s.9) })), effect.none())
     SshEdit(id) -> (
-      Model(model | ssh_note: "", ssh_form: Some(list.find(model.ssh, fn(s) { s.id == id }) |> result.unwrap(Session("", "", "", "", 22, "", "", False)))),
+      Model(model | ssh_note: "", ssh_form: Some(list.find(model.ssh, fn(s) { s.id == id }) |> result.unwrap(Session("", "", "", "", 22, "", "", False, "auto")))),
       effect.from(fn(_) { focus("runes-ssh-name") }),
     )
     SshField(field, value) -> (Model(model | ssh_form: option.map(model.ssh_form, fn(s) {
@@ -3106,13 +3462,14 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
         "user" -> Session(s | user: value)
         "port" -> Session(s | port: int.parse(string.trim(value)) |> result.unwrap(0))
         "key" -> Session(s | key: value)
+        "auth" -> Session(s | auth: value)
         _ -> Session(s | folder: value)
       }
     })), effect.none())
     SshFormClosed -> (Model(model | ssh_form: None, ssh_note: ""), effect.none())
     SshFormSaved -> case model.ssh_form {
       Some(s) -> (model, effect.from(fn(dispatch) {
-        ssh_save(s.id, s.name, s.host, s.user, int.to_string(s.port), s.key, s.folder, fn(problem) { dispatch(SshSaved(problem)) })
+        ssh_save(s.id, s.name, s.host, s.user, int.to_string(s.port), s.key, s.folder, s.auth, fn(problem) { dispatch(SshSaved(problem)) })
       }))
       None -> (model, effect.none())
     }

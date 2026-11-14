@@ -615,7 +615,7 @@ path.w1 { stroke-dasharray: 5 3; } path.w2 { stroke-dasharray: 1.5 4; }
 [data-kind="light"] .palette, [data-kind="light"] .menu, [data-kind="light"] .toast, [data-kind="light"] .suggest, [data-kind="light"] .hover, [data-kind="light"] .find { box-shadow: 0 12px 34px #1b2a3233; }
 
 /* --- The calendar: months of a year, and the years --- */
-.cal-head .mini { width: 22px; } .cal-head .mini svg + svg { margin-left: -9px; } .cal-head .mini svg { width: 13px; height: 13px; }
+.cal-head .mini { width: 24px; } .cal-head .mini svg { width: 15px; height: 15px; }
 .cal-title { flex: 1; padding: 3px 6px; border-radius: 7px; font-weight: 700; color: var(--tab-active-fg); }
 .cal-title:hover { background: var(--list-hover); color: var(--accent); }
 .cal-grid.wide { grid-template-columns: repeat(4, 1fr); gap: 5px; }
@@ -665,3 +665,48 @@ path.w1 { stroke-dasharray: 5 3; } path.w2 { stroke-dasharray: 1.5 4; }
 .prompt input { height: 32px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--input-bg); font: 13px var(--mono); }
 .prompt input:focus { border-color: var(--accent); outline: none; }
 .prompt-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+
+/* --- 0.7: the explorer makes, renames and removes --- */
+.root { display: flex; align-items: center; gap: 6px; padding: 2px 8px 4px 14px; }
+.root-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; font: inherit; letter-spacing: inherit; } .root-name.pointed { opacity: 1; color: var(--accent); }
+.root-tools { display: inline-flex; gap: 1px; opacity: .55; transition: opacity .15s; }
+.side:hover .root-tools, .root-tools:focus-within { opacity: 1; }
+.root-tools .mini { width: 22px; height: 22px; opacity: .8; } .root-tools .mini svg { width: 15px; height: 15px; }
+.root { opacity: 1; } .root-name { opacity: .7; }
+.node.pointed { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
+.node.naming { background: var(--list-hover); }
+.node.naming input { flex: 1; min-width: 0; height: 20px; padding: 0 6px; border-radius: 5px; border: 1px solid var(--accent); background: var(--input-bg); color: var(--tab-active-fg); font: inherit; outline: none; }
+.menu hr { height: 1px; margin: 4px 6px; border: 0; background: var(--border); }
+.menu .result.danger span { color: var(--removed); }
+.node-menu { min-width: 220px; }
+.section-links { margin-left: auto; display: inline-flex; gap: 12px; } .section .section-links .link { margin-left: 0; }
+.link.danger { color: var(--removed); }
+.mini.discard:hover { color: var(--removed); }
+.ssh-field select { height: 27px; padding: 0 6px; border-radius: 7px; border: 1px solid var(--border); background: var(--input-bg); color: inherit; font: 12px var(--sans); min-width: 0; width: 100%; }
+
+/* --- A comparison read as one text; two sides only when asked for --- */
+.split-toggle { display: inline-flex; align-items: center; gap: 5px; } .split-toggle svg { width: 13px; height: 13px; }
+.diff-head.one { grid-template-columns: auto 1fr; } .diff-head.one > span + span { border-left: 0; padding-left: 0; } .diff-head.one .diff-from { padding-right: 0; gap: 4px; }
+.diff-rows.one .drow { grid-template-columns: 5ch 5ch 2ch minmax(0, 1fr); }
+.diff-rows.one .drow .dn:nth-child(3) { border-left: 0; }
+.diff-rows.one .dt { border-left: 0; padding-left: 4px; }
+.ds { text-align: center; user-select: none; font-weight: 700; opacity: .8; }
+.ugone { background: color-mix(in srgb, var(--removed) 14%, transparent); } .ugone .ds { color: var(--removed); } .ugone .dn { opacity: .65; }
+.unew { background: color-mix(in srgb, var(--added) 13%, transparent); } .unew .ds { color: var(--added); } .unew .dn { opacity: .65; }
+.ugone .dn:first-child { box-shadow: inset 3px 0 0 var(--removed); } .unew .dn:first-child { box-shadow: inset 3px 0 0 var(--added); }
+
+/* --- The pie stands on its own ground, so it reads on any background, pitch black included --- */
+.pie::before { content: ""; position: absolute; width: 380px; height: 380px; margin: -190px; border-radius: 50%; pointer-events: none;
+  background: radial-gradient(circle, color-mix(in srgb, var(--accent) 16%, var(--pie-ground)) 0 34px, var(--pie-ground) 35px 62%, transparent 71%);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent); opacity: .96; animation: pop-in .26s var(--spring); }
+:root { --pie-ground: #171c22; --pie-slice: #262e37; --pie-edge: #ffffff2e; }
+[data-kind="light"] { --pie-ground: #f4f8fa; --pie-slice: #ffffff; --pie-edge: #1b2a3238; }
+.slice { background: var(--pie-slice); color: var(--tab-active-fg); border-color: var(--pie-edge); box-shadow: 0 10px 26px -10px #000, inset 0 1px 0 #ffffff14; }
+.slice.on, .slice:hover { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 28%, transparent), 0 12px 30px -10px #000; }
+.pie-veil { background: #000000b8; backdrop-filter: blur(2px) saturate(.6); }
+[data-kind="light"] .pie-veil { background: #1b2a3266; }
+
+/* --- Light themes: file icons were drawn for dark ground, so they are deepened here --- */
+[data-kind="light"] .file-icon { filter: brightness(.58) saturate(1.9) contrast(1.1); }
+[data-kind="light"] .node .dot { background: #5a6e79; }
+.menu, .prompt { background: color-mix(in srgb, var(--widget-bg) 91%, var(--fg)); border-color: color-mix(in srgb, var(--fg) 20%, transparent); }

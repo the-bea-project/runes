@@ -1,7 +1,7 @@
 {
   "name": "runes",
-  "version": "0.6.0",
-  "description": "Runes: a FOSS code editor written in Gleam and JS, extended by VS Code extensions",
+  "version": "0.7.0",
+  "description": "Runes: an elegant, minimal code editor, extended by VS Code extensions",
   "main": "shell/main.cjs",
   "scripts": {
     "build": "bea build && node scripts/build.mjs",
@@ -63,8 +63,8 @@
       ],
       "category": "Development",
       "executableName": "runes",
-      "synopsis": "A code editor written in Gleam and JS",
-      "description": "Runes is a code editor written in Gleam and JS. Languages, themes and language servers come from VS Code extensions.",
+      "synopsis": "An elegant, minimal code editor",
+      "description": "Runes is an elegant, minimal code editor. Carve your code. Languages, themes and language servers come from VS Code extensions.",
       "maintainer": "The Runes contributors",
       "extraFiles": [
         {

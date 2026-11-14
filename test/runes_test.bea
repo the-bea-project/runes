@@ -318,7 +318,7 @@ pub def commit_names_are_cut_to_seven_test() {
 
 pub def a_session_knows_when_it_shows_one_commit_test() {
   hash = "a59a550d6b20b6fbcefc000924988ffea1bc8cd7"
-  blank = Compare(1, False, "", "", "", [], "", [], [], False, "", False, "")
+  blank = Compare(1, False, "", "", "", [], "", [], [], False, "", False, "", False)
   should.equal(app.session_commit(Compare(blank | from: hash <> "^", to: hash)), hash)
   // Two branches, a branch against the working tree, and two files are not one commit.
   should.equal(app.session_commit(Compare(blank | from: "main", to: "feature/notes")), "")
@@ -443,4 +443,20 @@ pub def cursors_are_added_above_below_and_by_hand_test() {
 pub def select_all_occurrences_is_on_ctrl_shift_l_test() {
   should.equal(keymap.key_for(keymap.defaults, "editor.action.selectHighlights"), "Ctrl+Shift+L")
   should.equal(keymap.key_for(keymap.defaults, "editor.action.addSelectionToNextFindMatch"), "Ctrl+D")
+}
+
+// --- The explorer -----------------------------------------------------------------------------------
+
+pub def a_path_knows_its_folder_test() {
+  should.equal(app.dir_of("/home/me/shop/src/notes.md"), "/home/me/shop/src")
+  should.equal(app.dir_of("/home/me/shop"), "/home/me")
+  should.equal(app.dir_of("notes.md"), "")
+}
+
+pub def inside_a_folder_is_not_beside_it_test() {
+  should.be_true(app.within("/shop/src/a.txt", "/shop/src"))
+  should.be_true(app.within("/shop/src", "/shop/src"))
+  // A folder whose name merely starts the same way is another folder.
+  should.be_false(app.within("/shop/src-old/a.txt", "/shop/src"))
+  should.be_false(app.within("/shop", "/shop/src"))
 }

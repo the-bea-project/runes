@@ -228,6 +228,10 @@ export function listen(on_key, on_text, on_paste, on_resize, on_drop, on_zoom, o
   }, true);
   window.addEventListener("contextmenu", (e) => {
     if (!e.target.closest?.("runes-terminal, input, textarea:not(#runes-input)")) e.preventDefault();
+    const tree = e.target.closest?.(".tree.files");
+    if (!tree || e.target.closest("input")) return;
+    const node = e.target.closest(".node");
+    on_pie("node\n" + (node?.dataset.path ?? "") + "\n" + (!node || node.classList.contains("folder") ? "folder" : "file"), e.clientX, e.clientY);
   });
 
   // Resting the pointer on the text asks the language server what is there.
@@ -252,6 +256,16 @@ export function paste(done) {
   navigator.clipboard?.readText().then((text) => done(text.replace(/\r\n?/g, "\n")), () => {});
 }
 
+/** Focus a field holding a file name, with the name selected but not its ending: typing replaces the name. */
+export function focus_stem(id) {
+  requestAnimationFrame(() => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.focus({ preventScroll: true });
+    const dot = el.value.lastIndexOf(".");
+    el.setSelectionRange(0, dot > 0 ? dot : el.value.length);
+  });
+}
 export function focus(id) {
   const go = () => {
     const el = document.getElementById(id);
@@ -568,14 +582,14 @@ export function pick_vsix(done) {
 
 // --- SSH sessions, and questions from the shell ---------------------------------------------------
 
-const sessionRow = (s) => [s.id, s.name, s.host, s.user, s.port, s.key, s.folder, !!s.known, !!s.on];
+const sessionRow = (s) => [s.id, s.name, s.host, s.user, s.port, s.key, s.folder, !!s.known, !!s.on, s.auth ?? "auto"];
 export function ssh_sessions(done) {
   if (!host.sshSessions) return done(toList([]));
   host.sshSessions().then((all) => done(toList(all.map(sessionRow))), () => done(toList([])));
 }
-export function ssh_save(id, name, address, user, port, key, folder, done) {
+export function ssh_save(id, name, address, user, port, key, folder, auth, done) {
   if (!host.sshSave) return done("SSH needs the desktop app.");
-  host.sshSave({ id, name, host: address, user, port: Number(port) || 22, key, folder }).then(() => done(""), (e) => done(message(e)));
+  host.sshSave({ id, name, host: address, user, port: Number(port) || 22, key, folder, auth }).then(() => done(""), (e) => done(message(e)));
 }
 export const ssh_remove = (id, done) => { host.sshRemove?.(id).then(() => done(), () => done()); };
 export const ssh_forget = (id, done) => { host.sshForget?.(id).then(() => done(), () => done()); };
@@ -1236,6 +1250,35 @@ const message = (e) => String(e?.message ?? e).replace(/^Error invoking remote m
 export function read_dir(path, done) {
   host.readDir(path).then((entries) => done(toList(sorted(entries))), () => done(toList([])));
 }
+// --- Changing the files of the open folder -------------------------------------------------------
+
+export function file_create(path, folder, done) {
+  if (!host.fileCreate) return done("Making files needs the desktop app.");
+  host.fileCreate(path, folder).then(() => done(""), (e) => done(message(e)));
+}
+export function file_rename(from, to, done) {
+  if (!host.fileRename) return done("Renaming needs the desktop app.");
+  host.fileRename(from, to).then(() => done(""), (e) => done(message(e)));
+}
+/** `done(removed, problem)`: the shell asks first, and `removed` is false when the answer was no. */
+export function file_remove(path, done) {
+  if (!host.fileRemove) return done(false, "Deleting needs the desktop app.");
+  host.fileRemove(path).then((yes) => done(!!yes, ""), (e) => done(false, message(e)));
+}
+export const file_reveal = (path) => { host.fileReveal?.(path); };
+export const copy_text = (text) => { navigator.clipboard?.writeText(text).catch(() => {}); };
+/** Which folders the explorer has open: those are the ones followed for changes made elsewhere. */
+let following = "";
+export function watch_dirs(dirs) {
+  const list = dirs.toArray(), key = list.join("\n");
+  if (key === following) return;
+  following = key;
+  host.watchDirs?.(list);
+}
+/** `on_change(folders whose contents changed, files whose text changed, whether git should be asked again)`. */
+export function files_listen(on_change) {
+  host.onFiles?.((change) => on_change(toList(change.dirs ?? []), toList(change.files ?? []), !!change.git));
+}
 export function read_file(path, done) {
   host.readFile(path).then((text) => done(text.replace(/\r\n?/g, "\n"), ""), (e) => done("", message(e)));
 }
@@ -1417,6 +1460,11 @@ export function git_show(hash, done) {
 }
 export function git_stage(paths, staged, done) {
   (staged ? host.gitStage : host.gitUnstage)(paths.toArray()).then(() => done(""), (e) => done(message(e)));
+}
+/** `done(discarded, problem)`: the shell asks first, and `discarded` is false when the answer was no. */
+export function git_discard(paths, done) {
+  if (!host.gitDiscard) return done(false, "Discarding needs the desktop app.");
+  host.gitDiscard(paths.toArray()).then((yes) => done(!!yes, ""), (e) => done(false, message(e)));
 }
 export function git_commit(text, done) {
   host.gitCommit(text).then(() => done(""), (e) => done(message(e)));

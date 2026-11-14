@@ -14,7 +14,7 @@ function attrsOf(stat) {
   return { mode: stat.mode, uid: stat.uid, gid: stat.gid, size: stat.size, atime: Math.floor(stat.atimeMs / 1000), mtime: Math.floor(stat.mtimeMs / 1000) };
 }
 
-function serveFiles(sftp) {
+function serveFiles(sftp, log) {
   const open = new Map();
   let ids = 0;
   const handle = (value) => { const h = Buffer.alloc(4); h.writeUInt32BE(++ids); open.set(ids, value); return h; };
@@ -24,7 +24,10 @@ function serveFiles(sftp) {
   sftp.on("STAT", (id, file) => attempt(id, () => sftp.attrs(id, attrsOf(fs.statSync(file)))));
   sftp.on("LSTAT", (id, file) => attempt(id, () => sftp.attrs(id, attrsOf(fs.lstatSync(file)))));
   sftp.on("FSTAT", (id, h) => attempt(id, () => sftp.attrs(id, attrsOf(fs.fstatSync(of(h).fd)))));
-  sftp.on("OPENDIR", (id, dir) => attempt(id, () => sftp.handle(id, handle({ dir, names: fs.readdirSync(dir), sent: false }))));
+  sftp.on("OPENDIR", (id, dir) => {
+    log.push("list:" + dir);
+    setTimeout(() => attempt(id, () => sftp.handle(id, handle({ dir, names: fs.readdirSync(dir), sent: false }))), Number(process.env.SSHD_LIST_DELAY ?? 0));
+  });
   sftp.on("READDIR", (id, h) => attempt(id, () => {
     const d = of(h);
     if (d.sent) return sftp.status(id, STATUS_CODE.EOF);
@@ -32,7 +35,7 @@ function serveFiles(sftp) {
     sftp.name(id, d.names.map((name) => ({ filename: name, longname: name, attrs: attrsOf(fs.lstatSync(path.join(d.dir, name))) })));
   }));
   sftp.on("OPEN", (id, file, flags, attrs) => attempt(id, () => {
-    const mode = (flags & OPEN_MODE.WRITE) ? ((flags & OPEN_MODE.TRUNC) ? "w" : (flags & OPEN_MODE.APPEND) ? "a" : "r+") : "r";
+    const mode = (flags & OPEN_MODE.WRITE) ? ((flags & OPEN_MODE.EXCL) ? "wx" : (flags & OPEN_MODE.TRUNC) ? "w" : (flags & OPEN_MODE.APPEND) ? "a" : "r+") : "r";
     sftp.handle(id, handle({ fd: fs.openSync(file, mode, attrs?.mode ?? 0o644) }));
   }));
   sftp.on("READ", (id, h, offset, length) => attempt(id, () => {
@@ -42,6 +45,8 @@ function serveFiles(sftp) {
   }));
   sftp.on("WRITE", (id, h, offset, data) => attempt(id, () => { fs.writeSync(of(h).fd, data, 0, data.length, offset); sftp.status(id, STATUS_CODE.OK); }));
   sftp.on("CLOSE", (id, h) => attempt(id, () => { const v = of(h); if (v?.fd !== undefined) fs.closeSync(v.fd); open.delete(h.readUInt32BE(0)); sftp.status(id, STATUS_CODE.OK); }));
+  sftp.on("MKDIR", (id, dir) => attempt(id, () => { fs.mkdirSync(dir); sftp.status(id, STATUS_CODE.OK); }));
+  sftp.on("RMDIR", (id, dir) => attempt(id, () => { fs.rmdirSync(dir); sftp.status(id, STATUS_CODE.OK); }));
   sftp.on("REMOVE", (id, file) => attempt(id, () => { fs.unlinkSync(file); sftp.status(id, STATUS_CODE.OK); }));
   sftp.on("RENAME", (id, from, to) => attempt(id, () => { if (fs.existsSync(to)) throw Object.assign(new Error("exists"), { code: "EEXIST" }); fs.renameSync(from, to); sftp.status(id, STATUS_CODE.OK); }));
   for (const name of ["SETSTAT", "FSETSTAT"]) sftp.on(name, (id) => sftp.status(id, STATUS_CODE.OK));
@@ -84,7 +89,7 @@ function start(accounts, home) {
         const session = accept();
         let terminal = null;
         session.on("pty", (ok, _no, info) => { terminal = info; ok?.(); });
-        session.on("sftp", (ok) => serveFiles(ok()));
+        session.on("sftp", (ok) => serveFiles(ok(), log));
         session.on("exec", (ok, _no, info) => {
           const stream = ok();
           log.push("exec:" + info.command);

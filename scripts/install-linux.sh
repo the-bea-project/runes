@@ -51,7 +51,7 @@ cat > "$entry" <<DESKTOP
 [Desktop Entry]
 Type=Application
 Name=Runes
-Comment=A code editor written in Gleam and JS
+Comment=An elegant, minimal code editor
 Exec="$app/runes" %F
 Icon=runes
 Terminal=false

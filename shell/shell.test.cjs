@@ -326,3 +326,36 @@ test("marketplace: results are read, and a download must come from the registry 
   await assert.rejects(market.download("demo", "missing", fetcher), /has no demo\.missing/);
   await assert.rejects(market.download("../etc", "passwd", fetcher), /Bad request/);
 });
+
+test("git: discarding brings back what was changed or deleted, and removes what is new", async () => {
+  const dir = temp();
+  const run = (...args) => execFileSync("git", args, { cwd: dir, stdio: "pipe" });
+  run("init", "-q", "-b", "main"); run("config", "user.name", "Ada"); run("config", "user.email", "ada@example.com");
+  fs.mkdirSync(path.join(dir, "src"));
+  fs.writeFileSync(path.join(dir, "kept.txt"), "kept\n");
+  fs.writeFileSync(path.join(dir, "src/gone.txt"), "here\n");
+  fs.writeFileSync(path.join(dir, "staged.txt"), "old\n");
+  run("add", "-A"); run("commit", "-qm", "first");
+
+  fs.writeFileSync(path.join(dir, "kept.txt"), "changed\n");
+  fs.rmSync(path.join(dir, "src/gone.txt"));
+  fs.writeFileSync(path.join(dir, "staged.txt"), "new\n"); run("add", "staged.txt");
+  fs.writeFileSync(path.join(dir, "fresh file.txt"), "untracked\n");
+  fs.writeFileSync(path.join(dir, "added.txt"), "staged but never committed\n"); run("add", "added.txt");
+  fs.writeFileSync(path.join(dir, "bystander.txt"), "mine\n");
+
+  // One file only: the others are left exactly as they were.
+  await git.discard(dir, ["kept.txt"]);
+  assert.equal(fs.readFileSync(path.join(dir, "kept.txt"), "utf8"), "kept\n");
+  assert.equal((await git.status(dir)).files.length, 5);
+
+  await git.discard(dir, ["src/gone.txt", "staged.txt", "fresh file.txt", "added.txt"]);
+  assert.equal(fs.readFileSync(path.join(dir, "src/gone.txt"), "utf8"), "here\n", "a deleted file comes back");
+  assert.equal(fs.readFileSync(path.join(dir, "staged.txt"), "utf8"), "old\n", "a staged change is undone too");
+  assert.ok(!fs.existsSync(path.join(dir, "fresh file.txt")) && !fs.existsSync(path.join(dir, "added.txt")), "new files are removed");
+  assert.deepEqual((await git.status(dir)).files, [["bystander.txt", " ", "?"]], "what was not named is untouched");
+
+  await assert.rejects(git.discard(dir, ["../outside.txt"]), /outside/);
+  await assert.rejects(git.discard(dir, ["--force"]), /Bad request/);
+  await assert.rejects(git.discard(dir, []), /Bad request/);
+});

@@ -12,7 +12,7 @@ import lustre/element.{type Element}
 import lustre/element/html
 import lustre/element/keyed
 import lustre/event
-import runes/app.{type Compare, type Group, type Model, type Msg, Closed, Menu, Palette, Pie}
+import runes/app.{type Compare, type Group, type Model, type Msg, type Naming, Closed, Menu, NodeMenu, Palette, Pie}
 import runes/buffer
 import runes/doc.{type Doc}
 import runes/extension.{type Extension}
@@ -96,6 +96,14 @@ def icon(name: String) -> Element(Msg) {
     "error" -> "<circle cx='12' cy='12' r='8'/><path d='M9 9l6 6M15 9l-6 6'/>"
     "warning" -> "<path d='M12 4l9 16H3z'/><path d='M12 10v4M12 17v.5'/>"
     "up" -> "<path d='M6 14l6-6 6 6'/>"
+    // Stepping a year at a time: two chevrons drawn as one sign.
+    "years-back" -> "<path d='M11.5 6.5L6 12l5.5 5.5'/><path d='M18 6.5L12.5 12l5.5 5.5'/>"
+    "years-on" -> "<path d='M6 6.5l5.5 5.5L6 17.5'/><path d='M12.5 6.5L18 12l-5.5 5.5'/>"
+    "new-file" -> "<path d='M13 3H6v18h6'/><path d='M13 3l5 5v3'/><path d='M13 3v5h5'/><path d='M18 14v7M14.5 17.5h7'/>"
+    "new-folder" -> "<path d='M12 19H3V5h6l2 3h10v4'/><path d='M18 14v7M14.5 17.5h7'/>"
+    "collapse" -> "<path d='M8 4l4 4 4-4'/><path d='M8 20l4-4 4 4'/><path d='M4 12h16'/>"
+    "undo" -> "<path d='M8 5L4 9l4 4'/><path d='M4 9h9.5a5.5 5.5 0 0 1 0 11H10'/>"
+    "rows" -> "<rect x='3' y='4' width='18' height='16' rx='2'/><path d='M7 9h10M7 12h10M7 15h6'/>"
     "down" -> "<path d='M6 10l6 6 6-6'/>"
     _ -> "<circle cx='12' cy='12' r='3'/>"
   }
@@ -278,9 +286,53 @@ def explorer(model: Model) -> List(Element(Msg)) {
       html.b([], [txt("Explorer")]),
       html.button([class("link"), event.on_click(app.Ran("workbench.action.files.openFolder"))], [txt("Open Folder")]),
     ]),
-    html.div([class("root")], [txt(string.uppercase(app.base_name(model.root)))]),
-    html.div([class("tree"), attribute.role("tree")], tree(model, model.root, 0, git_marks(model))),
+    html.div([class("root")], [
+      html.button([attribute.classes([("root-name", True), ("pointed", model.pointed == model.root)]), attribute.title(model.root), event.on_click(app.ExplorerDid("top", ""))], [txt(string.uppercase(app.base_name(model.root)))]),
+      html.span([class("root-tools")], [
+        html.button([class("mini"), event.on_click(app.ExplorerDid("newFile", "")), ..labelled("New file")], [icon("new-file")]),
+        html.button([class("mini"), event.on_click(app.ExplorerDid("newFolder", "")), ..labelled("New folder")], [icon("new-folder")]),
+        html.button([class("mini"), event.on_click(app.ExplorerDid("refresh", "")), ..labelled("Refresh the explorer")], [icon("refresh")]),
+        html.button([class("mini"), event.on_click(app.ExplorerDid("collapse", "")), ..labelled("Collapse every folder")], [icon("collapse")]),
+      ]),
+    ]),
+    html.div([class("tree files"), attribute.role("tree")], tree(model, model.root, 0, git_marks(model))),
   ]
+}
+
+/// The row a name is typed in: for something new, or for a new name.
+def naming_row(n: Naming, depth: Int) -> Element(Msg) {
+  html.div([class("node naming"), attribute.style("padding-left", px(8 + depth * 14))], [
+    html.span([class("twist")], case n.kind {
+      "folder" -> [icon("chevron")]
+      _ -> []
+    }),
+    html.input([
+      attribute.id("runes-naming"),
+      attribute.value(n.text),
+      attribute.spellcheck(False),
+      attribute.autocomplete("off"),
+      attribute.placeholder(case n.kind {
+        "folder" -> "folder name"
+        "file" -> "file name"
+        _ -> ""
+      }),
+      attribute.attribute("aria-label", case n.kind {
+        "folder" -> "Name of the new folder"
+        "file" -> "Name of the new file"
+        _ -> "New name for " <> app.base_name(n.at)
+      }),
+      event.on_input(app.NamingTyped),
+      event.on("blur", decode.success(app.NamingDone(True))),
+      event.on("keydown", {
+        use key <- decode.field("key", decode.string)
+        case key {
+          "Enter" -> decode.success(app.NamingDone(True))
+          "Escape" -> decode.success(app.NamingDone(False))
+          _ -> decode.failure(app.NamingDone(False), "another key")
+        }
+      }) |> event.stop_propagation,
+    ]),
+  ])
 }
 
 /// How each changed file stands with git, by full path, with "•" for every folder above one.
@@ -321,14 +373,25 @@ def tree(model: Model, path: String, depth: Int, marks: dict.Dict(String, String
     Error(_) -> []
   }
   active = app.group(model, model.focus).active
-  list.flat_map(entries, fn(entry) {
+  // Something new is named at the top of the folder it will be in.
+  fresh = case model.naming {
+    Some(n) if n.at == path and n.kind != "rename" -> [naming_row(n, depth)]
+    _ -> []
+  }
+  renaming = case model.naming {
+    Some(n) if n.kind == "rename" -> n.at
+    _ -> ""
+  }
+  list.append(fresh, list.flat_map(entries, fn(entry) {
     (name, folder) = entry
     full = path <> "/" <> name
     open = list.contains(model.expanded, full)
     mark = dict.get(marks, full) |> unwrap("")
-    row = html.button(
+    row = case full == renaming, model.naming {
+     True, Some(n) -> naming_row(n, depth)
+     _, _ -> html.button(
       [
-        attribute.classes([("node", True), ("folder", folder), ("open", open), ("on", full == active), ("git", mark != ""), ("git-" <> mark, mark != "" and mark != "•" and mark != "!"), ("git-in", mark == "•"), ("git-conflict", mark == "!")]),
+        attribute.classes([("node", True), ("folder", folder), ("open", open), ("on", full == active), ("pointed", full == model.pointed and full != active), ("git", mark != ""), ("git-" <> mark, mark != "" and mark != "•" and mark != "!"), ("git-in", mark == "•"), ("git-conflict", mark == "!")]),
         attribute.style("padding-left", px(8 + depth * 14)),
         attribute.role("treeitem"),
         attribute.attribute("data-path", full),
@@ -366,12 +429,13 @@ def tree(model: Model, path: String, depth: Int, marks: dict.Dict(String, String
           })], [txt(letter)])
         },
       ],
-    )
+     )
+    }
     case folder and open {
       True -> [row, html.div([class("children")], tree(model, full, depth + 1, marks))]
       False -> [row]
     }
-  })
+  }))
 }
 
 def option(label: String, title: String, on: Bool, msg: Msg) -> Element(Msg) {
@@ -750,7 +814,20 @@ def ssh_view(model: Model) -> List(Element(Msg)) {
                 port -> int.to_string(port)
               }, "22", "runes-ssh-port"),
             ]),
-            field("Key file (optional)", "key", s.key, "~/.ssh/id_ed25519", "runes-ssh-key"),
+            html.label([class("ssh-field")], [
+              html.span([], [txt("Sign in with")]),
+              html.select(
+                [attribute.id("runes-ssh-auth"), attribute.attribute("aria-label", "SSH sign in with"), event.on_change(fn(value) { app.SshField("auth", value) })],
+                list.map([("auto", "Whatever works (agent, keys, then password)"), ("password", "A password only"), ("key", "A key file only"), ("agent", "The SSH agent only")], fn(o) {
+                  html.option([attribute.value(o.0), attribute.selected(o.0 == s.auth)], o.1)
+                }),
+              ),
+            ]),
+            case s.auth {
+              "password" | "agent" -> element.none()
+              "key" -> field("Key file (empty: the usual ones in ~/.ssh)", "key", s.key, "~/.ssh/id_ed25519", "runes-ssh-key")
+              _ -> field("Key file (optional)", "key", s.key, "~/.ssh/id_ed25519", "runes-ssh-key")
+            },
             field("Folder to open (optional)", "folder", s.folder, "~/project", "runes-ssh-folder"),
             html.div([class("ssh-actions")], [
               html.button([class("button small"), event.on_click(app.SshFormSaved)], [txt("Save")]),
@@ -778,6 +855,11 @@ def ssh_view(model: Model) -> List(Element(Msg)) {
                   } <> case s.folder {
                     "" -> ""
                     folder -> " · " <> folder
+                  } <> case s.auth {
+                    "password" -> " · password"
+                    "key" -> " · key"
+                    "agent" -> " · agent"
+                    _ -> ""
                   })]),
                 ]),
                 html.div([class("ssh-buttons")], [
@@ -804,7 +886,7 @@ def ssh_view(model: Model) -> List(Element(Msg)) {
       html.div([class("ssh-foot")], [
         html.button([class("link"), event.on_click(app.SshImportClicked)], [txt("Add the hosts in ~/.ssh/config")]),
         html.p([class("hint")], [
-          txt("Signing in tries your SSH agent, then your key files, then asks for a password. The first time, the machine's key is shown for you to accept; after that a different key is refused."),
+          txt("Left on \"whatever works\", signing in tries your SSH agent and key files that need nothing typed, then asks for a password; a session can also be told to use a password only, a key only, or the agent only. The first time, the machine's key is shown for you to accept; after that a different key is refused."),
         ]),
       ]),
     ]),
@@ -851,10 +933,11 @@ def prompt_view(model: Model) -> Element(Msg) {
                 "confirm" -> "runes-prompt"
                 _ -> "runes-prompt-ok"
               }), event.on_click(app.PromptAnswered(True))],
-              [txt(case p.kind {
-                "confirm" -> "Trust and connect"
-                "secret" -> "Sign in"
-                _ -> "OK"
+              [txt(case p.kind, p.text {
+                "confirm", "" -> "Trust and connect"
+                "confirm", yes -> yes
+                "secret", _ -> "Sign in"
+                _, _ -> "OK"
               })],
             ),
           ]),
@@ -882,6 +965,15 @@ def source_control(model: Model) -> List(Element(Msg)) {
         [txt(app.base_name(path)), html.small([], [txt(" " <> path)])],
       ),
       html.button([class("mini"), event.on_click(app.FileOpened(model.root <> "/" <> path)), ..labelled("Open " <> path)], [icon("open")]),
+      case is_staged {
+        True -> element.none()
+        False ->
+          html.button([class("mini discard"), event.on_click(app.GitDiscarded([path])), ..labelled(case letter {
+            "U" -> "Delete " <> path <> ", which was never committed"
+            "D" -> "Bring back " <> path
+            _ -> "Discard the changes to " <> path
+          })], [icon("undo")])
+      },
       html.button(
         [class("mini"), event.on_click(app.GitStaged([path], not is_staged)), ..labelled(case is_staged {
           True -> "Unstage " <> path
@@ -969,7 +1061,11 @@ def source_control(model: Model) -> List(Element(Msg)) {
             html.span([class("count")], [txt(int.to_string(list.length(unstaged)))]),
             case unstaged {
               [] -> element.none()
-              _ -> html.button([class("link"), event.on_click(app.GitStaged(list.map(unstaged, fn(c) { c.0 }), True))], [txt("Stage all")])
+              _ ->
+                html.span([class("section-links")], [
+                  html.button([class("link danger"), event.on_click(app.GitDiscarded(list.map(unstaged, fn(c) { c.0 })))], [txt("Discard all")]),
+                  html.button([class("link"), event.on_click(app.GitStaged(list.map(unstaged, fn(c) { c.0 }), True))], [txt("Stage all")]),
+                ])
             },
           ]),
           html.div([], list.map(unstaged, file(_, False))),
@@ -1271,7 +1367,7 @@ def welcome(model: Model) -> Element(Msg) {
     logo("logo"),
     html.h1([], [txt("runes")]),
     html.p([], [txt(case model.ready {
-      True -> "A code editor written in Gleam and JS."
+      True -> "Carve your code."
       False -> "Loading extensions…"
     })]),
     html.div([class("keys")], [
@@ -2032,10 +2128,40 @@ def overlay(model: Model) -> Element(Msg) {
         ]),
       ])
     }
+    NodeMenu(x, y, path, folder) -> {
+      top = path == model.root
+      item = fn(label: String, action: String, key: String) {
+        html.button([attribute.classes([("result", True), ("danger", action == "delete")]), attribute.role("menuitem"), event.on_click(app.ExplorerDid(action, path)) |> event.stop_propagation], [
+          html.span([], [txt(label)]),
+          html.small([], [txt(key)]),
+        ])
+      }
+      html.div([class("veil clear"), event.on_click(app.OverlayClosed)], [
+        html.div(
+          [class("menu node-menu"), attribute.role("menu"), attribute.attribute("aria-label", "Actions for " <> app.base_name(path)), attribute.styles(menu_at(x, y, 8))],
+          list.flatten([
+            [item("New File…", "newFile", ""), item("New Folder…", "newFolder", "")],
+            case top {
+              True -> []
+              False -> [html.hr([]), item("Rename…", "rename", keymap.key_for(model.bindings, "renameFile")), item("Delete", "delete", keymap.key_for(model.bindings, "deleteFile"))]
+            },
+            [html.hr([]), item("Copy Path", "copyPath", ""), item("Copy Relative Path", "copyRelative", "")],
+            case model.ssh_on, folder {
+              None, _ -> [item("Show in the File Manager", "reveal", "")]
+              Some(_), _ -> []
+            },
+            case top {
+              True -> [html.hr([]), item("Refresh", "refresh", "")]
+              False -> []
+            },
+          ]),
+        ),
+      ])
+    }
     Menu(x, y) ->
       html.div([class("veil clear"), event.on_click(app.OverlayClosed)], [
         html.div(
-          [class("menu"), attribute.role("menu"), attribute.styles([("left", px(x)), ("top", px(y))])],
+          [class("menu"), attribute.role("menu"), attribute.styles(menu_at(x, y, list.length(model.actions) + list.length(app.menu)))],
           list.append(
             // What extensions can fix here comes first.
             list.map(model.actions, fn(action) {
@@ -2054,6 +2180,14 @@ def overlay(model: Model) -> Element(Msg) {
         ),
       ])
   }
+}
+
+/// Where a menu of so many rows opens: at the pointer, but never over the edge of the window.
+def menu_at(x: Int, y: Int, rows: Int) -> List((String, String)) {
+  [
+    ("left", "max(4px, min(" <> px(x) <> ", calc(100vw - 260px)))"),
+    ("top", "max(4px, min(" <> px(y) <> ", calc(100vh - " <> px(rows * 29 + 34) <> ")))"),
+  ]
 }
 
 /// The pie as a tree of rows: each slice, and under it the items of its submenu.
@@ -2403,7 +2537,7 @@ def graph_view(model: Model) -> Element(Msg) {
             })), ..labelled(case model.calendar_zoom {
               "years" -> "Ten years back"
               _ -> "Previous year"
-            })], [icon("left"), icon("left")]),
+            })], [icon("years-back")]),
             case model.calendar_zoom {
               "days" -> html.button([class("mini"), event.on_click(app.CalendarMoved(-1)), ..labelled("Previous month")], [icon("left")])
               _ -> element.none()
@@ -2442,7 +2576,7 @@ def graph_view(model: Model) -> Element(Msg) {
             })), ..labelled(case model.calendar_zoom {
               "years" -> "Ten years on"
               _ -> "Next year"
-            })], [icon("chevron"), icon("chevron")]),
+            })], [icon("years-on")]),
           ]),
           case model.calendar_zoom {
             "months" ->
@@ -2695,6 +2829,27 @@ def diff_view(model: Model, c: Compare) -> Element(Msg) {
         },
         [
           html.button(
+            [
+              attribute.classes([("button", True), ("small", True), ("quiet", True), ("on", c.split), ("split-toggle", True)]),
+              attribute.attribute("aria-pressed", case c.split {
+                True -> "true"
+                False -> "false"
+              }),
+              event.on_click(app.CompareOption(id, "split")),
+              ..labelled(case c.split {
+                True -> "Show the changes as one text"
+                False -> "Show old and new side by side"
+              })
+            ],
+            [icon(case c.split {
+              True -> "rows"
+              False -> "split"
+            }), txt(case c.split {
+              True -> "Inline"
+              False -> "Split"
+            })],
+          ),
+          html.button(
             [attribute.classes([("button", True), ("small", True), ("quiet", True), ("on", c.whole)]), event.on_click(app.CompareOption(id, "whole"))],
             [txt(case c.whole {
               True -> "Only changes"
@@ -2773,11 +2928,14 @@ def diff_view(model: Model, c: Compare) -> Element(Msg) {
           ])
       },
       html.div([class("diff-main")], [
-        html.div([class("diff-head")], [
-          html.span([], [txt(case c.files_mode {
+        html.div([attribute.classes([("diff-head", True), ("one", not c.split)])], [
+          html.span([class("diff-from")], [txt(case c.files_mode {
             True -> c.from
             False -> app.brief(c.from)
-          })]),
+          }), case c.split {
+            True -> element.none()
+            False -> html.small([], [txt(" → ")])
+          }]),
           html.span([], [
             txt(case c.files_mode, c.to {
               True, to -> to
@@ -2819,37 +2977,71 @@ def diff_view(model: Model, c: Compare) -> Element(Msg) {
             "" -> "Nothing to show yet. Say what to compare and press Enter."
             _ -> "Both sides are empty, or this is not text."
           })])
-          "", _ ->
-            html.div([class("diff-rows"), attribute.attribute("data-file", c.file)], list.append(
-              list.take(rows, 4000) |> list.map(fn(r) {
-                (kind, left_no, left, right_no, _, left_pieces, right_pieces) = r
-                case kind {
-                  "…" ->
-                    html.button([class("drow fold"), event.on_click(app.CompareOption(id, "whole"))], [
-                      txt("⋯ " <> left <> " unchanged " <> case left {
-                        "1" -> "line"
-                        _ -> "lines"
-                      }),
-                    ])
-                  _ ->
-                    html.div([class("drow k" <> case kind {
-                      "=" -> "same"
-                      "-" -> "gone"
-                      "+" -> "new"
-                      _ -> "both"
-                    })], [
-                      number(left_no),
-                      html.span([class("dt left")], pieces(left_pieces)),
-                      number(right_no),
-                      html.span([class("dt right")], pieces(right_pieces)),
-                    ])
+          "", _ -> {
+            fold = fn(count: String) {
+              html.button([class("drow fold"), event.on_click(app.CompareOption(id, "whole"))], [
+                txt("⋯ " <> count <> " unchanged " <> case count {
+                  "1" -> "line"
+                  _ -> "lines"
+                }),
+              ])
+            }
+            shown = list.take(rows, 4000)
+            body = case c.split {
+              True ->
+                list.map(shown, fn(r) {
+                  (kind, left_no, left, right_no, _, left_pieces, right_pieces) = r
+                  case kind {
+                    "…" -> fold(left)
+                    _ ->
+                      html.div([class("drow k" <> case kind {
+                        "=" -> "same"
+                        "-" -> "gone"
+                        "+" -> "new"
+                        _ -> "both"
+                      })], [
+                        number(left_no),
+                        html.span([class("dt left")], pieces(left_pieces)),
+                        number(right_no),
+                        html.span([class("dt right")], pieces(right_pieces)),
+                      ])
+                  }
+                })
+              False -> {
+                // One text: within each run of changes, the lines taken away, then the lines put in.
+                line = fn(kind: String, left_no: Int, right_no: Int, sign: String, found: List((String, String))) {
+                  html.div([class("drow u" <> kind)], [
+                    number(left_no),
+                    number(right_no),
+                    html.span([class("ds")], [txt(sign)]),
+                    html.span([class("dt " <> case kind {
+                      "gone" -> "left"
+                      _ -> "right"
+                    })], pieces(found)),
+                  ])
                 }
-              }),
+                (out, waiting) = list.fold(shown, ([], []), fn(state, r) {
+                  (kind, left_no, left, right_no, _, left_pieces, right_pieces) = r
+                  (done, held) = state
+                  case kind {
+                    "=" -> ([line("same", left_no, right_no, "", right_pieces), ..list.append(held, done)], [])
+                    "…" -> ([fold(left), ..list.append(held, done)], [])
+                    "-" -> ([line("gone", left_no, -1, "−", left_pieces), ..done], held)
+                    "+" -> (done, [line("new", -1, right_no, "+", right_pieces), ..held])
+                    _ -> ([line("gone", left_no, -1, "−", left_pieces), ..done], [line("new", -1, right_no, "+", right_pieces), ..held])
+                  }
+                })
+                list.reverse(list.append(waiting, out))
+              }
+            }
+            html.div([attribute.classes([("diff-rows", True), ("one", not c.split)]), attribute.attribute("data-file", c.file)], list.append(
+              body,
               case list.length(rows) > 4000 {
                 True -> [html.p([class("hint pad")], [txt("This comparison is very long; the first 4000 rows are shown.")])]
                 False -> []
               },
             ))
+          }
           note, _ -> html.p([class("hint pad")], [txt(note)])
         },
       ]),

@@ -28,7 +28,7 @@ test("sessions: checked, saved by name, and never hold a secret", () => {
   const file = path.join(temp(), "ssh.json");
   assert.deepEqual(ssh.load(file), []);
   const saved = ssh.save(file, { name: "  build box ", host: "10.0.0.7", user: "dev", port: "2222", folder: "~/work", password: "hunter2", key: "~/.ssh/id_work" });
-  assert.deepEqual({ ...saved, id: "" }, { id: "", name: "build box", host: "10.0.0.7", user: "dev", port: 2222, key: "~/.ssh/id_work", folder: "~/work" });
+  assert.deepEqual({ ...saved, id: "" }, { id: "", name: "build box", host: "10.0.0.7", user: "dev", port: 2222, key: "~/.ssh/id_work", folder: "~/work", auth: "auto" });
   assert.ok(!fs.readFileSync(file, "utf8").includes("hunter2"));
   ssh.save(file, { ...saved, name: "renamed" });
   assert.deepEqual(ssh.load(file).map((s) => s.name), ["renamed"], "saving with the same id replaces");
@@ -187,4 +187,113 @@ test("a connection that drops says so", async () => {
   for (let i = 0; i < 60 && !dropped; i++) await new Promise((r) => setTimeout(r, 50));
   assert.ok(dropped);
   await assert.rejects(ssh.connect({ host: "127.0.0.1", port: 1, user: "dev" }, person([]), memory(), { agent: "", timeout: 3000 }), /Could not connect to 127\.0\.0\.1:1/);
+});
+
+test("connecting: a session can ask for one way of signing in, and the usual keys do not get in the way of a password", async () => {
+  const home = temp(), mine = temp();
+  const pair = (options, passphrase) => { for (;;) { const made = utils.generateKeyPairSync("ed25519", options); if (!(utils.parseKey(made.private, passphrase) instanceof Error)) return made; } };
+  const locked = pair({ passphrase: "open sesame", cipher: "aes256-ctr" }, "open sesame"), plain = pair();
+  fs.mkdirSync(path.join(mine, ".ssh"));
+  fs.writeFileSync(path.join(mine, ".ssh/id_rsa"), locked.private);
+  fs.writeFileSync(path.join(mine, "plain"), plain.private);
+  const server = await sshd.start({ dev: { password: "pw", key: locked.public }, ada: { key: plain.public } }, home);
+  const at = { host: "127.0.0.1", port: server.port };
+  try {
+    // Left on automatic, with a usual key that needs a passphrase: the password is asked for, not the passphrase.
+    const auto = person([true, "pw"]);
+    (await ssh.connect({ ...at, user: "dev" }, auto, memory(), { agent: "", home: mine })).end();
+    assert.deepEqual(auto.asked.slice(1), ["Password for dev@127.0.0.1"]);
+
+    // Password only: keys are not tried at all, even one named in the session.
+    server.log.length = 0;
+    const typed = person([true, "pw"]);
+    (await ssh.connect({ ...at, user: "dev", auth: "password", key: path.join(mine, ".ssh/id_rsa") }, typed, memory(), { agent: "", home: mine })).end();
+    assert.deepEqual(typed.asked.slice(1), ["Password for dev@127.0.0.1"]);
+    assert.deepEqual(server.log.filter((l) => /^(key|password):/.test(l)), ["password:dev"]);
+
+    // Key only: the usual key's passphrase is asked for, and a password never is.
+    const keyed = person([true, "open sesame"]);
+    (await ssh.connect({ ...at, user: "dev", auth: "key" }, keyed, memory(), { agent: "", home: mine })).end();
+    assert.deepEqual(keyed.asked.slice(1), ["Passphrase for id_rsa"]);
+    const stuck = person([true, null]);
+    await assert.rejects(ssh.connect({ ...at, user: "dev", auth: "key" }, stuck, memory(), { agent: "", home: mine }));
+    assert.deepEqual(stuck.asked.slice(1), ["Passphrase for id_rsa"], "no password as a way round");
+    await assert.rejects(ssh.connect({ ...at, user: "ada", auth: "key", key: path.join(mine, "nowhere") }, person([true]), memory(), { agent: "" }), /is not on this machine/);
+    (await ssh.connect({ ...at, user: "ada", auth: "key", key: path.join(mine, "plain") }, person([true]), memory(), { agent: "" })).end();
+
+    // Agent only, with no agent: said plainly, before anything is sent.
+    await assert.rejects(ssh.connect({ ...at, user: "dev", auth: "agent" }, person([true]), memory(), { agent: "" }), /No SSH agent/);
+    assert.equal(ssh.session({ host: "h", user: "u", auth: "telepathy" }).auth, "auto");
+  } finally { await server.close(); }
+});
+
+test("a connected machine: folders are listed ahead, kept, and corrected when they change", async () => {
+  const home = temp();
+  for (const dir of ["a/deep/deeper", "b", "node_modules/x", "c"]) fs.mkdirSync(path.join(home, dir), { recursive: true });
+  fs.writeFileSync(path.join(home, "a/one.txt"), "1");
+  fs.writeFileSync(path.join(home, "top.txt"), "t");
+  const server = await sshd.start({ dev: { password: "pw" } }, home);
+  const remote = await ssh.connect({ host: "127.0.0.1", port: server.port, user: "dev" }, person([true, "pw"]), memory(), { agent: "" });
+  const lists = () => server.log.filter((l) => l.startsWith("list:")).map((l) => path.relative(home, l.slice(5)) || ".");
+  const settle = async () => { for (let i = 0; i < 100 && (remote.busy || remote.queue.length); i++) await new Promise((r) => setTimeout(r, 10)); };
+  try {
+    server.log.length = 0;
+    assert.deepEqual((await remote.readDir(home)).sort(), [["a", true], ["b", true], ["c", true], ["node_modules", true], ["top.txt", false]]);
+    await settle();
+    // The folders inside were fetched too, but not node_modules, and nothing deeper.
+    assert.deepEqual(lists().sort(), [".", "a", "b", "c"]);
+    // Opening one of them asks the machine nothing: it is already known. Its own folders are then read ahead.
+    server.log.length = 0;
+    assert.deepEqual((await remote.readDir(path.join(home, "a"))).sort(), [["deep", true], ["one.txt", false]]);
+    assert.deepEqual(lists(), [], "answered without a round trip");
+    await settle();
+    assert.deepEqual(lists(), ["a/deep"]);
+
+    // A kept listing that is no longer true is answered at once all the same, then put right.
+    const stale = [];
+    remote.onStale = (dir) => stale.push(path.relative(home, dir));
+    fs.writeFileSync(path.join(home, "b/new.txt"), "n");
+    remote.lists.get(path.join(home, "b")).at -= 5000;
+    assert.deepEqual(await remote.readDir(path.join(home, "b")), []);
+    for (let i = 0; i < 100 && !stale.length; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(stale, ["b"]);
+    assert.deepEqual(await remote.readDir(path.join(home, "b")), [["new.txt", false]]);
+
+    // The age of a folder says when something was added to it or taken away.
+    const [[, before], [, missing]] = await remote.times([path.join(home, "c"), path.join(home, "nowhere")]);
+    assert.ok(before > 0);
+    assert.equal(missing, -1);
+  } finally { remote.end(); await server.close(); }
+});
+
+test("a connected machine: files and folders are made, renamed and removed, and nothing is overwritten", async () => {
+  const home = temp();
+  fs.writeFileSync(path.join(home, "here.txt"), "h");
+  const server = await sshd.start({ dev: { password: "pw" } }, home);
+  const remote = await ssh.connect({ host: "127.0.0.1", port: server.port, user: "dev" }, person([true, "pw"]), memory(), { agent: "" });
+  const at = (name) => path.join(home, name);
+  try {
+    await remote.readDir(home);
+    await remote.create(at("new.txt"), false);
+    assert.equal(fs.readFileSync(at("new.txt"), "utf8"), "");
+    assert.ok((await remote.readDir(home)).some(([name]) => name === "new.txt"), "the kept listing was dropped");
+    await assert.rejects(remote.create(at("here.txt"), false), /already exists/);
+    assert.equal(fs.readFileSync(at("here.txt"), "utf8"), "h");
+    await remote.create(at("x/y/z.txt"), false);
+    await remote.create(at("x/dir"), true);
+    assert.ok(fs.statSync(at("x/y/z.txt")).isFile() && fs.statSync(at("x/dir")).isDirectory());
+
+    await remote.rename(at("new.txt"), at("x/moved.txt"));
+    assert.ok(!fs.existsSync(at("new.txt")) && fs.existsSync(at("x/moved.txt")));
+    await assert.rejects(remote.rename(at("here.txt"), at("x/moved.txt")), /already exists/);
+
+    await remote.remove(at("here.txt"));
+    await remote.remove(at("x"));
+    assert.deepEqual(fs.readdirSync(home), []);
+    // With no shell to ask, a folder is taken apart piece by piece.
+    fs.mkdirSync(at("p/q"), { recursive: true }); fs.writeFileSync(at("p/q/f"), "f"); fs.writeFileSync(at("p/g"), "g");
+    remote.exec = () => Promise.reject(new Error("no shell"));
+    await remote.remove(at("p"));
+    assert.deepEqual(fs.readdirSync(home), []);
+  } finally { remote.end(); await server.close(); }
 });

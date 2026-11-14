@@ -184,10 +184,28 @@ async function switchTo(root, kind, name) {
 
 const stage = (root, files) => git(root, ["add", "--", ...inside(root, files)]);
 const unstage = (root, files) => git(root, ["reset", "-q", "HEAD", "--", ...inside(root, files)]).catch(() => git(root, ["rm", "-q", "--cached", "--", ...inside(root, files)]));
+/**
+ * Throws away what was done to these files since the last commit: changed files go back to
+ * how they were, deleted ones come back, and new ones (staged or not) are removed. This is
+ * the one thing here that loses work, so the shell asks before it calls this.
+ */
+async function discard(root, files) {
+  const paths = inside(root, files).map((file) => file.split(P.sep).join("/"));
+  const listed = async (args) => { try { return (await git(root, args)).split("\0").filter(Boolean); } catch { return []; } };
+  const committed = new Set(await listed(["ls-tree", "-r", "-z", "--name-only", "HEAD", "--", ...paths]));
+  const staged = await listed(["ls-files", "-z", "--cached", "--", ...paths]);
+  const back = paths.filter((file) => committed.has(file));
+  const fresh = staged.filter((file) => !committed.has(file));
+  if (back.length) await git(root, ["checkout", "-q", "HEAD", "--", ...back]);
+  if (fresh.length) await git(root, ["rm", "-q", "-f", "--cached", "--", ...fresh]);
+  const loose = paths.filter((file) => !committed.has(file));
+  if (loose.length) await git(root, ["clean", "-q", "-f", "--", ...loose]);
+}
+
 async function commit(root, message) {
   if (typeof message !== "string" || !message.trim() || message.length > 20000) throw new Error("A commit needs a message");
   // The message goes in on standard input, so nothing in it can be read as an option.
   await git(root, ["commit", "-q", "-F", "-"], message);
 }
 
-module.exports = { over, status, log, days, tree, history, show, stage, unstage, commit, file, changed, refs, switchTo, EMPTY_TREE };
+module.exports = { over, status, log, days, tree, history, show, stage, unstage, discard, commit, file, changed, refs, switchTo, EMPTY_TREE };

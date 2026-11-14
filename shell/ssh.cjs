@@ -14,6 +14,8 @@ const path = require("node:path");
 
 const posix = path.posix;
 const MAX_FILE = 8 * 1024 * 1024;
+// A listing is kept for a minute, and trusted without a second look for two seconds.
+const KEEP = 60 * 1000, SETTLED = 2000, AHEAD = 24;
 const SKIP = [".git", "node_modules", ".beabuild", "build", "target", "dist", "out", ".venv", "__pycache__", ".next", ".cache"];
 
 /** A word made safe to hand to the other machine's shell. */
@@ -24,6 +26,7 @@ const fingerprint = (key) => "SHA256:" + crypto.createHash("sha256").update(key)
 
 // --- Saved sessions ----------------------------------------------------------------------------
 
+const AUTH = ["auto", "password", "key", "agent"];
 const NAME = /^[^\x00-\x1f]{1,80}$/, HOST = /^[A-Za-z0-9._:-]{1,255}$/, USER = /^[A-Za-z0-9._@-]{1,64}$/;
 
 /** Checks a session as the window describes it. Nothing secret is ever part of one. */
@@ -35,6 +38,8 @@ function session(raw) {
     name: text(s.name), host: text(s.host), user: text(s.user),
     port: Number.isInteger(Number(s.port)) && Number(s.port) > 0 && Number(s.port) < 65536 ? Number(s.port) : 22,
     key: text(s.key).slice(0, 1000), folder: text(s.folder).slice(0, 1000),
+    // How to sign in: "auto" tries what there is, the others use that one way and nothing else.
+    auth: AUTH.includes(text(s.auth)) ? text(s.auth) : "auto",
   };
   if (!HOST.test(out.host) || out.host.startsWith("-")) throw new Error("That is not a host name or address");
   if (!USER.test(out.user) || out.user.startsWith("-")) throw new Error("A user name is needed, of letters, digits, dots and dashes");
@@ -76,7 +81,7 @@ function fromConfig(text) {
     if (key === "host") {
       current = null;
       const name = value.split(/\s+/).find((n) => !/[*?!]/.test(n));
-      if (name) { current = { name, host: name, user: os.userInfo().username, port: 22, key: "", folder: "" }; found.push(current); }
+      if (name) { current = { name, host: name, user: os.userInfo().username, port: 22, key: "", folder: "", auth: "auto" }; found.push(current); }
     } else if (current) {
       if (key === "hostname") current.host = value;
       else if (key === "user") current.user = value;
@@ -106,16 +111,26 @@ function connect(config, ask, known, options = {}) {
     let settled = false, refusal = "";
     const fail = (error) => { if (!settled) { settled = true; try { conn.end(); } catch {} reject(error instanceof Error ? error : new Error(String(error))); } };
 
-    // What to try, in order, each only if the other machine accepts that kind.
-    const keys = (s.key ? [home(s.key)] : ["id_ed25519", "id_ecdsa", "id_rsa"].map((n) => path.join(os.homedir(), ".ssh", n))).filter((f) => fs.existsSync(f));
+    // What to try, in order, each only if the other machine accepts that kind. A session
+    // can ask for one way only ("password", "key", "agent"); left on "auto", an agent and
+    // key files that need nothing typed go first, then a password.
+    const mode = s.auth;
+    const usual = ["id_ed25519", "id_ecdsa", "id_rsa"].map((n) => path.join(options.home ?? os.homedir(), ".ssh", n));
+    const keys = (s.key ? [home(s.key)] : usual).filter((f) => fs.existsSync(f));
+    if (mode === "key" && s.key && !keys.length) return reject(new Error("The key file " + s.key + " is not on this machine."));
     const agent = options.agent ?? process.env.SSH_AUTH_SOCK;
     const steps = [];
-    if (agent) steps.push({ kind: "publickey", make: async () => ({ type: "agent", username: s.user, agent }) });
-    for (const file of keys) {
-      steps.push({ kind: "publickey", make: async () => {
-        const data = fs.readFileSync(file);
+    if (agent && (mode === "auto" || mode === "agent")) steps.push({ kind: "publickey", make: async () => ({ type: "agent", username: s.user, agent }) });
+    if (mode === "agent" && !agent) return reject(new Error("No SSH agent is running on this machine (SSH_AUTH_SOCK is not set)."));
+    for (const file of mode === "auto" || mode === "key" ? keys : []) {
+      let data;
+      try { data = fs.readFileSync(file); } catch { continue; }
+      const locked = utils.parseKey(data) instanceof Error;
+      // One of the usual keys that needs a passphrase is not worth a question when the
+      // machine would take a password anyway: nobody asked for that key by name.
+      steps.push({ kind: "publickey", late: mode === "auto" && locked && !s.key, make: async () => {
         let passphrase;
-        if (utils.parseKey(data) instanceof Error) {
+        if (locked) {
           // An encrypted key: ask for its passphrase until one opens it, or the person gives up.
           for (let tries = 0; ; tries++) {
             passphrase = await ask.secret("Passphrase for " + path.basename(file), tries ? "That passphrase did not open the key. Try again." : "The key " + file + " is protected by a passphrase.");
@@ -127,6 +142,7 @@ function connect(config, ask, known, options = {}) {
         return { type: "publickey", username: s.user, key: data, passphrase };
       } });
     }
+    const typing = mode === "auto" || mode === "password";
     let passwords = 0;
     const password = { kind: "password", make: async () => {
       const typed = await ask.secret("Password for " + s.user + "@" + s.host, passwords++ ? "That password was not accepted. Try again." : "Runes does not keep it.");
@@ -144,7 +160,8 @@ function connect(config, ask, known, options = {}) {
         finish(answers);
       },
     }) };
-    let first = true, asked = false;
+    let first = true, asked = false, tried = 0;
+    const WAYS = { password: "a password", key: "a key file", agent: "the SSH agent", auto: "any way of signing in Runes has" };
 
     conn.on("ready", () => {
       conn.sftp((error, sftp) => {
@@ -180,11 +197,16 @@ function connect(config, ask, known, options = {}) {
         const allowed = left ?? [];
         (async () => {
           for (;;) {
-            let step = steps.find((x) => allowed.includes(x.kind));
+            const typed = typing && (allowed.includes("password") || allowed.includes("keyboard-interactive"));
+            let step = steps.find((x) => allowed.includes(x.kind) && !(x.late && typed));
             if (step) steps.splice(steps.indexOf(step), 1);
-            else if (allowed.includes("password") && passwords < 3) step = password;
-            else if (allowed.includes("keyboard-interactive") && !asked) { asked = true; step = interactive; }
-            if (!step) return next(false);
+            else if (typing && allowed.includes("password") && passwords < 3) step = password;
+            else if (typing && allowed.includes("keyboard-interactive") && !asked) { asked = true; step = interactive; }
+            if (!step) {
+              if (!tried && mode !== "auto") refusal = where + " does not take " + WAYS[mode] + " for " + s.user + (allowed.length ? "; it takes " + allowed.join(", ") + "." : ".");
+              return next(false);
+            }
+            tried++;
             let method = null;
             try { method = await step.make(); } catch {}
             if (method) return next(method);
@@ -202,6 +224,10 @@ class Remote {
     this.conn = conn; this.sftp = sftp; this.config = config;
     this.closed = false; this.onClose = () => {};
     this.tools = null;
+    // Listings already fetched, by folder: { at, entries } and, while one is on its way, { pending }.
+    this.lists = new Map();
+    this.queue = []; this.busy = 0;
+    this.onStale = () => {};
     conn.on("close", () => { if (!this.closed) { this.closed = true; this.onClose(); } });
   }
   end() { this.closed = true; try { this.conn.end(); } catch {} }
@@ -249,17 +275,109 @@ class Remote {
   }
   async isDirectory(file) { try { return (await this.call("stat", file)).isDirectory(); } catch { return false; } }
 
-  /** [[name, is it a folder]], links followed. */
-  async readDir(dir) {
-    const out = [];
-    for (const entry of await this.call("readdir", dir)) {
-      if (entry.filename === ".git" || entry.filename === "." || entry.filename === "..") continue;
-      let folder = entry.attrs.isDirectory();
-      if (entry.attrs.isSymbolicLink()) folder = await this.isDirectory(posix.join(dir, entry.filename));
-      out.push([entry.filename, folder]);
-    }
-    return out;
+  /** [[name, is it a folder]], links followed. Always asks the machine. */
+  async list(dir) {
+    const found = (await this.call("readdir", dir)).filter((e) => e.filename !== ".git" && e.filename !== "." && e.filename !== "..");
+    return Promise.all(found.map(async (entry) => [entry.filename,
+      entry.attrs.isSymbolicLink() ? await this.isDirectory(posix.join(dir, entry.filename)) : entry.attrs.isDirectory()]));
   }
+  /**
+   * A folder's listing, without the wait where that can be helped. Every round trip to the
+   * other machine costs its distance, and a listing takes several, so:
+   *  - a listing fetched in the last minute is answered at once, and checked again behind
+   *    the scenes if it is more than a moment old (`onStale(dir)` says when it had changed);
+   *  - whenever the person is shown a folder, the folders inside it are fetched too, a few at
+   *    a time, so that opening any of them is already answered. Only that one level, only
+   *    folders worth opening, and never more than a couple of dozen.
+   * `ahead: false` is how the read-ahead itself asks, so it goes no deeper.
+   */
+  readDir(dir, { ahead = true, fresh = false } = {}) {
+    const had = this.lists.get(dir), now = Date.now();
+    const then = (entries) => { if (ahead) this.ahead(dir, entries); return entries; };
+    if (!fresh && had?.entries && now - had.at < KEEP) {
+      if (ahead && now - had.at > SETTLED && !had.pending) this.refresh(dir, had.entries);
+      return Promise.resolve(then(had.entries));
+    }
+    if (had?.pending) return had.pending.then(then);
+    const pending = this.list(dir).then((entries) => {
+      this.lists.set(dir, { at: Date.now(), entries });
+      if (this.lists.size > 600) this.lists.delete(this.lists.keys().next().value);
+      return entries;
+    }, (error) => { this.lists.delete(dir); throw error; });
+    this.lists.set(dir, { ...had, pending });
+    return pending.then(then);
+  }
+  /** Fetches a kept listing again and says so if it is no longer true. */
+  refresh(dir, before) {
+    const pending = this.list(dir).then((entries) => {
+      this.lists.set(dir, { at: Date.now(), entries });
+      if (JSON.stringify([...entries].sort()) !== JSON.stringify([...before].sort())) this.onStale(dir);
+      return entries;
+    }, () => { this.lists.delete(dir); this.onStale(dir); return before; });
+    this.lists.set(dir, { at: Date.now(), entries: before, pending });
+  }
+  ahead(dir, entries) {
+    const wanted = entries.filter(([name, folder]) => folder && !SKIP.includes(name)).slice(0, AHEAD).map(([name]) => posix.join(dir, name));
+    for (const next of wanted) if (!this.lists.has(next) && !this.queue.includes(next)) this.queue.push(next);
+    this.drain();
+  }
+  drain() {
+    while (this.busy < 4 && this.queue.length && !this.closed) {
+      const dir = this.queue.shift();
+      if (this.lists.has(dir)) continue;
+      this.busy++;
+      this.readDir(dir, { ahead: false }).catch(() => {}).then(() => { this.busy--; this.drain(); });
+    }
+  }
+  /** Drops what is kept about a folder (and, for a folder that went away, everything under it). */
+  forget(dir, under = false) {
+    this.lists.delete(dir);
+    if (under) for (const key of [...this.lists.keys()]) if (key.startsWith(dir + "/")) this.lists.delete(key);
+  }
+  /** When each folder last had something added or taken away: [[dir, seconds]], or -1 for one that is gone. */
+  times(dirs) {
+    return Promise.all(dirs.map((dir) => this.call("stat", dir).then((stat) => [dir, stat.mtime], () => [dir, -1])));
+  }
+
+  // --- Changing what is there ---
+  async exists(file) { try { await this.call("lstat", file); return true; } catch { return false; } }
+  /** A new empty file or folder. The folders above it are made if they are missing; nothing is ever overwritten. */
+  async create(file, folder) {
+    if (await this.exists(file)) throw new Error(posix.basename(file) + " already exists");
+    const above = [];
+    for (let dir = posix.dirname(file); dir !== "/" && !(await this.exists(dir)); dir = posix.dirname(dir)) above.unshift(dir);
+    for (const dir of above) await this.call("mkdir", dir);
+    if (folder) await this.call("mkdir", file);
+    else await this.call("close", await this.call("open", file, "wx"));
+    this.forget(posix.dirname(above[0] ?? file));
+  }
+  async rename(from, to) {
+    if (await this.exists(to)) throw new Error(posix.basename(to) + " already exists");
+    await this.call("rename", from, to);
+    this.forget(from, true); this.forget(posix.dirname(from)); this.forget(posix.dirname(to));
+  }
+  /** Removes a file, or a folder and all in it. There is no trash on the other machine: this is for good. */
+  async remove(file) {
+    const stat = await this.call("lstat", file);
+    if (!stat.isDirectory()) await this.call("unlink", file);
+    else {
+      try { await this.exec("rm -rf -- " + quote(file)); }
+      catch {
+        // No shell to ask, or it would not: take the folder apart over SFTP.
+        const empty = async (dir) => {
+          for (const entry of await this.call("readdir", dir)) {
+            if (entry.filename === "." || entry.filename === "..") continue;
+            const full = posix.join(dir, entry.filename);
+            if (entry.attrs.isDirectory()) await empty(full); else await this.call("unlink", full);
+          }
+          await this.call("rmdir", dir);
+        };
+        await empty(file);
+      }
+    }
+    this.forget(file, true); this.forget(posix.dirname(file));
+  }
+
   async readText(file) {
     const stat = await this.call("stat", file);
     if (stat.isDirectory()) throw new Error(posix.basename(file) + " is a folder");
@@ -275,6 +393,7 @@ class Remote {
    * missing, even for a moment.
    */
   async writeText(file, content) {
+    this.forget(posix.dirname(file));
     let mode;
     try { mode = (await this.call("stat", file)).mode & 0o7777; } catch {}
     const part = posix.join(posix.dirname(file), "." + posix.basename(file) + ".runes-part");
