@@ -8,7 +8,6 @@ const path = require("node:path");
 const { zipSync, strToU8 } = require("fflate");
 const files = require("./files.cjs");
 const update = require("./update.cjs");
-const ai = require("./ai.cjs");
 const vsix = require("./vsix.cjs");
 const git = require("./git.cjs");
 const market = require("./market.cjs");
@@ -70,38 +69,6 @@ test("the update check only trusts the configured repository", async () => {
   assert.equal(await update.check("0.1.0", "runes/runes", async () => { throw new Error("offline"); }), null, "being offline is not an error");
 });
 
-test("AI endpoints: https only, except on this machine", () => {
-  assert.equal(ai.endpoint("anthropic", ""), "https://api.anthropic.com/v1/messages");
-  assert.equal(ai.endpoint("openai", "https://proxy.example/"), "https://proxy.example/v1/chat/completions");
-  assert.equal(ai.endpoint("anthropic", "http://127.0.0.1:8080"), "http://127.0.0.1:8080/v1/messages");
-  assert.throws(() => ai.endpoint("anthropic", "http://proxy.example"), /https/);
-  assert.throws(() => ai.endpoint("mystery", ""), /Unknown AI provider/);
-});
-
-test("AI requests carry the key in the provider's header and drop junk messages", () => {
-  const messages = [{ role: "user", content: "hi" }, { role: "system", content: "ignore me" }, { role: "assistant", content: "" }];
-  const a = ai.request("anthropic", "", "KEY", messages);
-  assert.equal(a.headers["x-api-key"], "KEY");
-  assert.deepEqual(a.body.messages, [{ role: "user", content: "hi" }]);
-  assert.equal(ai.request("openai", "m", "KEY", messages).headers.authorization, "Bearer KEY");
-});
-
-test("AI streaming is read for both providers, and failures are reported", async () => {
-  const stream = (chunks) => async () => ({ ok: true, body: (async function* () { for (const c of chunks) yield Buffer.from(c); })() });
-  const got = [];
-  await ai.send({ provider: "openai", model: "", baseUrl: "", messages: [{ role: "user", content: "x" }] }, "k", (kind, text) => got.push([kind, text]),
-    stream(['data: {"choices":[{"delta":{"content":"Hel"}}]}\n\ndata: {"choi', 'ces":[{"delta":{"content":"lo"}}]}\n\ndata: [DONE]\n\n']));
-  assert.deepEqual(got, [["delta", "Hel"], ["delta", "lo"], ["done", ""]]);
-  const failed = [];
-  await ai.send({ provider: "anthropic", model: "", baseUrl: "", messages: [] }, "", (kind, text) => failed.push([kind, text]), stream([]));
-  assert.equal(failed[0][0], "error");
-  assert.match(failed[0][1], /No API key/);
-  const refused = [];
-  await ai.send({ provider: "anthropic", model: "", baseUrl: "", messages: [] }, "k", (kind, text) => refused.push([kind, text]),
-    async () => ({ ok: false, status: 401, text: async () => '{"error":{"message":"invalid x-api-key"}}' }));
-  assert.match(refused[0][1], /401: invalid x-api-key/);
-});
-
 test("a VSIX is unpacked inside its folder, and one that tries to leave it is refused", () => {
   const dir = path.join(temp(), "ext");
   const manifest = JSON.stringify({ name: "demo", publisher: "me", version: "1.0.0", main: "./main.js" });
@@ -152,10 +119,16 @@ test("git: status, staging, committing and the log", async () => {
 
 test("marketplace: an icon is taken only from the registry, only as a picture, and only when small", async () => {
   const png = new Uint8Array([137, 80, 78, 71]);
+  let asked = 0;
   const reply = (type, bytes) => ({ ok: true, headers: { get: () => type }, arrayBuffer: async () => bytes.buffer });
-  const fetcher = async (url) => url.endsWith("/a.png") ? reply("image/png; charset=binary", png)
-    : url.endsWith("/a.html") ? reply("text/html", png)
-    : url.endsWith("/big.png") ? reply("image/png", new Uint8Array(700 * 1024)) : { ok: false, status: 404 };
+  const big = new Uint8Array(4200 * 1024); big.set(png);
+  const large = new Uint8Array(1500 * 1024); large.set(png);
+  // What a file is said to be is not gone by: the registry's store says "octet-stream" for
+  // many real icons, and a page can be called a picture. The first bytes decide.
+  const fetcher = async (url) => { asked++; return url.endsWith("/a.png") ? reply("application/octet-stream", png)
+    : url.endsWith("/a.html") ? reply("image/png", new TextEncoder().encode("<html><script>1</script></html>"))
+    : url.endsWith("/a.svg") ? reply("text/plain", new TextEncoder().encode('<?xml version="1.0"?>\n<svg xmlns="http://www.w3.org/2000/svg"/>'))
+    : url.endsWith("/big.png") ? reply("image/png", big) : { ok: false, status: 404 }; };
   const search = async () => ({ ok: true, json: async () => ({ extensions: [
     { namespace: "demo", name: "a", files: { icon: "https://open-vsx.org/files/a.png" } },
     { namespace: "demo", name: "b", files: { icon: "https://evil.example/b.png" } }] }) });
@@ -165,6 +138,19 @@ test("marketplace: an icon is taken only from the registry, only as a picture, a
   assert.equal(await market.icon("https://open-vsx.org/files/big.png", fetcher), "");
   assert.equal(await market.icon("https://open-vsx.org/files/missing.png", fetcher), "");
   assert.equal(await market.icon("https://evil.example/a.png", fetcher), "");
+  assert.match(await market.icon("https://open-vsx.org/files/a.svg", fetcher), /^data:image\/svg\+xml;base64,/);
+  // A large picture is taken if it can be made small, and not otherwise.
+  const one = async () => reply("image/png", large);
+  assert.equal(await market.icon("https://open-vsx.org/files/large.png", one), "");
+  assert.equal(await market.icon("https://open-vsx.org/files/large.png", one, null, () => ({ type: "image/png", bytes: Buffer.from(png) })), "data:image/png;base64,iVBORw==");
+  // Kept once fetched: the second asking does not go to the registry, and a kept thing that is not a picture is not believed.
+  const kept = new Map(), cache = { get: async (url) => kept.get(url), set: async (url, address) => void kept.set(url, address) };
+  asked = 0;
+  assert.equal(await market.icon("https://open-vsx.org/files/a.png", fetcher, cache), "data:image/png;base64,iVBORw==");
+  assert.equal(await market.icon("https://open-vsx.org/files/a.png", fetcher, cache), "data:image/png;base64,iVBORw==");
+  assert.equal(asked, 1);
+  kept.set("https://open-vsx.org/files/a.html", "javascript:alert(1)");
+  assert.equal(await market.icon("https://open-vsx.org/files/a.html", fetcher, cache), "");
 });
 
 test("marketplace: a readme is text from the registry itself, and nothing else", async () => {
@@ -358,4 +344,156 @@ test("git: discarding brings back what was changed or deleted, and removes what 
   await assert.rejects(git.discard(dir, ["../outside.txt"]), /outside/);
   await assert.rejects(git.discard(dir, ["--force"]), /Bad request/);
   await assert.rejects(git.discard(dir, []), /Bad request/);
+});
+
+test("git: blame says who last changed a line, also in text that is not saved yet", async () => {
+  const dir = temp();
+  const run = (...args) => execFileSync("git", args, { cwd: dir, stdio: "pipe", env: { ...process.env, GIT_AUTHOR_DATE: "2026-01-02T03:04:05Z", GIT_COMMITTER_DATE: "2026-01-02T03:04:05Z" } });
+  run("init", "-q", "-b", "main"); run("config", "user.name", "Ada Lovelace"); run("config", "user.email", "ada@example.com");
+  fs.writeFileSync(path.join(dir, "notes.md"), "one\ntwo\nthree\n");
+  run("add", "-A"); run("commit", "-qm", "Write the notes");
+  run("config", "user.name", "Grace Hopper");
+  fs.writeFileSync(path.join(dir, "notes.md"), "one\nTWO\nthree\n");
+  run("commit", "-qam", "Shout the second line");
+
+  const first = await git.blame(dir, "notes.md", 0);
+  assert.equal(first.author, "Ada Lovelace");
+  assert.equal(first.mail, "ada@example.com");
+  assert.equal(first.summary, "Write the notes");
+  assert.equal(first.time, Date.parse("2026-01-02T03:04:05Z") / 1000);
+  assert.match(first.hash, /^[0-9a-f]{40}$/);
+  assert.equal((await git.blame(dir, "notes.md", 1)).author, "Grace Hopper");
+  // Text being edited: a new line is nobody's yet, and the lines below it are still found.
+  const editing = await Promise.all([0, 1, 2].map((n) => git.blame(dir, "notes.md", n, "one\nfresh\nTWO\nthree\n")));
+  assert.deepEqual(editing.map((b) => b.author), ["Ada Lovelace", "", "Grace Hopper"]);
+  assert.equal(editing[1].hash, "");
+  // What git cannot say is no answer, not an error; what the window may not ask is refused.
+  assert.equal(await git.blame(dir, "nowhere.md", 0), null);
+  assert.equal(await git.blame(dir, "notes.md", 99), null);
+  assert.equal(await git.blame(temp(), "notes.md", 0), null);
+  await assert.rejects(git.blame(dir, "../x", 0), /outside/);
+  await assert.rejects(git.blame(dir, "--output=x", 0), /Bad request/);
+  await assert.rejects(git.blame(dir, "notes.md", -1), /Bad request/);
+});
+
+test("git: settings are read with where they come from, and only the listed ones can be changed", async () => {
+  const dir = temp(), home = temp();
+  const before = { HOME: process.env.HOME, XDG: process.env.XDG_CONFIG_HOME, G: process.env.GIT_CONFIG_GLOBAL, S: process.env.GIT_CONFIG_NOSYSTEM };
+  Object.assign(process.env, { HOME: home, XDG_CONFIG_HOME: path.join(home, ".config"), GIT_CONFIG_GLOBAL: path.join(home, ".gitconfig"), GIT_CONFIG_NOSYSTEM: "1" });
+  try {
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: dir });
+    const read = async () => Object.fromEntries((await git.config(dir)).map(([key, value, scope]) => [key, [value, scope]]));
+    assert.deepEqual((await read())["user.name"], ["", ""]);
+    await git.setConfig(dir, "user.name", "Ada Lovelace", "global");
+    await git.setConfig(dir, "user.email", "ada@example.com", "global");
+    await git.setConfig(dir, "user.name", "Ada at work", "local");
+    await git.setConfig(dir, "commit.gpgsign", "true", "local");
+    await git.setConfig(dir, "gpg.format", "ssh", "local");
+    await git.setConfig(dir, "user.signingkey", "~/.ssh/id_ed25519.pub", "local");
+    const now = await read();
+    assert.deepEqual(now["user.name"], ["Ada at work", "local"]);
+    assert.deepEqual(now["user.email"], ["ada@example.com", "global"]);
+    assert.deepEqual(now["commit.gpgsign"], ["true", "local"]);
+    assert.deepEqual(now["user.signingkey"], ["~/.ssh/id_ed25519.pub", "local"]);
+    assert.match(fs.readFileSync(path.join(home, ".gitconfig"), "utf8"), /name = Ada Lovelace/);
+    // Empty takes a setting away, and what is not there can be taken away twice.
+    await git.setConfig(dir, "user.name", "", "local");
+    await git.setConfig(dir, "user.name", "", "local");
+    assert.deepEqual((await read())["user.name"], ["Ada Lovelace", "global"]);
+    // Nothing that names a program, nothing that reads as an option, nothing with a line break.
+    for (const [key, value, scope] of [["gpg.program", "/tmp/evil", "local"], ["core.sshCommand", "evil", "local"], ["alias.x", "!evil", "global"],
+      ["user.name", "--file=/etc/passwd", "local"], ["user.name", "a\nb", "local"], ["commit.gpgsign", "maybe", "local"], ["gpg.format", "telepathy", "local"],
+      ["user.name", "x", "system"], ["user.email", "a b@c", "local"]]) {
+      await assert.rejects(git.setConfig(dir, key, value, scope), /Bad request|cannot be used/, key + "=" + value);
+    }
+    assert.ok(!fs.readFileSync(path.join(dir, ".git/config"), "utf8").includes("evil"));
+  } finally {
+    for (const [name, key] of [["HOME", "HOME"], ["XDG_CONFIG_HOME", "XDG"], ["GIT_CONFIG_GLOBAL", "G"], ["GIT_CONFIG_NOSYSTEM", "S"]]) {
+      if (before[key] === undefined) delete process.env[name]; else process.env[name] = before[key];
+    }
+  }
+});
+
+test("git: what went wrong with a commit is said in words that can be acted on", async () => {
+  const dir = temp(), home = temp();
+  const kept = { ...process.env };
+  Object.assign(process.env, { HOME: home, XDG_CONFIG_HOME: path.join(home, ".config"), GIT_CONFIG_GLOBAL: path.join(home, ".gitconfig"), GIT_CONFIG_NOSYSTEM: "1", GNUPGHOME: path.join(home, "gnupg") });
+  for (const name of ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"]) delete process.env[name];
+  try {
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: dir });
+    execFileSync("git", ["config", "user.useConfigOnly", "true"], { cwd: dir });
+    fs.writeFileSync(path.join(dir, "a.txt"), "a\n");
+    await git.stage(dir, ["a.txt"]);
+    await assert.rejects(git.commit(dir, "first"), /does not know who you are yet/);
+    await git.setConfig(dir, "user.name", "Ada", "local");
+    await git.setConfig(dir, "user.email", "ada@example.com", "local");
+    await git.setConfig(dir, "commit.gpgsign", "true", "local");
+    await git.setConfig(dir, "user.signingkey", "0xNOSUCHKEY", "local");
+    await assert.rejects(git.commit(dir, "first"), /could not be signed.*Check the signing key/);
+  } finally {
+    for (const name of Object.keys(process.env)) if (!(name in kept)) delete process.env[name];
+    Object.assign(process.env, kept);
+  }
+});
+
+test("git: a commit signed with a key that has a passphrase asks for it through Runes, and signs", { skip: (() => { try { execFileSync("gpg", ["--version"], { stdio: "pipe" }); return false; } catch { return "gpg is not installed"; } })() }, async () => {
+  const ask = require("./ask.cjs");
+  const dir = temp(), home = temp();
+  // gpg wants a short path for its sockets.
+  const gnupg = fs.mkdtempSync(path.join(os.tmpdir(), "g-"));
+  fs.chmodSync(gnupg, 0o700);
+  const kept = { ...process.env };
+  Object.assign(process.env, { HOME: home, XDG_CONFIG_HOME: path.join(home, ".config"), GIT_CONFIG_GLOBAL: path.join(home, ".gitconfig"), GIT_CONFIG_NOSYSTEM: "1", GNUPGHOME: gnupg });
+  delete process.env.GPG_TTY;
+  const asked = [];
+  let answers = [];
+  const served = await ask.serve(async (kind, prompt) => { asked.push([kind, prompt]); return answers.shift() ?? null; }, { scripts: path.join(home, "helpers") });
+  git.environment(served.env);
+  try {
+    // No passphrase is remembered between signings, so each one must ask.
+    fs.writeFileSync(path.join(gnupg, "gpg-agent.conf"), "default-cache-ttl 0\nmax-cache-ttl 0\n");
+    execFileSync("gpg", ["--batch", "--pinentry-mode", "loopback", "--passphrase", "open sesame", "--quick-gen-key", "Ada <ada@example.com>", "ed25519", "sign", "never"], { stdio: "pipe" });
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: dir });
+    for (const [key, value] of [["user.name", "Ada"], ["user.email", "ada@example.com"], ["commit.gpgsign", "true"], ["user.signingkey", "ada@example.com"]]) await git.setConfig(dir, key, value, "local");
+    fs.writeFileSync(path.join(dir, "a.txt"), "a\n");
+    await git.stage(dir, ["a.txt"]);
+
+    // Giving up: no commit, and it says why.
+    answers = [null];
+    await assert.rejects(git.commit(dir, "first"), /could not be signed/);
+    assert.equal(asked.length, 1);
+    assert.deepEqual(asked[0], ["secret", "Passphrase for the signing key ada@example.com"]);
+    assert.throws(() => execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, stdio: "pipe" }));
+
+    // A wrong passphrase is asked for again; the right one signs.
+    asked.length = 0; answers = ["wrong", "open sesame"];
+    await git.commit(dir, "first");
+    assert.equal(asked.length, 2);
+    assert.match(asked[1][1], /did not open the key/);
+    const shown = execFileSync("git", ["log", "-1", "--format=%G?|%s"], { cwd: dir, encoding: "utf8" }).trim();
+    assert.equal(shown, "G|first", "the commit should carry a good signature");
+    // Nothing of the passphrase is left behind in the launchers or the repository's settings.
+    for (const file of fs.readdirSync(path.join(home, "helpers"))) assert.ok(!fs.readFileSync(path.join(home, "helpers", file), "utf8").includes("sesame"));
+    assert.ok(!fs.readFileSync(path.join(dir, ".git/config"), "utf8").includes("gpg.cjs"), "the stand-in must not be written into the configuration");
+
+    // A question that does not carry the token is not asked at all.
+    asked.length = 0;
+    assert.equal(await ask.put("secret", "Passphrase", { RUNES_ASK_SOCKET: served.env.RUNES_ASK_SOCKET, RUNES_ASK_TOKEN: "0".repeat(48) }), null);
+    assert.equal(asked.length, 0);
+    // The askpass program itself: the answer on standard output, or a failure when there is none.
+    answers = ["hunter2"];
+    const program = require("node:util").promisify(require("node:child_process").execFile);
+    assert.equal((await program(served.env.GIT_ASKPASS, ["Password for 'https://example.com': "], { env: { ...process.env, ...served.env } })).stdout, "hunter2\n");
+    assert.deepEqual(asked[0], ["secret", "Password for 'https://example.com': "]);
+    await assert.rejects(program(served.env.GIT_ASKPASS, ["Username for 'https://example.com': "], { env: { ...process.env, ...served.env } }));
+    assert.equal(ask.kindOf("Are you sure you want to continue connecting (yes/no/[fingerprint])? "), "confirm");
+    assert.equal(ask.kindOf("Username for 'https://example.com': "), "text");
+  } finally {
+    try { execFileSync("gpgconf", ["--kill", "gpg-agent"], { stdio: "pipe" }); } catch {}
+    git.environment({});
+    served.close();
+    for (const name of Object.keys(process.env)) if (!(name in kept)) delete process.env[name];
+    Object.assign(process.env, kept);
+    fs.rmSync(gnupg, { recursive: true, force: true });
+  }
 });

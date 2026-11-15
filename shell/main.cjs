@@ -2,17 +2,18 @@
 // machine for. The window is sandboxed and loads nothing from the network; all it can do
 // goes through the handlers below, and every one of them checks who is asking.
 "use strict";
-const { app, BrowserWindow, dialog, ipcMain, net, protocol, Menu, safeStorage, session, shell, utilityProcess } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, nativeImage, net, protocol, Menu, session, shell, utilityProcess } = require("electron");
 const fs = require("node:fs/promises");
 const fsSync = require("node:fs");
+const crypto = require("node:crypto");
 const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { relaxed, unpack, manifestOf, identity } = require("./vsix.cjs");
 const files = require("./files.cjs");
 const update = require("./update.cjs");
-const ai = require("./ai.cjs");
 const git = require("./git.cjs");
+const ask = require("./ask.cjs");
 const fonts = require("./fonts.cjs");
 const market = require("./market.cjs");
 const ssh = require("./ssh.cjs");
@@ -240,6 +241,24 @@ function watch(dirs) {
   }
 }
 
+// Pictures of marketplace extensions, kept on disk by the hash of their address: a version's
+// icon never changes, so it is fetched once. Old ones are cleared out now and then.
+const pictures = {
+  file: (url) => user("icon-cache", crypto.createHash("sha256").update(url).digest("hex")),
+  get: (url) => fs.readFile(pictures.file(url), "utf8"),
+  set: async (url, address) => {
+    await fs.mkdir(user("icon-cache"), { recursive: true });
+    await fs.writeFile(pictures.file(url), address);
+    if (Math.random() < 0.02) {
+      const old = Date.now() - 60 * 24 * 3600 * 1000;
+      for (const name of await fs.readdir(user("icon-cache"))) {
+        const file = user("icon-cache", name);
+        try { if ((await fs.stat(file)).mtimeMs < old) await fs.unlink(file); } catch {}
+      }
+    }
+  },
+};
+
 // --- Terminals -----------------------------------------------------------------------------------
 
 const terminals = new Map();
@@ -292,6 +311,21 @@ const handlers = {
     }
     const picked = await dialog.showSaveDialog(window, { defaultPath: path.join(folder || app.getPath("home"), path.basename(text(name))) });
     return picked.canceled ? "" : picked.filePath;
+  },
+  /**
+   * Saves a picture the window has made (a drawing, as a PNG) where the person says. The
+   * window never names the place: it comes from the system's own dialog, and what is written
+   * must be a PNG, by its first bytes. Resolves to the path, or "" when the dialog was closed.
+   */
+  saveImage: async (name, address) => {
+    text(address, 64 * 1024 * 1024);
+    const found = /^data:image\/png;base64,([A-Za-z0-9+/=]+)$/.exec(address);
+    const bytes = found && Buffer.from(found[1], "base64");
+    if (!bytes || bytes.length < 8 || bytes.readUInt32BE(0) !== 0x89504e47) throw new Error("That is not a picture");
+    const picked = await dialog.showSaveDialog(window, { defaultPath: path.join(remote ? app.getPath("home") : folder || app.getPath("home"), path.basename(text(name)).replace(/[^\w .-]/g, "_")), filters: [{ name: "PNG picture", extensions: ["png"] }] });
+    if (picked.canceled || !picked.filePath) return "";
+    await fs.writeFile(picked.filePath, bytes);
+    return picked.filePath;
   },
   // --- Changing the files of the open folder: only ever inside it ---
   /** A new empty file or folder. Folders above it that are missing are made; nothing is overwritten. */
@@ -406,9 +440,19 @@ const handlers = {
   gitFile: (at, name) => git.file(folder, text(at, 200), text(name)),
   gitChanged: (from, to) => git.changed(folder, text(from, 200), text(to, 200)),
   gitRefs: () => git.refs(folder),
+  /** Who last changed a line; `content` is the text being edited, when it differs from the disk. */
+  gitBlame: (name, line, content) => git.blame(folder, text(name), whole(line, 0, 10_000_000), typeof content === "string" ? text(content, 20 << 20) : undefined),
+  gitConfig: () => git.config(folder),
+  gitConfigSet: (key, value, scope) => git.setConfig(folder, text(key, 100), text(value, 1000), text(scope, 10)),
   gitSwitch: (kind, name) => git.switchTo(folder, text(kind, 10), text(name, 200)),
   marketReadme: (namespace, name) => market.readme(text(namespace, 100), text(name, 100), (address, options) => net.fetch(address, options)),
-  marketIcon: (url) => market.icon(text(url, 600), (address, options) => net.fetch(address, options)),
+  marketIcon: (url) => market.icon(text(url, 600), (address, options) => net.fetch(address, options), pictures, (bytes, type) => {
+    // A photograph of an icon is brought down to the size it is shown at.
+    if (type === "image/svg+xml" || type === "image/gif" || bytes.length < 48 * 1024) return null;
+    const picture = nativeImage.createFromBuffer(bytes);
+    if (picture.isEmpty() || picture.getSize().width <= 160) return null;
+    return { type: "image/png", bytes: picture.resize({ width: 128, quality: "best" }).toPNG() };
+  }),
 
   extSend: (message) => { if (message && typeof message === "object" && typeof message.type === "string" && message.type !== "init") host?.postMessage(message); },
 
@@ -492,23 +536,6 @@ const handlers = {
   termResize: (id, cols, rows) => { try { terminals.get(id)?.resize(whole(cols, 2, 1000), whole(rows, 1, 1000)); } catch {} },
   termKill: (id) => { terminals.get(id)?.kill(); terminals.delete(id); },
 
-  aiSend: async (id, request) => {
-    const provider = text(request?.provider, 40);
-    let key = "";
-    try { key = safeStorage.decryptString(await fs.readFile(user("keys", provider.replace(/\W/g, "") + ".key"))); } catch {}
-    key ||= process.env[provider === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY"] ?? "";
-    await ai.send({ provider, model: text(request.model ?? "", 200), baseUrl: text(request.baseUrl ?? "", 500), messages: Array.isArray(request.messages) ? request.messages : [] }, key, (kind, value) => {
-      if (window && !window.isDestroyed()) window.webContents.send("runes:ai", id, kind, value);
-    }, (url, options) => net.fetch(url, options));
-  },
-  aiSetKey: async (provider, key) => {
-    // On Linux without a keyring Electron falls back to a fixed password, which protects nothing.
-    const weak = process.platform === "linux" && safeStorage.getSelectedStorageBackend?.() === "basic_text";
-    if (!safeStorage.isEncryptionAvailable() || weak) throw new Error("This system has no keychain Runes can use, so the key was not stored. Set ANTHROPIC_API_KEY or OPENAI_API_KEY in the environment instead.");
-    await fs.mkdir(user("keys"), { recursive: true, mode: 0o700 });
-    await fs.writeFile(user("keys", text(provider, 40).replace(/\W/g, "") + ".key"), safeStorage.encryptString(text(key, 500)), { mode: 0o600 });
-  },
-
   checkUpdate: () => (readSettings()["runes.update.check"] === false ? null : update.check(app.getVersion())),
   zoom: (by) => { const w = window.webContents; w.setZoomLevel(by === 0 ? 0 : Math.max(-3, Math.min(5, w.getZoomLevel() + (by > 0 ? 0.5 : -0.5)))); },
   devtools: () => window.webContents.toggleDevTools(),
@@ -531,7 +558,20 @@ const handlers = {
 };
 
 
+// Questions from git, ssh and gpg (a signing key's passphrase, mostly) are asked in the window.
+let asking = null;
+function listenForQuestions() {
+  ask.serve((kind, prompt) => {
+    const title = prompt.trim().replace(/:$/, "") || "Git needs an answer";
+    const where = folder ? "Asked by git, working in " + path.basename(folder) + "." : "Asked by git.";
+    if (kind === "confirm") return question("confirm", title, where, "Yes");
+    return question(kind, title, where + (kind === "secret" ? " It is handed straight to git and is not kept by Runes." : ""));
+  }, { scripts: user("helpers") }).then((served) => { asking = served; git.environment(served.env); },
+    (error) => console.warn("Runes: git cannot ask questions here:", error.message));
+}
+
 app.whenReady().then(() => {
+  listenForQuestions();
   // dist/ is served as runes://app/, so the page can fetch its own files and nothing else.
   protocol.handle("runes", async (request) => {
     const url = new URL(request.url);
@@ -573,6 +613,7 @@ app.whenReady().then(() => {
 
 app.on("window-all-closed", () => {
   unwatch();
+  asking?.close();
   remote?.end();
   for (const term of terminals.values()) { try { term.kill(); } catch {} }
   host?.postMessage({ type: "stop" });

@@ -50,7 +50,8 @@ host.applyEdit = (edit) => {
 };
 
 /** The quick fixes last offered, so the one the user picks can be found again. */
-let offered = [];
+const offered = new Map();
+let lastOffer = 0;
 
 const fire = (name, value) => (host.events[name] ??= new EventEmitter()).fire(value);
 const note = (level, text) => port.send({ type: "note", level, text });
@@ -192,13 +193,90 @@ function saved(m) {
 
 // --- Questions from the editor -------------------------------------------------------------------
 
-const plain = (value) => {
+/**
+ * What a server says about something (a hover, an item's documentation), as Markdown: a
+ * string, a MarkdownString, a { language, value } piece of code, or a list of those.
+ */
+const markdown = (value) => {
   if (value == null) return "";
   if (typeof value === "string") return value;
-  if (Array.isArray(value)) return value.map(plain).filter(Boolean).join("\n\n");
-  if (typeof value.value === "string") return value.language ? value.value : value.value;
-  return "";
+  if (Array.isArray(value)) return value.map(markdown).filter(Boolean).join("\n\n");
+  if (typeof value.value !== "string") return "";
+  if (value.language) return "```" + value.language + "\n" + value.value + "\n```";
+  // LSP's plain text kind: nothing in it is to be read as Markdown.
+  if (value.kind === "plaintext") return value.value.replace(/[\\`*_{}[\]<>()#+\-.!|]/g, "\\$&");
+  return value.value;
 };
+
+const KINDS = ["text", "method", "function", "constructor", "field", "variable", "class", "interface", "module", "property", "unit", "value", "enum", "keyword", "snippet",
+  "color", "file", "reference", "folder", "enum-member", "constant", "struct", "event", "operator", "type-parameter"];
+const edits = (list) => (Array.isArray(list) ? list : []).filter((e) => e?.range && typeof e.newText === "string").slice(0, 200)
+  .map((e) => ({ line: e.range.start.line, col: e.range.start.character, endLine: e.range.end.line, endCol: e.range.end.character, text: e.newText }));
+
+// The items of the last answer, so that one of them can be filled in later (its documentation,
+// the import it needs) when the person rests on it or takes it.
+let served = [];
+
+/** One completion item, as the window needs it. `at` is where the cursor was when it was asked for. */
+function describeItem(item, id, at, resolvable) {
+  const label = typeof item.label === "string" ? item.label : item.label?.label ?? "";
+  const insert = item.insertText ?? item.textEdit?.newText ?? label;
+  const snippet = typeof insert === "object" && insert !== null;
+  // Where the text goes: the server may say (replacing what is typed so far, sometimes more);
+  // if it does not, the window uses the word at the cursor.
+  const range = item.range?.replacing ?? item.range?.inserting ?? item.range ?? item.textEdit?.range ?? item.textEdit?.replace;
+  const here = range && range.start.line === at.line && range.end.line === at.line && range.start.character <= at.character;
+  return {
+    id, label: label.slice(0, 300), snippet, insert: String(snippet ? insert.value : insert).slice(0, 20000),
+    detail: String(item.detail ?? (typeof item.label === "object" ? [item.label.detail, item.label.description].filter(Boolean).join(" ") : "")).slice(0, 300),
+    kind: KINDS[item.kind] ?? "text",
+    start: here ? range.start.character : -1, after: here ? Math.max(0, range.end.character - at.character) : 0,
+    filter: String(item.filterText ?? label).slice(0, 300), sort: String(item.sortText ?? label).slice(0, 300),
+    doc: markdown(item.documentation).slice(0, 6000), edits: edits(item.additionalTextEdits),
+    first: !!item.preselect, resolvable,
+  };
+}
+
+/**
+ * Completion, as VS Code asks for it. `m.ch` is the character just typed when it was not part
+ * of a word: only providers that named it as a trigger are asked, and if none did the answer
+ * is null ("that character means nothing here; carry on"). Otherwise every provider for the
+ * language is asked, and their items are put together.
+ */
+async function completion(m, document, position, token) {
+  const all = (host.providers.completion ?? []).filter((p) => shim.matches(p.selector, document) > 0);
+  const asked = m.ch ? all.filter((p) => p.rest.includes(m.ch)) : all;
+  if (m.ch && !asked.length) return null;
+  const context = m.ch ? { triggerKind: 1, triggerCharacter: m.ch } : { triggerKind: 0, triggerCharacter: undefined };
+  const fresh = [];
+  let incomplete = false;
+  await Promise.all(asked.map(async ({ provider }) => {
+    try {
+      const found = await provider.provideCompletionItems(document, position, token, context);
+      incomplete ||= !!found?.isIncomplete;
+      for (const item of Array.isArray(found) ? found : found?.items ?? []) if (item) fresh.push({ item, provider });
+    } catch (e) {
+      note("log", `[Extension Host] completion failed: ${e?.message ?? e}`);
+    }
+  }));
+  served = fresh.slice(0, 3000);
+  return { incomplete: incomplete || fresh.length > served.length, items: served.map((s, id) => describeItem(s.item, id, position, typeof s.provider.resolveCompletionItem === "function")) };
+}
+
+/** Fills in one item of the last answer: what the server left for later. */
+async function resolveCompletion(id) {
+  const entry = served[id];
+  if (!entry) return null;
+  try {
+    if (!entry.resolved && typeof entry.provider.resolveCompletionItem === "function") {
+      entry.item = (await entry.provider.resolveCompletionItem(entry.item, new CancellationTokenSource().token)) ?? entry.item;
+      entry.resolved = true;
+    }
+  } catch (e) {
+    note("log", `[Extension Host] resolving a completion failed: ${e?.message ?? e}`);
+  }
+  return { detail: String(entry.item.detail ?? "").slice(0, 300), doc: markdown(entry.item.documentation).slice(0, 6000), edits: edits(entry.item.additionalTextEdits) };
+}
 
 async function codeActions(m, document) {
   const range = new Range(new Position(m.line, m.col), new Position(m.endLine ?? m.line, m.endCol ?? m.col));
@@ -207,24 +285,35 @@ async function codeActions(m, document) {
     for (const d of collection.get(document.uri) ?? []) if (d.range.intersection?.(range) || d.range.start.line === m.line) diagnostics.push(d);
   }
   const token = new CancellationTokenSource().token;
-  offered = [];
+  const found = [];
   const providers = (host.providers.registerCodeActionsProvider ?? []).filter((p) => shim.matches(p.selector, document) > 0);
   for (const { provider } of providers) {
     try {
-      const found = await provider.provideCodeActions(document, range, { diagnostics, only: undefined, triggerKind: 1 }, token);
-      for (const action of found ?? []) {
+      const answered = await provider.provideCodeActions(document, range, { diagnostics, only: undefined, triggerKind: m.quiet ? 2 : 1 }, token);
+      for (const action of answered ?? []) {
         if (!action?.title || action.disabled) continue;
-        offered.push({ action, provider });
+        found.push({ action, provider });
       }
     } catch (e) {
       note("log", `[Extension Host] code actions failed: ${e?.message ?? e}`);
     }
   }
-  return offered.slice(0, 40).map((o, id) => ({ id, title: String(o.action.title).slice(0, 200), kind: o.action.kind?.value ?? "" }));
+  // The fix a server would choose itself comes first, then fixes, then the rest as given.
+  const weight = (o) => (o.action.isPreferred ? 0 : (o.action.kind?.value ?? "quickfix").startsWith("quickfix") ? 1 : 2);
+  const listed = found.map((o, i) => [o, i]).sort((a, b) => weight(a[0]) - weight(b[0]) || a[1] - b[1]).map(([o]) => o).slice(0, 60);
+  // Each gets a number of its own that stays good while later questions are asked (the light
+  // bulb asks again whenever the cursor rests); only the oldest are forgotten.
+  const out = listed.map((o) => {
+    const id = ++lastOffer;
+    offered.set(id, o);
+    return { id, title: String(o.action.title).slice(0, 200), kind: String(o.action.kind?.value ?? (typeof o.action.command === "string" ? "command" : "quickfix")), preferred: !!o.action.isPreferred };
+  });
+  for (const id of offered.keys()) { if (offered.size <= 400) break; offered.delete(id); }
+  return out;
 }
 
 async function applyAction(id) {
-  const entry = offered[id];
+  const entry = offered.get(id);
   if (!entry) return "That fix is no longer on offer.";
   let action = entry.action;
   try {
@@ -244,6 +333,7 @@ async function applyAction(id) {
 
 async function answer(m) {
   if (m.kind === "applyAction") return applyAction(m.line);
+  if (m.kind === "resolveCompletion") return resolveCompletion(m.line);
   if (m.kind === "command") {
     const run = host.commands.get(m.path);
     if (!run) return `No extension provides the command ${m.path}`;
@@ -254,22 +344,12 @@ async function answer(m) {
   if (m.kind === "codeActions") return codeActions(m, document);
   const position = new Position(m.line, m.col);
   const token = new CancellationTokenSource().token;
+  if (m.kind === "completion") return completion(m, document, position, token);
   const providers = (host.providers[m.kind] ?? []).filter((p) => shim.matches(p.selector, document) > 0);
   for (const { provider } of providers) {
     try {
-      if (m.kind === "completion") {
-        const found = await provider.provideCompletionItems(document, position, token, { triggerKind: 0 });
-        const items = Array.isArray(found) ? found : found?.items ?? [];
-        if (!items.length) continue;
-        return items.slice(0, 200).map((i) => {
-          const label = typeof i.label === "string" ? i.label : i.label?.label ?? "";
-          const insert = i.insertText ?? i.textEdit?.newText ?? label;
-          const snippet = typeof insert === "object";
-          return { label, detail: i.detail ?? (typeof i.label === "object" ? i.label.description ?? "" : ""), insert: snippet ? insert.value : insert, snippet };
-        });
-      }
       if (m.kind === "hover") {
-        const text = plain((await provider.provideHover(document, position, token))?.contents).replace(/```\w*\n?/g, "").trim();
+        const text = markdown((await provider.provideHover(document, position, token))?.contents).trim();
         if (text) return text;
       }
       if (m.kind === "definition") {

@@ -1,6 +1,7 @@
 import gleam/int
 import gleam/json
 import gleam/list
+import gleam/option
 import gleam/string
 import gleeunit
 import gleeunit/should
@@ -459,4 +460,54 @@ pub def inside_a_folder_is_not_beside_it_test() {
   // A folder whose name merely starts the same way is another folder.
   should.be_false(app.within("/shop/src-old/a.txt", "/shop/src"))
   should.be_false(app.within("/shop", "/shop/src"))
+}
+
+// --- Suggestions ----------------------------------------------------------------------------------
+
+def offered(label: String, insert: String, start: Int, sort: String, id: Int) -> doc.Item {
+  doc.Item(label, "", insert, False, "function", start, 0, label, sort, "", id, [])
+}
+
+def labels(found: option.Option(doc.Completion)) -> List(String) {
+  case found {
+    option.Some(c) -> list.map(c.items, fn(i) { i.label })
+    option.None -> []
+  }
+}
+
+pub def suggestions_fit_what_is_typed_from_where_each_starts_test() {
+  // A server's items for "  io.pr|": each replaces from column 2, and is matched from there.
+  all = [
+    offered("int.parse", "int.parse", 2, "4", 1),
+    offered("io.println", "io.println", 2, "2", 2),
+    offered("io.print", "io.print", 2, "1", 3),
+    offered("a", "a", 2, "0", 4),
+  ]
+  at = text(["  io.pr"], Pos(0, 7))
+  should.equal(labels(doc.suggest(at, all, False)), ["io.print", "io.println"])
+  // Nothing typed yet: all of them, in the server's own order.
+  should.equal(labels(doc.suggest(text(["  "], Pos(0, 2)), all, False)), ["a", "io.print", "io.println", "int.parse"])
+  // Letters in order, starting at the start of a word: "ipl" finds io.println, not int.parse.
+  should.equal(labels(doc.suggest(text(["  ipl"], Pos(0, 5)), all, False)), ["io.println"])
+  // Nothing fits: no list at all.
+  should.equal(labels(doc.suggest(text(["  zz"], Pos(0, 4)), all, False)), [])
+}
+
+pub def a_thing_offered_twice_is_listed_once_and_words_give_way_to_a_server_test() {
+  snippet = doc.Item("defc", "Function clauses", "defc $1", True, "snippet", 0, 0, "defc", "~1defc", "", -1, [])
+  word = doc.Item("defined", "", "defined", False, "word", 0, 0, "defined", "~2defined", "", -1, [])
+  at = text(["def"], Pos(0, 3))
+  should.equal(labels(doc.suggest(at, [snippet, snippet, word], False)), ["defc", "defined"])
+  // Once a server has answered, words of the file are no longer offered; snippets still are.
+  served = offered("define", "define", 0, "1", 7)
+  should.equal(labels(doc.suggest(at, [served, snippet, snippet, word], False)), ["defc", "define"])
+}
+
+pub def taking_a_suggestion_replaces_what_was_typed_of_it_test() {
+  at = text(["  io.pr rest"], Pos(0, 7))
+  picked = doc.suggest(at, [offered("io.println", "io.println", 2, "1", 1)], False)
+  should.equal(option.map(picked, fn(c) { doc.accept(at, c).lines }), option.Some(["  io.println rest"]))
+  // One that says it replaces what follows the cursor too.
+  over = doc.Item("io.println", "", "io.println", False, "function", 2, 5, "io.println", "1", "", 1, [])
+  should.equal(option.map(doc.suggest(at, [over], False), fn(c) { doc.accept(at, c).lines }), option.Some(["  io.println"]))
 }

@@ -89,8 +89,20 @@ try {
   assert.equal(definition?.line, 2);
   console.log(`ok  go to definition: line ${definition.line + 1}`);
 
-  const completion = await ask("completion", 7, 6);
+  // After "int." on line 8: asked as VS Code asks, with the dot as the trigger character.
+  const answer = await ask("completion", 7, 6, { ch: "." });
+  const completion = answer?.items;
   assert.ok(Array.isArray(completion) && completion.length > 0);
+  const parse = completion.find((c) => c.label === "int.parse");
+  assert.ok(parse, "int.parse is among them");
+  // Each item says where its text starts, what it is matched by, and what it is.
+  assert.equal(parse.start, 2);
+  assert.equal(parse.kind, "function");
+  assert.ok(parse.filter && parse.sort && parse.doc.includes("```"), "filter text, sort text and Markdown documentation come through");
+  // A character no provider named as a trigger gets no answer at all: the list on show is to be left alone.
+  assert.equal(await ask("completion", 7, 6, { ch: "!" }), null);
+  const more = await ask("resolveCompletion", parse.id, 0);
+  assert.ok(more && Array.isArray(more.edits));
   console.log(`ok  completion: ${completion.length} items, e.g. ${completion.slice(0, 3).map((c) => c.label).join(", ")}`);
 
   host.send({ type: "changed", path: file, version: 4, text: good.replace("  n * 2", "      n*2") });

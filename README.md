@@ -6,12 +6,114 @@
 
 <p align="center"><b>An elegant, minimal code editor.</b><br><i>Carve your code.</i></p>
 
+<p align="center"><b>1.1.0</b> · Apache-2.0 · Linux, Windows, macOS</p>
+
 Languages, themes, file icons and language servers all come from VS Code extensions (`.vsix`);
 Runes has none of its own. Apache-2.0.
 
 Runes ships small. Built in are syntax colouring for about thirty languages (Bea and Gleam
 among them), two themes (Runes Void, dark, and Runes Glacier, light) and file icons. Language servers and everything else are installed
 from the marketplace or from a `.vsix` file.
+
+## New in 1.1.0: Rune Canvas
+
+Drawings that live in the project, next to the code they explain. A file ending in `.rux`
+opens as a board to draw on; `docs/architecture.rux` in this repository is one, of Runes
+itself.
+
+- **Start one** with `Rune Canvas: New Drawing…` in the command palette, or `New Drawing…` in
+  the explorer's menu. It is a file like any other: it is saved with Ctrl+S, committed,
+  compared and travelled through time like the rest.
+- **Draw** with the tools along the top, each with a key: select `V`, move the board `H`,
+  rectangle `R`, diamond `D`, ellipse `O`, arrow `A`, line `L`, pen `P`, text `T`, eraser
+  `E` (or the digits beside them). Shift keeps squares, circles and straight angles. Double
+  click to write: on the board, inside a shape, or on an arrow.
+- **Arrows hold on.** Drag an arrow's end onto a shape and it is tied there; move the shape
+  and the arrow follows.
+- **Point at the code.** Give an element a link, such as `src/shop.bea:12`, and Ctrl+click
+  on it opens that file at that line. Links stay inside the open folder.
+- **Looks**: ten colours that are stored by name and drawn to suit the theme, so one drawing
+  reads well in the dark and in the light; three widths; solid, dashed or dotted; a line
+  drawn by hand or an exact one.
+- **Getting about**: the wheel moves the board, Ctrl+wheel zooms, Space and drag pans,
+  Shift+1 fits the drawing to the window, `G` shows a grid that things snap to, `?` lists
+  the keys. Tab goes from element to element, and the arrow keys nudge, so a board can be
+  worked without a pointer.
+- **Out of Runes**: save a drawing as PNG or SVG, or copy it as PNG, from the button at the
+  top right. The button beside it shows the file as text.
+
+The file is plain JSON, one element to a line, with usual values left out, so a change to a
+drawing is a few changed lines in a diff:
+
+    {
+      "rune": "canvas",
+      "version": 1,
+      "elements": [
+        {"id":"shop","type":"rect","x":0,"y":0,"w":160,"h":80,"text":"Shop","fill":"green","link":"src/shop.bea"},
+        {"id":"till","type":"ellipse","x":300,"y":0,"w":140,"h":80,"text":"Till"},
+        {"id":"a1","type":"arrow","x":166,"y":40,"w":128,"h":0,"from":"shop","to":"till","text":"asks"}
+      ]
+    }
+
+Element types are `rect`, `diamond`, `ellipse`, `line`, `arrow`, `draw` and `text`. Where the
+board is moved to and how far it is zoomed are not written to the file, so looking at a
+drawing never changes it.
+
+Not in this release: rotation, grouping, pictures inside a drawing, arrows with bends, and a
+handwriting font (text is set in the editor's interface font).
+
+## 1.0.0: the first stable release
+
+Runes 1.0.0 is the first release meant to be relied on. From here on versions follow
+[semantic versioning](https://semver.org): settings, key bindings, the pie menu's format and
+the files Runes keeps in its profile folder stay compatible within 1.x, and anything that has
+to break waits for 2.0. [CHANGELOG.md](CHANGELOG.md) has every release.
+
+What 1.0.0 adds to 0.7.0:
+
+- **Completion as a language server means it.** The list now works the way VS Code's does,
+  for any language:
+  - every item is matched from where the server says its text starts, against the server's
+    own filter text, so `io.prin` finds `io.println`, `int.` lists what `int` has, and a
+    module path keeps its list through the `/`;
+  - the server is asked as you start a word and at the characters it names as triggers, not
+    only once other words happen to match, so types and imported names turn up;
+  - the list scrolls, and no longer stops at a dozen; ties go by the server's order;
+  - an item's other edits are made with it, so taking a function from a module that is not
+    imported adds the import (the cursor stays where it was writing); servers that work
+    those out only when an item is taken are asked then;
+  - what the chosen item is for is shown beside the list, as rendered Markdown;
+  - the same snippet from two extensions is offered once, Backspace keeps the list, and
+    words of the file step aside once a server has answered.
+- **Hovers are drawn.** What a server says about a name is rendered as the Markdown it is:
+  headings, lists, links, and code coloured as the file's language.
+- **The light bulb.** When an extension has something to offer for the line the cursor is on
+  (a fix, a refactoring, a source action), a bulb appears at the line. Click it, or press
+  `Ctrl+.`, for the list; each entry says what kind it is, and the server's preferred fix
+  comes first. Actions whose edit is worked out only when chosen are resolved then.
+- **Blame.** The status bar says who last changed the line the cursor is on, and how long
+  ago, with the commit's subject beside it. It follows unsaved edits (a line just typed is
+  "Not committed yet"), a click opens what that commit changed, and
+  `git.blame.statusBarItem.enabled` turns it off.
+- **Signed commits.** When git signs a commit and the key needs a passphrase, Runes asks for
+  it in the window, hands it to git and keeps nothing. GPG keys and SSH signing keys both
+  work; a system that shows its own passphrase window, or an agent that already holds the
+  key, is left to do so.
+- **Git settings.** Settings has a Git section for your name and email, whether commits are
+  signed, with what kind of key, and which key, for one repository or for all. These are
+  git's own settings, so the terminal sees the same. The gear in Source Control goes there,
+  and a commit that fails for want of a name or a key says so in plain words.
+- **A language's own icon.** An extension can give its language an icon
+  (`contributes.languages[].icon`). Runes now uses it for files the icon theme has nothing
+  particular for, so `.bea` files carry Bea's icon out of the box.
+- **Marketplace pictures.** Many icons never appeared because the registry's file store calls
+  them "a download" rather than "a picture". Runes now goes by the bytes, and keeps each
+  picture on disk once fetched, so the list fills at once the second time.
+- **Commits by their short names.** A session's two fields show `57da4bc^` and `57da4bc`
+  rather than forty letters each, so "the one before it" is no longer pushed out of sight.
+- **No AI chat.** It was removed, with its settings, its stored key and its network access.
+  Runes now talks to the network for three things only: the marketplace, the update check
+  and the machines you connect to over SSH. It may come back when it can do more than chat.
 
 ## New in 0.7.0
 
@@ -200,21 +302,21 @@ it, still wait for the machine.
 |---|---|
 | Editing | Several cursors; selection, undo/redo, auto-indent, auto-closing pairs, comment toggle, move and copy lines, snippets |
 | Languages | Syntax for about thirty languages, from VS Code's own grammar extensions, plus Bea and Gleam. `extensions/bundled.json` lists them |
-| Language servers | From installed extensions: diagnostics (squiggles, Problems panel, F8), completion, hover, go to definition (F12), format document (Shift+Alt+F) |
+| Language servers | From installed extensions: diagnostics (squiggles, Problems panel, F8); completion with trigger characters, the server's ranges and filters, documentation and automatic imports; hovers drawn as Markdown; go to definition (F12); format document (Shift+Alt+F); fixes and refactorings under a light bulb and `Ctrl+.` |
 | Tiling | Split right and down, drag a tab or a file to an edge to split, drag sashes to resize, maximise a group, side bar on either side, bottom panel |
 | Minimap | Blocks rather than letters, a draggable viewport, error and warning marks |
 | Search | Find and replace in the file (regex, case, whole word); search and replace across the folder |
 | Terminal | Any number, in the panel or as tabs among the editors, named and searchable, running your shell (`terminal.shell` to choose another) |
 | Pie menu | Hold the right mouse button, or Ctrl+Shift+Space; slices and submenus are edited in Settings (`runes.pie.items`) |
-| AI chat | Claude or ChatGPT with your own key, streaming, optionally with the open file attached |
 | Themes | Runes Void (dark) and Runes Glacier (light); any VS Code colour or icon theme can be installed |
 | Explorer | New file and folder, rename, delete (to the trash), copy path; follows changes made by other programs; files coloured by how they stand with git |
-| Source control | Stage, unstage, discard, commit, switch branch; change marks in the gutter; comparison of commits, branches and files, inline or side by side, kept as sessions; time travel through a file; a graph of every branch with a calendar |
+| Source control | Stage, unstage, discard, commit (signed too), switch branch; blame in the status bar; name, email and signing in Settings; change marks in the gutter; comparison of commits, branches and files, inline or side by side, kept as sessions; time travel through a file; a graph of every branch with a calendar |
 | SSH | Named sessions; the explorer, search, source control and terminals on the other machine, with nothing installed there |
 | Marketplace | Open VSX, searched and installed from inside the editor |
 | Font | EnvyCodeR Nerd Font, bundled (SIL Open Font License) |
 | Settings | A settings page (Ctrl+,) over `settings.json`; `keybindings.json` in VS Code's format |
 | Zoom | Ctrl+wheel changes the text size; Ctrl+= and Ctrl+- zoom the window |
+| Rune Canvas | Drawings as `.rux` files in the project: shapes, tied arrows, labels, links to files, a hand-drawn or exact line; saved as readable JSON; PNG and SVG out |
 | Markdown | A built-in preview (Ctrl+Shift+V), also used for extension readmes |
 | Updates | Checks the latest GitHub release of one repository and links to it. Set `REPOSITORY` in `shell/update.cjs` |
 
@@ -260,10 +362,13 @@ extensions (tree views, webviews, source control, debugging) load but have nowhe
     src/runes/app.bea         the model and update
     src/runes/view.bea        everything drawn (Lustre)
     src/runes_ffi.mjs         the window's edge: keys, TextMate, minimap and terminal elements
+    src/runes_canvas.mjs      Rune Canvas: a drawing as data. Reading, checking, writing, geometry
+    src/runes_canvas_view.mjs Rune Canvas: the board, an element of the page
     shell/main.cjs            the Electron shell: one sandboxed window and what it may ask for
     shell/exthost/            the extension host process and its `vscode` module
-    shell/files.cjs ai.cjs update.cjs vsix.cjs git.cjs market.cjs
-                              search, AI, update check, VSIX reading, git, Open VSX
+    shell/files.cjs update.cjs vsix.cjs git.cjs market.cjs ssh.cjs
+                              search, update check, VSIX reading, git, Open VSX, SSH
+    shell/ask.cjs helpers/    how git, ssh and gpg put their questions to the window
     extensions/               extension sources; bundled.json names the ones that ship.
                               prebuilt/ holds the real Bea and Gleam packages for the tests
 
@@ -272,8 +377,8 @@ Node and Electron glue and because extensions expect a Node `require("vscode")`.
 
 ## Tests
 
-    npm test                           # Bea unit tests, shell unit tests, extension host test
-    xvfb-run -a npm run test:app       # 56 end-to-end checks of the real app (Playwright)
+    npm test                           # Bea unit tests, shell and canvas unit tests, extension host test
+    xvfb-run -a npm run test:app       # 71 end-to-end checks of the real app (Playwright)
     RUNES_ELECTRON=out/Runes-linux-x64/Runes xvfb-run -a npm run test:app   # the packaged app
 
 `npm run test:app` needs Playwright (`npm i -D playwright`), and `--no-sandbox` is passed
@@ -282,7 +387,7 @@ because CI containers run as root. See SECURITY.md for the security review.
 ## Not yet
 
 - Code folding, bracket matching, word wrap.
-- Rename, references, code actions, signature help, semantic highlighting (the providers are
+- Rename, references, signature help, semantic highlighting (the providers are
   registered by extensions already; the editor does not call them yet).
 - Floating windows. Tiles split, resize, maximise and move, but stay inside the one window.
 - `.sublime-syntax` grammars. TextMate grammars (`.tmLanguage`, JSON or plist) are supported,

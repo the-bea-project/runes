@@ -42,19 +42,48 @@ async function download(namespace, name, fetcher = fetch) {
   return bytes;
 }
 
-const IMAGES = { "image/png": 1, "image/jpeg": 1, "image/webp": 1, "image/gif": 1, "image/svg+xml": 1 };
+/**
+ * What kind of picture some bytes are, by their first few: the registry's file store often
+ * says only "application/octet-stream", so what it says is not what is gone by.
+ */
+function pictureType(bytes) {
+  const starts = (...codes) => codes.every((code, i) => bytes[i] === code);
+  if (starts(0x89, 0x50, 0x4e, 0x47)) return "image/png";
+  if (starts(0xff, 0xd8, 0xff)) return "image/jpeg";
+  if (starts(0x47, 0x49, 0x46, 0x38)) return "image/gif";
+  if (starts(0x52, 0x49, 0x46, 0x46) && bytes.subarray(8, 12).toString("latin1") === "WEBP") return "image/webp";
+  const head = bytes.subarray(0, 600).toString("utf8").trimStart().toLowerCase();
+  if (head.startsWith("<svg") || (head.startsWith("<?xml") && head.includes("<svg"))) return "image/svg+xml";
+  return "";
+}
 
-/** An extension's icon as a data: address the window may show. "" when there is none worth showing. */
-async function icon(url, fetcher = fetch) {
+/**
+ * An extension's icon as a data: address the window may show. "" when there is none worth
+ * showing. `cache` ({ get(url), set(url, address) }, both may be async) keeps what was
+ * fetched, so a picture is asked of the registry once and is there at once ever after.
+ * Up to 4 MB is read; what is shown and kept is at most 1 MB.
+ */
+async function icon(url, fetcher = fetch, cache = null, shrink = null) {
   const base = registry();
   if (typeof url !== "string" || !url.startsWith(base + "/")) return "";
   try {
-    const response = await fetcher(url, { signal: AbortSignal.timeout(10000) });
+    const kept = await cache?.get(url);
+    if (typeof kept === "string" && kept.startsWith("data:image/")) return kept;
+  } catch {}
+  try {
+    const response = await fetcher(url, { signal: AbortSignal.timeout(20000) });
     if (!response.ok) return "";
-    const type = String(response.headers.get("content-type") ?? "").split(";")[0].trim();
-    const bytes = Buffer.from(await response.arrayBuffer());
-    if (!IMAGES[type] || bytes.length > 600 * 1024) return "";
-    return `data:${type};base64,${bytes.toString("base64")}`;
+    let bytes = Buffer.from(await response.arrayBuffer());
+    let type = pictureType(bytes);
+    if (!type || bytes.length > 4 * 1024 * 1024) return "";
+    // Some icons are far larger than the corner they are shown in: `shrink(bytes, type)` may
+    // hand back a smaller { bytes, type }.
+    const smaller = shrink?.(bytes, type);
+    if (smaller) ({ bytes, type } = smaller);
+    if (bytes.length > 1024 * 1024) return "";
+    const address = `data:${type};base64,${bytes.toString("base64")}`;
+    try { await cache?.set(url, address); } catch {}
+    return address;
   } catch { return ""; }
 }
 

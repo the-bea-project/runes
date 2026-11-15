@@ -6,13 +6,8 @@ const call = (name) => (...args) => ipcRenderer.invoke("runes:" + name, ...args)
 const direct = ["info", "root", "pickFolder", "readDir", "walk", "readFile", "writeFile", "saveAs", "userFiles", "search",
   "replaceInFiles", "extensions", "installExtension", "removeExtension", "checkUpdate", "zoom", "devtools", "openExternal", "openLink",
   "marketSearch", "marketDownload", "gitStatus", "gitLog", "gitShow", "gitStage", "gitUnstage", "gitCommit", "gitFile", "gitChanged", "gitRefs", "gitSwitch", "gitDays", "gitTree", "gitHistory", "promptAnswer", "sshSessions", "sshSave", "sshRemove", "sshImport", "sshForget", "sshConnect", "sshOpen", "sshDisconnect", "marketIcon", "marketReadme", "fonts", "fontAdd", "fontRemove",
-  "fileCreate", "fileRename", "fileRemove", "fileReveal", "watchDirs", "gitDiscard"];
+  "fileCreate", "fileRename", "fileRemove", "fileReveal", "watchDirs", "gitDiscard", "gitBlame", "gitConfig", "gitConfigSet", "saveImage"];
 
-const chats = new Map();
-ipcRenderer.on("runes:ai", (_event, id, kind, text) => {
-  chats.get(id)?.(kind, text);
-  if (kind !== "delta") chats.delete(id);
-});
 let onExtension = () => {};
 ipcRenderer.on("runes:ext", (_event, message) => onExtension(message));
 const terminalData = new Map();
@@ -41,9 +36,5 @@ contextBridge.exposeInMainWorld("runesHost", {
     kill: (id) => { terminalData.delete(id); return ipcRenderer.invoke("runes:termKill", id); },
     onData: (id, listener) => { terminalData.set(id, listener); },
     onExit: (listener) => { onTerminalExit = listener; },
-  },
-  ai: {
-    send: (id, request, listener) => { chats.set(id, listener); return ipcRenderer.invoke("runes:aiSend", id, request); },
-    setKey: (provider, key) => ipcRenderer.invoke("runes:aiSetKey", provider, key),
   },
 });

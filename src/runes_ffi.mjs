@@ -2,6 +2,7 @@
 // tokenizing, VSIX archives, the minimap and terminal elements, and the host
 // (the desktop shell, or an in-browser stand-in).
 import { toList } from "../prelude.mjs";
+import "./runes_canvas_view.mjs";
 
 // The npm packages are loaded when the editor boots, not when this file is read,
 // so that `bea run` in plain Node can still say how Ink is meant to be started.
@@ -142,6 +143,7 @@ let bound = new Set();
 /** Chords that still reach the workbench while a terminal has the keyboard. */
 const THROUGH_TERMINAL = /^(ctrl\+(`|j|b|p|shift\+p|shift\+`|shift\+e|shift\+f|shift\+x|shift\+m|,|\\|1|2|3|shift\+space|alt\+m))$|^f1$/;
 
+const CANVAS_KEYS = /^ctrl\+(z|y|a|d|c|x|v|\]|\[|0|=|\+|-|shift\+z|enter|arrow\w+|shift\+arrow\w+|backspace|delete|home|end)$/;
 const FIELD_KEYS = /^(ctrl\+(a|z|y|c|x|v|d|\/|space|shift\+z|backspace|delete|home|end|arrow\w+|shift\+arrow\w+)|alt\+arrow\w+|shift\+alt\+f|f2|f8|shift\+f8|f12)$/;
 
 export function set_chords(chords) {
@@ -159,6 +161,9 @@ export function listen(on_key, on_text, on_paste, on_resize, on_drop, on_zoom, o
     const chord = chordOf(e);
     const inTerminal = !!e.target.closest?.("runes-terminal");
     if (inTerminal && !THROUGH_TERMINAL.test(chord)) return;
+    // A drawing has keys of its own (tools, undo, the clipboard); the rest of the editor's
+    // commands, those with Ctrl or Alt that the drawing does not use, still work over it.
+    if (e.target.closest?.("runes-canvas") && !(/^(ctrl|alt|f\d)/.test(chord) && !CANVAS_KEYS.test(chord))) return;
     const editor = e.target === input();
     // In any other text field these keys belong to the field: select all, undo, clipboard, moving about.
     const field = !editor && e.target.matches?.("input:not([type=checkbox]):not([type=range]), textarea, select");
@@ -268,6 +273,9 @@ export function focus_stem(id) {
 }
 export function focus(id) {
   const go = () => {
+    // Where a drawing is shown in place of text, the keyboard goes to the drawing.
+    const board = id === "runes-input" && document.querySelector(".group.focused runes-canvas");
+    if (board) { if (!board.contains(document.activeElement)) board.focus({ preventScroll: true }); return true; }
     const el = document.getElementById(id);
     if (!el) return false;
     el.focus({ preventScroll: true });
@@ -515,6 +523,7 @@ function unpack(bytes, builtin) {
   const json = JSON.parse(manifest);
   const id = `${json.publisher ?? "unknown"}.${json.name}`;
   extensions.set(id, { files, builtin });
+  languageIcons = null;
   return [id, manifest, builtin];
 }
 
@@ -558,6 +567,7 @@ async function install(name, bytes, done) {
     const refused = await host.installExtension(id + ".vsix", bytes);
     if (refused) {
       extensions.delete(id);
+      languageIcons = null;
       return done("", "", refused);
     }
     done(id, manifest, "");
@@ -668,6 +678,7 @@ export function remove_font(family) {
 
 export function uninstall(id) {
   extensions.delete(id);
+  languageIcons = null;
   host.removeExtension(id + ".vsix");
 }
 
@@ -889,6 +900,37 @@ export function use_theme(id, path, ui) {
 
 let icons = null;
 
+// A language extension can give its language an icon of its own (`contributes.languages[].icon`).
+// It is used for files of that language the icon theme has nothing particular for. Worked out
+// when first asked for, and again whenever an extension comes or goes. One that the person
+// installed wins over one that ships with Runes.
+let languageIcons = null;
+function languageIcon(language) {
+  if (!languageIcons) {
+    languageIcons = new Map();
+    for (const [id, extension] of [...extensions].sort((a, b) => Number(b[1].builtin) - Number(a[1].builtin))) {
+      let json;
+      try { json = JSON.parse(relaxed(strFromU8(extension.files.get("package.json")))); } catch { continue; }
+      for (const language of json.contributes?.languages ?? []) {
+        const icon = language?.icon;
+        if (typeof language?.id !== "string" || !icon) continue;
+        const paths = { light: icon.light ?? icon.dark, dark: icon.dark ?? icon.light };
+        if (typeof paths.light === "string" && typeof paths.dark === "string") languageIcons.set(language.id, { id, paths, urls: {} });
+      }
+    }
+  }
+  const found = languageIcons.get(language);
+  if (!found) return "";
+  const kind = document.documentElement.dataset.kind === "light" ? "light" : "dark";
+  if (found.urls[kind] === undefined) {
+    const file = tidy(found.paths[kind]);
+    const data = extensions.get(found.id)?.files.get(file);
+    const type = file.endsWith(".svg") ? "image/svg+xml" : file.endsWith(".png") ? "image/png" : "";
+    found.urls[kind] = data && type ? URL.createObjectURL(new Blob([data], { type })) : "";
+  }
+  return found.urls[kind];
+}
+
 /** Switch the file icon theme to one an extension contributes. */
 export function use_icon_theme(id, path) {
   icons = null;
@@ -910,7 +952,8 @@ export function use_icon_theme(id, path) {
 /** The icon of a file or folder: [glyph, colour, font family, image address]. */
 export function icon(name, folder, open, language) {
   const none = ["", "", "", ""];
-  if (!icons) return none;
+  const own = !folder && language ? languageIcon(language) : "";
+  if (!icons) return own ? ["", "", "", own] : none;
   const t = icons.json;
   const lower = name.toLowerCase();
   let key;
@@ -921,7 +964,10 @@ export function icon(name, folder, open, language) {
     for (let dot = lower.indexOf("."); !key && dot !== -1; dot = lower.indexOf(".", dot + 1)) {
       key = t.fileExtensions?.[lower.slice(dot + 1)];
     }
-    key ??= t.languageIds?.[language] ?? t.file;
+    key ??= t.languageIds?.[language];
+    // Nothing in the theme for this file in particular: its language's own icon, if it has one.
+    if (!key && own) return ["", "", "", own];
+    key ??= t.file;
   }
   const def = key && t.iconDefinitions?.[key];
   if (!def) return none;
@@ -1373,9 +1419,21 @@ function ask(kind, path, line, col, done, more = {}) {
   host.ext.send({ type: "request", id, kind, path, line, col, ...more });
 }
 
-/** The quick fixes extensions offer for a stretch of a file: a list of [id, title]. */
+const actionKind = (a) => (a.preferred ? "preferred fix" : a.kind.startsWith("refactor") ? "refactor" : a.kind.startsWith("source") ? "source action" : a.kind === "command" ? "command" : "quick fix");
+/** What extensions offer to do for a stretch of a file (fixes, refactorings, source actions): a list of [id, title, kind in words]. */
 export function lsp_actions(path, line, col, endLine, endCol, done) {
-  ask("codeActions", path, line, col, (found) => done(toList((found ?? []).map((a) => [a.id, a.title]))), { endLine, endCol });
+  ask("codeActions", path, line, col, (found) => done(toList((found ?? []).map((a) => [a.id, a.title, actionKind(a)]))), { endLine, endCol });
+}
+// The light bulb: whether anything is on offer where the cursor has come to rest. Asked only
+// once it has rested, and an answer for a place the cursor has left is dropped.
+let bulbTimer = 0, bulbTurn = 0;
+export function lsp_actions_soon(path, line, col, endLine, endCol, done) {
+  clearTimeout(bulbTimer);
+  const turn = ++bulbTurn;
+  if (!host.ext) return;
+  bulbTimer = setTimeout(() => {
+    ask("codeActions", path, line, col, (found) => { if (turn === bulbTurn) done((found ?? []).length, (found ?? []).some((a) => a.kind.startsWith("quickfix") || a.preferred)); }, { endLine, endCol, quiet: true });
+  }, 350);
 }
 export function lsp_apply_action(id, done) {
   ask("applyAction", "", id, 0, (problem) => done(problem ?? ""));
@@ -1385,12 +1443,88 @@ export function ext_command(command, done) {
   ask("command", command, 0, 0, (problem) => done(problem ?? ""));
 }
 
-export function lsp_complete(path, line, col, done) {
-  ask("completion", path, line, col, (items) =>
-    done(toList((items ?? []).slice(0, 60).map((i) => [i.label, i.detail ?? "", i.insert ?? i.label, !!i.snippet]))));
+const editRows = (edits) => toList((edits ?? []).map((e) => [e.line, e.col, e.endLine, e.endCol, e.text]));
+/**
+ * Asks the language's extensions what could be written here. `ch` is the character just typed
+ * when it is not part of a word ("" otherwise). `done(known, incomplete, items)`: `known` is
+ * false when that character means nothing to them, and the list on show should stay as it is.
+ * An item is [label, detail, insert, snippet, kind, start, after, filter, sort, doc, id, edits].
+ */
+export function lsp_complete(path, line, col, ch, done) {
+  if (!host.ext) return;
+  ask("completion", path, line, col, (answer) => {
+    if (!answer) return done(false, false, toList([]));
+    done(true, !!answer.incomplete, toList(answer.items.map((i) =>
+      [i.label, i.detail, i.insert, i.snippet, i.kind, i.start, i.after, i.filter, (i.first ? "\u0000" : "") + i.sort, i.doc, i.id, editRows(i.edits)])));
+  }, { ch });
 }
+/** What a server left for later about one item: `done(detail, doc, edits)`. Asked once it has been rested on. */
+let resolveTimer = 0;
+export function lsp_resolve(id, wait, done) {
+  clearTimeout(resolveTimer);
+  const go = () => ask("resolveCompletion", "", id, 0, (found) => found && done(found.detail ?? "", found.doc ?? "", editRows(found.edits)));
+  if (wait) resolveTimer = setTimeout(go, 120); else go();
+}
+
+/**
+ * Which of the items fit what has been typed, best first. Each item says where its text starts
+ * on the line (`start`); what stands between there and the cursor is matched against the
+ * item's `filter` text the way VS Code does it: the letters must appear in order, the first of
+ * them at the start of a word in the item, and an item that simply begins with what was typed
+ * beats one that only contains it. Ties go by the server's own order (`sort`).
+ */
+export function rank_items(items, line, col) {
+  const out = [];
+  const boundary = (text, i) => i === 0 || !/[\p{L}\p{N}]/u.test(text[i - 1]) || (/\p{Lu}/u.test(text[i]) && /\p{Ll}/u.test(text[i - 1]));
+  let order = 0;
+  // The same thing offered twice (a snippet two extensions both bring, a word the server
+  // names too) is shown once: the first of them, which is the server's.
+  const seen = new Set();
+  for (const item of items) {
+    order++;
+    if (item.start > col) continue;
+    const same = item.label + "\u0000" + (item.kind === "word" ? "" : item.insert);
+    if (seen.has(same) || (item.kind === "word" && seen.has(item.label + "\u0000"))) continue;
+    seen.add(same); seen.add(item.label + "\u0000");
+    const typed = line.slice(item.start, col), wanted = typed.toLowerCase();
+    const text = item.filter, lower = text.toLowerCase();
+    let score = 0;
+    if (wanted) {
+      if (lower.startsWith(wanted)) score = 100000 - text.length + (text.startsWith(typed) ? 50 : 0);
+      else {
+        // In order, starting at the start of a word; letters that follow one another or begin a word count for more.
+        let best = -1;
+        for (let first = lower.indexOf(wanted[0]); first !== -1 && first < lower.length; first = lower.indexOf(wanted[0], first + 1)) {
+          if (!boundary(text, first)) continue;
+          let at = first, points = 1000 - first, ok = true;
+          for (let i = 1; i < wanted.length; i++) {
+            const next = lower.indexOf(wanted[i], at + 1);
+            if (next === -1) { ok = false; break; }
+            points += next === at + 1 ? 30 : boundary(text, next) ? 20 : -(next - at);
+            at = next;
+          }
+          if (ok && points > best) best = points;
+        }
+        if (best < 0) continue;
+        score = best;
+      }
+      // What is typed already, and nothing more, is no suggestion at all.
+      if (text === typed && item.insert === typed) continue;
+    }
+    out.push([item, score, order]);
+  }
+  // Words of the file are a stand-in for a language server: once one has answered, they go.
+  const kept = out.some((entry) => entry[0].id >= 0) ? out.filter((entry) => entry[0].kind !== "word") : out;
+  kept.sort((a, b) => b[1] - a[1] || (a[0].sort < b[0].sort ? -1 : a[0].sort > b[0].sort ? 1 : 0) || a[2] - b[2]);
+  return toList(kept.slice(0, 300).map((entry) => entry[0]));
+}
+/** Keeps the chosen suggestion in sight as the choice moves down a long list. */
+export function suggest_reveal() {
+  requestAnimationFrame(() => document.querySelector(".suggest .option.on")?.scrollIntoView({ block: "nearest" }));
+}
+/** A hover, as Markdown. */
 export function lsp_hover(path, line, col, done) {
-  ask("hover", path, line, col, (text) => text && done(String(text).slice(0, 4000)));
+  ask("hover", path, line, col, (text) => text && done(String(text).slice(0, 12000)));
 }
 export function lsp_definition(path, line, col, done) {
   ask("definition", path, line, col, (at) => at && done(at.path, at.line, at.col));
@@ -1398,22 +1532,6 @@ export function lsp_definition(path, line, col, done) {
 export function lsp_format(path, done) {
   ask("format", path, 0, 0, (edits) =>
     done(toList((edits ?? []).map((e) => [e.line, e.col, e.endLine, e.endCol, e.text]))));
-}
-
-// --- AI chat -----------------------------------------------------------------------------------
-
-let chats = 0;
-export function ai_send(provider, model, baseUrl, messages, on_delta, on_done) {
-  if (!host.ai) return on_done("AI chat needs the desktop app");
-  const id = ++chats;
-  host.ai.send(id, { provider, model, baseUrl, messages: messages.toArray().map(([role, content]) => ({ role, content })) }, (kind, text) => {
-    if (kind === "delta") on_delta(text);
-    else on_done(kind === "error" ? text : "");
-  });
-}
-export function ai_set_key(provider, key, done) {
-  if (!host.ai) return done("Keys can only be stored by the desktop app");
-  host.ai.setKey(provider, key).then(() => done(""), (e) => done(message(e)));
 }
 
 /** Which slice of a pie the pointer is over: -1 near the centre. Slice 0 points up. */
@@ -1465,6 +1583,40 @@ export function git_stage(paths, staged, done) {
 export function git_discard(paths, done) {
   if (!host.gitDiscard) return done(false, "Discarding needs the desktop app.");
   host.gitDiscard(paths.toArray()).then((yes) => done(!!yes, ""), (e) => done(false, message(e)));
+}
+// Blame follows the cursor, so it is asked for only once the cursor has rested a moment, and
+// an answer that arrives after the cursor has moved on is dropped. `text` is called only if
+// the question is really put: it makes the whole file's text, for unsaved work.
+let blameTimer = 0, blameTurn = 0;
+export function git_blame(path, line, dirty, text, done) {
+  clearTimeout(blameTimer);
+  const turn = ++blameTurn;
+  if (!host.gitBlame) return;
+  blameTimer = setTimeout(() => {
+    host.gitBlame(path, line, dirty ? text() : null).then((found) => {
+      if (turn !== blameTurn) return;
+      if (!found) done(false, "", "", 0, "");
+      else done(true, found.hash, found.author, found.time, found.summary);
+    }, () => { if (turn === blameTurn) done(false, "", "", 0, ""); });
+  }, 180);
+}
+/** How long ago a moment (seconds since 1970) was, in a few words. */
+export function ago(time) {
+  const seconds = Math.max(0, Date.now() / 1000 - time);
+  const units = [[31557600, "year"], [2629800, "month"], [604800, "week"], [86400, "day"], [3600, "hour"], [60, "minute"]];
+  for (const [size, name] of units) {
+    const n = Math.floor(seconds / size);
+    if (n >= 1) return n + " " + name + (n === 1 ? "" : "s") + " ago";
+  }
+  return "just now";
+}
+export function git_config(done) {
+  if (!host.gitConfig) return done(toList([]));
+  host.gitConfig().then((found) => done(toList(found)), () => done(toList([])));
+}
+export function git_config_set(key, value, scope, done) {
+  if (!host.gitConfigSet) return done("Git settings need the desktop app.");
+  host.gitConfigSet(key, value, scope).then(() => done(""), (e) => done(message(e)));
 }
 export function git_commit(text, done) {
   host.gitCommit(text).then(() => done(""), (e) => done(message(e)));
@@ -1580,7 +1732,7 @@ function inline(text) {
   t = t.replace(/~~([^~]+)~~/g, "<del>$1</del>");
   return t.replace(/\x00(\d+)\x00/g, (_, n) => held[Number(n)]);
 }
-export function markdown(source) {
+export function markdown(source, paint) {
   // What sits inside a script or style element is not prose: it goes, tags and all.
   const lines = source.replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, "").replace(/\r\n?/g, "\n").split("\n");
   const out = [];
@@ -1594,8 +1746,8 @@ export function markdown(source) {
       const body = [];
       for (i++; i < lines.length && !lines[i].trim().startsWith(m[1]); i++) body.push(lines[i]);
       i++;
-      out.push(`<pre class="md-code"${m[2] ? ` data-language="${esc(m[2])}"` : ""}><code>${esc(body.join("\n"))}</code></pre>`);
-    } else if ((m = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line))) {
+      out.push(`<pre class="md-code"${m[2] ? ` data-language="${esc(m[2])}"` : ""}><code>${paint?.(body, m[2]) ?? esc(body.join("\n"))}</code></pre>`);
+    } else if ((m = /^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line))) {
       out.push(`<h${m[1].length}>${inline(m[2])}</h${m[1].length}>`); i++;
     } else if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { out.push("<hr>"); i++; }
     else if (/^\s*>/.test(line)) {
@@ -1644,6 +1796,26 @@ export function markdown_html(key, version, lines) {
   const html = markdown(lines.toArray().join("\n"));
   drawn.set(key, { version, lines, html });
   if (drawn.size > 40) drawn.delete(drawn.keys().next().value);
+  return html;
+}
+/**
+ * Markdown from a language server (a hover, an item's documentation), drawn by the same strict
+ * renderer. Code in it is coloured with the grammar of the file it is about, when that is loaded.
+ */
+const richCache = new Map();
+export function rich_text(text, scope) {
+  const ready = !!(scope && grammar(scope));
+  const key = scope + "\n" + ready + "\n" + themeVersion + "\n" + text;
+  let html = richCache.get(key);
+  if (html === undefined) {
+    html = markdown(text, (lines) => {
+      const found = ready && lines.length <= 400 ? coloured(lines, scope) : null;
+      if (!found) return null;
+      return found.map((pieces) => pieces.map(([piece, style]) => (style ? `<span style="${esc(style)}">${esc(piece)}</span>` : esc(piece))).join("")).join("\n");
+    });
+    richCache.set(key, html);
+    if (richCache.size > 60) richCache.delete(richCache.keys().next().value);
+  }
   return html;
 }
 export const markdown_text = (key, text) => {

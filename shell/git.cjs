@@ -16,13 +16,31 @@ function over(remote) {
   P = remote ? path.posix : path;
 }
 
-function local(root, args, input) {
+// What a git on this machine is run with besides the usual: the programs that let git, ssh
+// and gpg put their questions to Runes (see ask.cjs). Set once by the shell.
+let helpers = {};
+function environment(extra) { helpers = extra ?? {}; }
+
+function local(root, args, input, more = {}) {
   return new Promise((resolve, reject) => {
     const child = execFile("git", ["-c", "core.quotepath=off", "-c", "color.ui=false", ...args],
-      { cwd: root, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0", LC_ALL: "C" } },
-      (error, stdout, stderr) => (error ? reject(new Error((stderr || error.message).trim().split("\n")[0])) : resolve(stdout)));
+      { cwd: root, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, ...helpers, ...more, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0", LC_ALL: "C" } },
+      (error, stdout, stderr) => (error ? reject(new Error(told(stderr || error.message))) : resolve(stdout)));
     if (input !== undefined) child.stdin.end(input);
   });
+}
+
+/** What git said went wrong, in a line or two a person can act on. */
+function told(stderr) {
+  const lines = String(stderr).trim().split("\n").map((l) => l.trim()).filter(Boolean);
+  if (lines.some((l) => /Please tell me who you are|empty ident name|unable to auto-detect email/i.test(l))) {
+    return "Git does not know who you are yet. Set your name and email under Git in the settings, then commit again.";
+  }
+  if (lines.some((l) => /failed to sign the data|failed to write commit object|Couldn't (load|find) (public )?key|No private key found/i.test(l))) {
+    const why = lines.filter((l) => !/^(error|fatal): (gpg )?failed to (sign the data|write commit object)/i.test(l) && !/^\[GNUPG:\]/.test(l)).map((l) => l.replace(/^(error|fatal|gpg): /i, "")).filter((l, i, all) => all.indexOf(l) === i);
+    return "The commit could not be signed" + (why.length ? ": " + why.slice(0, 2).join("; ") : "") + ". Check the signing key under Git in the settings.";
+  }
+  return lines[0] ?? "";
 }
 
 /** Paths from the window: relative, inside the folder, and never an option. */
@@ -205,7 +223,87 @@ async function discard(root, files) {
 async function commit(root, message) {
   if (typeof message !== "string" || !message.trim() || message.length > 20000) throw new Error("A commit needs a message");
   // The message goes in on standard input, so nothing in it can be read as an option.
-  await git(root, ["commit", "-q", "-F", "-"], message);
+  if (runner !== local || !helpers.RUNES_GPG_WRAPPER) return void (await git(root, ["commit", "-q", "-F", "-"], message));
+  // On this machine gpg is run through a stand-in that can ask for the key's passphrase in
+  // the window (helpers/gpg.cjs). It is named for this one command only, through the
+  // environment, so nobody's git configuration is touched.
+  const real = (await setting(root, "gpg.openpgp.program")) || (await setting(root, "gpg.program")) || "gpg";
+  await local(root, ["commit", "-q", "-F", "-"], message, {
+    RUNES_GPG: real, GIT_CONFIG_COUNT: "2",
+    GIT_CONFIG_KEY_0: "gpg.program", GIT_CONFIG_VALUE_0: helpers.RUNES_GPG_WRAPPER,
+    GIT_CONFIG_KEY_1: "gpg.openpgp.program", GIT_CONFIG_VALUE_1: helpers.RUNES_GPG_WRAPPER,
+  });
 }
 
-module.exports = { over, status, log, days, tree, history, show, stage, unstage, discard, commit, file, changed, refs, switchTo, EMPTY_TREE };
+// --- Who commits, and how commits are signed ---
+
+/** One setting as git sees it from this folder, "" when it is not set. */
+async function setting(root, key) {
+  try { return (await git(root, ["config", "--get", key])).replace(/\n$/, ""); } catch { return ""; }
+}
+
+// The settings the window may read and change. Nothing that names a program to run is here:
+// a page that could set `gpg.program` or `core.sshCommand` could run anything.
+const SETTINGS = {
+  "user.name": (v) => v.length <= 200,
+  "user.email": (v) => v.length <= 200 && !/\s/.test(v),
+  "user.signingkey": (v) => v.length <= 1000,
+  "commit.gpgsign": (v) => v === "true" || v === "false",
+  "tag.gpgsign": (v) => v === "true" || v === "false",
+  "gpg.format": (v) => ["openpgp", "ssh", "x509"].includes(v),
+  "init.defaultBranch": (v) => /^[\w./-]{1,100}$/.test(v),
+  "pull.rebase": (v) => v === "true" || v === "false",
+};
+
+/** [[key, value, where it is set: "local", "global", "system" or ""]] for every setting above. */
+async function config(root) {
+  const out = [];
+  for (const key of Object.keys(SETTINGS)) {
+    let value = "", scope = "";
+    try {
+      const line = (await git(root, ["config", "--show-scope", "--get", key])).replace(/\n$/, "");
+      const tab = line.indexOf("\t");
+      scope = line.slice(0, tab); value = line.slice(tab + 1);
+    } catch {}
+    out.push([key, value, scope]);
+  }
+  return out;
+}
+
+/** Sets one of the settings above for this repository ("local") or for this user ("global"). "" removes it. */
+async function setConfig(root, key, value, scope) {
+  if (!Object.hasOwn(SETTINGS, key) || !["local", "global"].includes(scope) || typeof value !== "string") throw new Error("Bad request");
+  if (/[\x00-\x1f\x7f]/.test(value) || value.startsWith("-")) throw new Error("That value cannot be used");
+  if (value === "") {
+    // Removing what is not there is not a failure (git answers 5).
+    try { await git(root, ["config", "--" + scope, "--unset-all", key]); } catch {}
+    return;
+  }
+  if (!SETTINGS[key](value)) throw new Error("That value cannot be used for " + key);
+  await git(root, ["config", "--" + scope, key, value]);
+}
+
+// --- Blame ---
+
+/**
+ * Who last changed one line (counted from 0), and when: { hash, author, mail, time, summary },
+ * with hash "" for a line that is not committed yet, or null when git cannot say (no
+ * repository, a file it does not know). `text` is the file as it is being edited, so the
+ * answer is right for unsaved work too.
+ */
+async function blame(root, name, line, text) {
+  const [file] = inside(root, [name]);
+  if (!Number.isInteger(line) || line < 0 || line > 10_000_000) throw new Error("Bad request");
+  let out;
+  try {
+    out = await git(root, ["blame", "--porcelain", "-L", `${line + 1},${line + 1}`, ...(typeof text === "string" ? ["--contents", "-"] : []), "--", file.split(P.sep).join("/")], typeof text === "string" ? text : undefined);
+  } catch { return null; }
+  const lines = out.split("\n");
+  const hash = (lines[0] ?? "").split(" ")[0];
+  if (!/^[0-9a-f]{40}$/.test(hash)) return null;
+  const field = (name) => (lines.find((l) => l.startsWith(name + " ")) ?? "").slice(name.length + 1);
+  if (/^0+$/.test(hash)) return { hash: "", author: "", mail: "", time: 0, summary: "" };
+  return { hash, author: field("author"), mail: field("author-mail").replace(/^<|>$/g, ""), time: Number(field("author-time")) || 0, summary: field("summary").slice(0, 300) };
+}
+
+module.exports = { over, environment, blame, config, setConfig, status, log, days, tree, history, show, stage, unstage, discard, commit, file, changed, refs, switchTo, EMPTY_TREE };

@@ -30,7 +30,6 @@ pub const defaults = [
   Binding("ctrl+shift+x", "workbench.view.extensions"),
   Binding("ctrl+shift+g", "workbench.view.scm"),
   Binding("ctrl+shift+m", "workbench.actions.view.problems"),
-  Binding("ctrl+alt+i", "workbench.action.chat.open"),
   Binding("ctrl+,", "workbench.action.openSettings"),
   Binding("ctrl+k", "workbench.action.selectTheme"),
   Binding("ctrl+\\", "workbench.action.splitEditor"),

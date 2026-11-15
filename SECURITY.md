@@ -1,4 +1,4 @@
-# Security review of Runes 0.7.0
+# Security review of Runes 1.1.0
 
 What was checked, what was changed because of it, and what remains. Reviewed against the code
 in this repository; the automated checks named below are in `shell/shell.test.cjs` and
@@ -8,7 +8,7 @@ in this repository; the automated checks named below are in `shell/shell.test.cj
 
 - **The window** is one sandboxed renderer (`sandbox`, `contextIsolation`, no Node, no
   `webview`). It loads `runes://app/`, served from `dist/`, and nothing from the network.
-- **The shell** (`shell/main.cjs`) owns files, terminals, AI requests and extensions. The
+- **The shell** (`shell/main.cjs`) owns files, terminals, git and extensions. The
   window reaches it only through the named requests in `shell/preload.cjs`.
 - **The extension host** is a separate process that runs extension code.
 
@@ -20,12 +20,16 @@ in this repository; the automated checks named below are in `shell/shell.test.cj
 | The window navigating or opening windows | `will-navigate` and `setWindowOpenHandler` deny everything | e2e |
 | Another frame or page calling the shell | Every request checks it came from the top frame of `runes://app/` | review |
 | Path traversal through `runes://` | Paths are resolved and must stay under `dist/` | review |
-| Markup from a language server (hover, messages) | Shown as text, never as HTML | review |
+| Markup from a language server (hovers, completion documentation) | Drawn by the same strict Markdown renderer as the preview: everything is escaped first and only a fixed set of tags is ever produced, raw HTML is dropped, links are data that the shell opens only if they are http(s), pictures are shown only as `data:` addresses. Diagnostics' messages are shown as text | unit test, end-to-end: a `<script>` in an item's documentation neither appears nor runs |
+| Edits that arrive with a completion | Applied only to the file being edited, as ordinary edits that undo; an extension could already edit files through the API it is given | end-to-end |
 | A VSIX writing outside its folder (zip slip) | Each entry's resolved path must stay inside the extension's folder | unit test |
 | A VSIX expanding without limit | Unpacking stops past 600 MB | unit test |
 | Silent install of code | An extension with a `main` script needs a native confirmation naming its publisher; declining writes nothing | e2e |
-| AI key exposure | The key is encrypted by the OS keychain, read only in the shell, never sent to the window | e2e: the key is absent from the page |
-| AI requests to an attacker's server | A custom `runes.ai.baseUrl` must be https, or http on localhost | unit test |
+| A signing key's passphrase leaking | It is asked for in the window, sent to the shell, handed to gpg on a pipe (never a command line, never a file) and dropped. It is not logged and not kept; gpg's own agent may remember it, as it would from a terminal | unit test, end-to-end: the passphrase is absent from the page, the launchers and the repository's settings |
+| Another program asking questions in Runes' name, or reading an answer | The helpers reach the shell over a socket in a folder only this user can enter (a named pipe on Windows), and every question must carry a random token made when Runes starts and given only to the git it runs; a question without it is dropped unasked | unit test |
+| The page making git run a program | Git settings are changed only through a fixed list of names (`user.name`, `user.email`, `user.signingkey`, `commit.gpgsign`, `tag.gpgsign`, `gpg.format`, `init.defaultBranch`, `pull.rebase`); nothing that names a program (`gpg.program`, `core.sshCommand`, aliases, hooks) can be set; values may not start with `-` or hold line breaks | unit test, end-to-end: the handler is called from the page |
+| The gpg stand-in left in someone's configuration | It is named for the one commit only, through the environment (`GIT_CONFIG_COUNT`), never written to any config file | unit test |
+| A marketplace "picture" that is something else | What the registry calls a file is ignored; the first bytes must be those of a PNG, JPEG, GIF, WebP or SVG, it must be under 4 MB as fetched and under 1 MB as shown (large ones are scaled down), and it is only ever shown in an `<img>`, where an SVG cannot run script. The cache on disk is believed only if it holds a `data:image/` address | unit test |
 | Update link pointing elsewhere | Only a release URL of the configured repository is accepted; only github.com release links are opened | unit test |
 | Options or commands smuggled into git | git runs without a shell; paths must lie inside the open folder and may not start with `-`; hashes must be hex; the commit message goes in on standard input | unit test |
 | A branch, tag or commit name used to smuggle an option into git (compare, read an old version, switch branch) | Names must match a strict pattern, cannot start with `-` and cannot contain `..`; git runs without a shell | unit test |
@@ -49,6 +53,9 @@ in this repository; the automated checks named below are in `shell/shell.test.cj
 | A marketplace download from elsewhere | Extension names are checked, and the file must come from the registry's own address | unit test |
 | A half-written settings file | Runes' own files are written to a side file and renamed into place | e2e |
 | Mass rewrite by "replace in files" | A native confirmation naming the folder and both strings | review |
+| A drawing (`.rux`) from someone else | The file is data and is rebuilt field by field: known element types, finite numbers within bounds, colours and line styles only from the lists the board offers, ids of plain characters, text and element counts capped. Text reaches the page only as text nodes; nothing from the file is used as markup, as a style, or as an address. A newer format is refused, not guessed at | unit: `test/canvas.test.mjs`; e2e: a hostile drawing shows inert shapes and runs nothing |
+| A drawing's link to a file | Only a relative path inside the open folder, without `..`, a scheme or a leading `/`, checked when the file is read and again when the link is followed. It opens the file in the editor and nothing else | unit; e2e |
+| Saving a picture of a drawing | `saveImage` writes only what decodes to a PNG (by its first bytes), only to the place chosen in the save dialogue. SVG pictures are built from the same checked elements, with no script, no foreign content and no outside references | e2e: other data is refused |
 | Dependencies | What ships (`npm audit --omit=dev`): 0 known vulnerabilities at the time of this build. The release tooling, which is not shipped, has one moderate advisory: see below | `npm audit` |
 
 ## Changed during the review
@@ -57,8 +64,6 @@ in this repository; the automated checks named below are in `shell/shell.test.cj
   the page.
 - `app.enableSandbox()` was added, so any renderer is sandboxed, not just the main window.
 - VSIX unpacking gained the size limit above.
-- On Linux without a keyring Electron "encrypts" with a fixed password. Runes now refuses to
-  store an AI key in that case and says to use `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`.
 - Extension storage file names are derived from the manifest and stripped to `[\w.-]`.
 
 ## Known and accepted
@@ -68,6 +73,11 @@ in this repository; the automated checks named below are in `shell/shell.test.cj
   page that could run its own script could answer them itself. Such a page could already
   overwrite any file in the open folder through the save handler, so this adds no new reach;
   and the content security policy is what stops such script from running at all.
+- **Signing has been tried with GPG keys on Linux only.** SSH signing keys go through the
+  same question (ssh's askpass), and Windows gets launchers of its own, but neither could be
+  run where this release was built. On a machine reached over SSH, git signs there and Runes
+  cannot pass a passphrase along: the key has to be unlocked on that machine.
+- **The passphrase question is drawn in the window**, as the others are. See the first point.
 - **A moderate advisory in the release tooling.** `minimatch`, pulled in by electron-builder,
   can be made slow by a crafted pattern (GHSA-g3hv-75wg-m249). It runs only when building
   installers, on patterns from this repository's own configuration, and is not part of the

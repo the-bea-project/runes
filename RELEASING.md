@@ -87,3 +87,15 @@ installing: unpack it and run `Runes.exe`.
   `.ico` and `.icns` each system wants.
 - **The terminal** uses a small native module with a prebuilt copy per system and processor.
   The script fetches the right one when building for a system other than its own.
+
+## Marking a release
+
+The version is in `package.json` (and `bea.toml`, and the bundled theme extension, which
+carry the same number). To publish 1.0.0, the first stable release:
+
+    git tag -a v1.0.0 -m "Runes 1.0.0"
+    git push origin v1.0.0
+
+The tag is what the update check in older copies looks for: a release named `v1.0.0` on the
+repository's releases page, not marked as a pre-release. Add the notes from `CHANGELOG.md` to
+it and attach the files from `release/` with their `SHA256SUMS.txt`.

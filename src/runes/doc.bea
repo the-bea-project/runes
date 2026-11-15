@@ -76,18 +76,45 @@ pub type Lang {
   filenames: List(String),
 }
 
+/// Something that could be written at the cursor: from a language server, a snippet, or a
+/// word of the file.
 pub type Item {
   label: String,
   detail: String,
   insert: String,
   snippet: Bool,
+  /// What it is, in a word: "function", "module", "keyword", "snippet", "word"…
+  kind: String,
+  /// The column on the cursor's line where its text starts: what stands between there and
+  /// the cursor is what has been typed of it, and is what it replaces.
+  start: Int,
+  /// How many characters after the cursor it replaces as well.
+  after: Int,
+  /// What the typed text is matched against, and what orders items that match equally.
+  filter: String,
+  sort: String,
+  /// What it is for, as Markdown.
+  doc: String,
+  /// The language server's number for it, to ask for more about it; -1 for the editor's own.
+  id: Int,
+  /// Changes elsewhere in the file that come with it: the import it needs, mostly.
+  edits: List((Int, Int, Int, Int, String)),
 }
 
+/// The list on show. `all` is everything on offer where the list was opened; `items` are those
+/// that fit what has been typed since, best first. `incomplete` means the server had more
+/// than it sent, so it is asked again as the typing goes on.
 pub type Completion {
   from: Int,
   items: List(Item),
   index: Int,
+  all: List(Item),
+  incomplete: Bool,
+  line: Int,
 }
+
+@external(javascript, "../runes_ffi.mjs", "rank_items")
+def rank_items(items: List(Item), line: String, col: Int) -> List(Item)
 
 
 pub def dirty(doc: Doc) -> Bool {
@@ -586,36 +613,63 @@ pub def find_next(doc: Doc, query: String) -> Doc {
 }
 
 /// What could be meant by the word being typed.
-pub def complete(doc: Doc, lang: Lang, always: Bool) -> Option(Completion) {
+/// What the editor itself can offer at the cursor: the language's snippets and words of the
+/// file. Nothing until two letters are typed, unless asked for (`always`).
+pub def local_items(doc: Doc, lang: Lang, always: Bool) -> List(Item) {
   line = buffer.line(doc.lines, doc.cursor.line)
   (start, _) = word_at(line, doc.cursor.col)
   prefix = buffer.cut(line, start, doc.cursor.col)
   case buffer.len(prefix) >= 2 or always {
-    False -> None
+    False -> []
     True -> {
       snippets = lang.snippets
         |> list.filter(fn(s) { string.starts_with(s.prefix, prefix) })
-        |> list.map(fn(s) { Item(s.prefix, s.name, s.body, True) })
+        |> list.map(fn(s) { Item(s.prefix, s.name, s.body, True, "snippet", start, 0, s.prefix, "~1" <> s.prefix, "", -1, []) })
       found = words(doc.lines, prefix, doc.cursor.line)
-        |> list.filter(fn(w) { not list.any(snippets, fn(s) { s.label == w }) })
-        |> list.map(fn(w) { Item(w, "", w, False) })
-      case list.take(list.append(snippets, found), 10) {
-        [] -> None
-        items -> Some(Completion(from: start, items:, index: 0))
-      }
+        |> list.map(fn(w) { Item(w, "", w, False, "word", start, 0, w, "~2" <> w, "", -1, []) })
+      list.append(snippets, found)
     }
   }
 }
 
-pub def accept(doc: Doc, completion: Completion) -> Doc {
+/// The list to show for everything on offer: those that fit what is typed, best first. None
+/// when nothing fits.
+pub def suggest(doc: Doc, all: List(Item), incomplete: Bool) -> Option(Completion) {
+  case rank_items(all, buffer.line(doc.lines, doc.cursor.line), doc.cursor.col) {
+    [] -> None
+    [first, ..rest] -> Some(Completion(from: first.start, items: [first, ..rest], index: 0, all:, incomplete:, line: doc.cursor.line))
+  }
+}
+
+pub def complete(doc: Doc, lang: Lang, always: Bool) -> Option(Completion) {
+  suggest(doc, local_items(doc, lang, always), False)
+}
+
+/// The item the list has chosen.
+pub def chosen(completion: Completion) -> Option(Item) {
   case list.drop(completion.items, completion.index) {
-    [item, .._] if item.snippet -> expand(doc, completion.from, item.insert)
-    [item, .._] -> {
-      start = Pos(doc.cursor.line, completion.from)
-      (lines, end) = buffer.insert(buffer.delete(doc.lines, start, doc.cursor), start, item.insert)
-      edit(doc, lines, end, False)
+    [item, .._] -> Some(item)
+    [] -> None
+  }
+}
+
+/// Writes the chosen item: in place of what was typed of it (and of whatever after the
+/// cursor it says it replaces). Its changes elsewhere in the file are the caller's to make.
+pub def accept(doc: Doc, completion: Completion) -> Doc {
+  case chosen(completion) {
+    None -> doc
+    Some(item) -> {
+      line = buffer.line(doc.lines, doc.cursor.line)
+      start = Pos(doc.cursor.line, int.min(item.start, doc.cursor.col))
+      end = Pos(doc.cursor.line, int.min(doc.cursor.col + item.after, buffer.len(line)))
+      case item.snippet {
+        True -> expand(Doc(doc | lines: buffer.delete(doc.lines, doc.cursor, end)), start.col, item.insert)
+        False -> {
+          (lines, after) = buffer.insert(buffer.delete(doc.lines, start, end), start, item.insert)
+          edit(doc, lines, after, False)
+        }
+      }
     }
-    [] -> doc
   }
 }
 

@@ -1,0 +1,32 @@
+{
+  "name": "rune-canvas",
+  "displayName": "Rune Canvas",
+  "description": "Drawings kept as files in a project (.rux): the icon for them, and colouring for when one is read as text.",
+  "version": "1.1.0",
+  "publisher": "runes",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.82.0"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "rune",
+        "aliases": ["Rune Canvas", "rune"],
+        "extensions": [".rux"],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/canvas-light.svg",
+          "dark": "./icons/canvas-dark.svg"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "rune",
+        "scopeName": "source.rune",
+        "path": "./syntaxes/rune.tmLanguage.json"
+      }
+    ]
+  }
+}

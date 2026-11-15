@@ -1,6 +1,6 @@
 // End-to-end checks of the desktop app, driven through Playwright's Electron support.
 //   xvfb-run -a node e2e/app.test.cjs      (needs `bea` and `gleam` on the PATH for the language checks)
-// The app runs against a throwaway profile and project, and a local stand-in for the AI API.
+// The app runs against a throwaway profile and project.
 "use strict";
 const { _electron } = require("playwright");
 const fs = require("node:fs");
@@ -45,25 +45,16 @@ const only = process.env.RUNES_ONLY ? new RegExp(process.env.RUNES_ONLY, "i") : 
 async function check(name, run) {
   if (only && !only.test(name)) return;
   try { await run(); passed++; results.push("ok    " + name); console.log("ok    " + name); }
-  catch (e) { failed++; if (shots && page) await page.screenshot({ path: path.join(shots, "fail-" + failed + ".png") }).catch(() => {}); results.push("FAIL  " + name); console.log("FAIL  " + name + "\n      " + String(e.message).split("\n").slice(0, 6).join("\n      ")); }
+  catch (e) {
+    // RUNES_DIAG=1: what the machine was busy with when a check failed, for telling a slow machine from a stuck app.
+    if (process.env.RUNES_DIAG && page) { try { console.log("page: " + JSON.stringify(await Promise.race([page.evaluate(() => new Promise((done) => { const facts = { hidden: document.hidden, focus: document.hasFocus(), frames: 0 }; const tick = () => { facts.frames++; requestAnimationFrame(tick); }; requestAnimationFrame(tick); setTimeout(() => done(facts), 500); })), new Promise((r) => setTimeout(() => r("no answer in 5s"), 5000))]))); } catch (e) { console.log("page: " + e.message); } }
+    if (process.env.RUNES_DIAG) { try { console.log(require("node:child_process").execSync("ps -eo pcpu,etimes,args --sort=-pcpu | head -6 | cut -c1-150").toString()); } catch {} }
+    failed++; if (shots && page) await page.screenshot({ path: path.join(shots, "fail-" + failed + ".png") }).catch(() => {}); results.push("FAIL  " + name); console.log("FAIL  " + name + "\n      " + String(e.message).split("\n").slice(0, 6).join("\n      "));
+  }
 }
 const expect = (condition, message) => { if (!condition) throw new Error(message); };
 
 (async () => {
-  // A stand-in for the Anthropic API that streams two pieces of text.
-  const asked = [];
-  const api = http.createServer((request, response) => {
-    let body = "";
-    request.on("data", (c) => (body += c));
-    request.on("end", () => {
-      asked.push({ url: request.url, key: request.headers["x-api-key"], body: JSON.parse(body) });
-      response.writeHead(200, { "content-type": "text/event-stream" });
-      response.write('event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"It doubles "}}\n\n');
-      setTimeout(() => response.end('data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"a number."}}\n\ndata: {"type":"message_stop"}\n\n'), 80);
-    });
-  });
-  await new Promise((r) => api.listen(0, "127.0.0.1", r));
-
   // A stand-in for the Open VSX registry, with one theme extension in it.
   const themeVsix = Buffer.from(zipSync({
     "extension/package.json": strToU8(JSON.stringify({ name: "sunset", displayName: "Sunset Theme", publisher: "demo", version: "2.0.0", contributes: { themes: [{ label: "Demo Sunset", uiTheme: "vs-dark", path: "./t.json" }] } })),
@@ -90,15 +81,52 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
       const vscode = require("vscode");
       exports.activate = (context) => {
         context.subscriptions.push(vscode.languages.registerCodeActionsProvider({ language: "markdown" }, {
-          provideCodeActions(document) {
+          provideCodeActions(document, range) {
             const first = document.lineAt(0).text;
-            if (first === first.toUpperCase()) return [];
+            if (range.start.line !== 0 || first === first.toUpperCase()) return [];
             const action = new vscode.CodeAction("Shout the heading", vscode.CodeActionKind.QuickFix);
             action.edit = new vscode.WorkspaceEdit();
             action.edit.replace(document.uri, new vscode.Range(0, 0, 0, first.length), first.toUpperCase());
-            return [action];
+            // A refactoring whose edit is only worked out when it is chosen, as real servers do.
+            const whisper = new vscode.CodeAction("Whisper the heading", vscode.CodeActionKind.Refactor);
+            return [whisper, action];
+          },
+          resolveCodeAction(action) {
+            const document = vscode.workspace.textDocuments.find((d) => d.fileName.endsWith("notes.md"));
+            const first = document.lineAt(0).text;
+            action.edit = new vscode.WorkspaceEdit();
+            action.edit.replace(document.uri, new vscode.Range(0, 0, 0, first.length), first.toLowerCase());
+            return action;
           },
         }));
+        // People to mention, after an @: the way a language server offers things. Each item says
+        // what it replaces, is matched by its own filter text, and comes with a line to add at
+        // the top of the file: at once for one of them, only when asked again for the other.
+        context.subscriptions.push(vscode.languages.registerCompletionItemProvider({ language: "markdown" }, {
+          provideCompletionItems(document, position, token, context) {
+            const before = document.lineAt(position.line).text.slice(0, position.character);
+            const at = before.lastIndexOf("@");
+            if (at === -1) return [];
+            globalThis.__asked = (globalThis.__asked ?? 0) + 1;
+            const range = new vscode.Range(position.line, at, position.line, position.character);
+            const person = (label, name, about) => {
+              const item = new vscode.CompletionItem(label, vscode.CompletionItemKind.Constant);
+              item.range = range; item.insertText = "@" + name; item.filterText = label; item.detail = name; item.sortText = label;
+              if (about) item.documentation = new vscode.MarkdownString(about);
+              return item;
+            };
+            const ada = person("@ada", "ada-lovelace", "**Ada** wrote the first program.\\n\\n## Example\\n\\n\`\`\`js\\nconst engine = 1\\n\`\`\`\\n\\n[More](https://example.com/ada) <script>window.__doc = true</script>");
+            ada.additionalTextEdits = [vscode.TextEdit.insert(new vscode.Position(0, 0), "<!-- mentions ada -->\\n")];
+            const list = [ada, person("@grace", "grace-hopper", ""), person("@alan", "alan-turing", "Asked " + globalThis.__asked + " times, trigger " + context.triggerCharacter)];
+            return new vscode.CompletionList(list, false);
+          },
+          resolveCompletionItem(item) {
+            if (item.label !== "@grace") return item;
+            item.documentation = new vscode.MarkdownString("**Grace** found the first bug.");
+            item.additionalTextEdits = [vscode.TextEdit.insert(new vscode.Position(0, 0), "<!-- mentions grace -->\\n")];
+            return item;
+          },
+        }, "@"));
         context.subscriptions.push(vscode.commands.registerCommand("demo.stamp", async () => {
           const notes = vscode.workspace.textDocuments.find((d) => d.fileName.endsWith("notes.md"));
           const edit = new vscode.WorkspaceEdit();
@@ -120,31 +148,62 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
       response.end(JSON.stringify({ files: { download: origin + "/files/sunset.vsix", readme: origin + "/files/sunset.md" } }));
     } else if (url.pathname === "/files/sunset.vsix") response.end(themeVsix);
     else if (url.pathname === "/files/sunset.md") response.end("# Sunset\n\nWarm colours for the *evening*.\n\n<script>window.__readme = true</script>\n\n- [Home](https://example.com/sunset)\n");
-    else if (url.pathname === "/files/sunset.png") { response.setHeader("content-type", "image/png"); response.end(png); }
+    // As the real registry's file store does for many icons: the bytes of a picture, called a download.
+    else if (url.pathname === "/files/sunset.png") { response.setHeader("content-type", "application/octet-stream"); response.end(png); }
     else { response.statusCode = 404; response.end(); }
   });
   await new Promise((r) => registry.listen(0, "127.0.0.1", r));
 
   const profile = path.join(work, "profile");
   fs.mkdirSync(profile, { recursive: true });
-  fs.writeFileSync(path.join(profile, "settings.json"), `{\n  // test profile\n  "editor.fontSize": 14,\n  "runes.update.check": false,\n  "runes.ai.baseUrl": "http://127.0.0.1:${api.address().port}",\n}\n`);
+  fs.writeFileSync(path.join(profile, "settings.json"), `{\n  // test profile\n  "editor.fontSize": 14,\n  "runes.update.check": false,\n}\n`);
+
+  // Git's settings for "all repositories" go to a file of the test's own, and gpg gets a home
+  // of its own with one key in it that needs a passphrase (when there is a gpg at all).
+  const gnupg = fs.mkdtempSync(path.join(os.tmpdir(), "g-"));
+  fs.chmodSync(gnupg, 0o700);
+  const gitEnv = { GIT_CONFIG_GLOBAL: path.join(work, "gitconfig"), GIT_CONFIG_NOSYSTEM: "1", GNUPGHOME: gnupg };
+  fs.writeFileSync(gitEnv.GIT_CONFIG_GLOBAL, "");
+  let signing = true;
+  try {
+    fs.writeFileSync(path.join(gnupg, "gpg-agent.conf"), "default-cache-ttl 0\nmax-cache-ttl 0\n");
+    execFileSync("gpg", ["--batch", "--pinentry-mode", "loopback", "--passphrase", "open sesame", "--quick-gen-key", "Ada <ada@example.com>", "ed25519", "sign", "never"], { stdio: "pipe", env: { ...process.env, GNUPGHOME: gnupg } });
+  } catch { signing = false; }
 
   const app = await _electron.launch({
     executablePath: process.env.RUNES_ELECTRON || path.join(root, "node_modules/electron/dist/electron"),
-    args: ["--no-sandbox", "--user-data-dir=" + profile, ...(process.env.RUNES_ELECTRON ? [] : [root]), project],
+    args: ["--no-sandbox", "--disable-renderer-backgrounding", "--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows", "--user-data-dir=" + profile, ...(process.env.RUNES_ELECTRON ? [] : [root]), project],
     cwd: root,
-    env: { ...process.env, ANTHROPIC_API_KEY: "test-key-123", RUNES_MARKETPLACE: `http://127.0.0.1:${registry.address().port}` },
+    env: { ...process.env, RUNES_MARKETPLACE: `http://127.0.0.1:${registry.address().port}`, ...gitEnv },
   });
   const p = await app.firstWindow();
   page = p;
   const errors = [];
   p.on("pageerror", (e) => errors.push(e.message));
+  if (process.env.RUNES_CONSOLE) p.on("console", (m) => console.log("PAGE " + m.text().slice(0, 400)));
   const K = (k) => p.keyboard.press(k);
   // Lustre draws on the next frame, so everything read from the page waits for two.
   const settle = () => p.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
   const status = async () => { await settle(); return (await p.locator(".status").textContent()) ?? ""; };
   const lines = async () => (await settle(), p.evaluate(() => [...document.querySelectorAll(".group.focused .row")].sort((a, b) => parseInt(a.style.top) - parseInt(b.style.top)).map((r) => r.querySelector(".code").textContent)));
   // Rows are keyed, so their order in the page is not their order in the file: go by number.
+  // Opens a folder of the explorer if it is shut, going by what the tree itself says once it is drawn.
+  const unfold = async (name) => {
+    const folder = p.locator(".tree.files .node.folder", { has: p.locator(".name", { hasText: new RegExp("^" + name + "$") }) });
+    await folder.waitFor();
+    if (!(await folder.evaluate((e) => e.classList.contains("open")))) await folder.click();
+    await until("the folder open", async () => folder.evaluate((e) => e.classList.contains("open")), 4000);
+  };
+  // Moves down the list of suggestions to one of them, a step at a time, seeing each step land.
+  const choose = async (label) => {
+    const on = () => p.locator(".suggest .option.on b").textContent();
+    for (let steps = 0; (await on()) !== label; steps++) {
+      if (steps > 40) throw new Error("no suggestion called " + label);
+      const before = await on();
+      await K("ArrowDown");
+      await until("the choice to move", async () => (await on()) !== before, 2000);
+    }
+  };
   const line = (n) => p.locator(".group.focused .row", { has: p.locator(".ln", { hasText: new RegExp("^" + n + "$") }) }).locator(".code");
   const css = (name) => p.evaluate((n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim(), name);
   const saved = () => { try { return JSON.parse(fs.readFileSync(path.join(profile, "settings.json"), "utf8")); } catch { return {}; } };
@@ -257,15 +316,107 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     await until("the cursor to move to the definition", async () => (await status()).includes("Ln 3"), 20000);
   });
 
-  await check("language server: completion", async () => {
+  await check("language server: completion fits what is typed, takes types and modules, and brings the import", async () => {
+    const options = () => p.locator(".suggest .option b").allTextContents();
+    const back = async () => { await K("Escape"); for (let i = 0; i < 60 && (await lines()).join("\n") !== source; i++) await K("Control+z"); expect((await lines()).join("\n") === source, "could not get back to the file as it was"); };
+    // A function of a module that is imported: only what fits is listed, the best first, and taking it writes it once.
     await K("Control+End");
     await p.keyboard.type("pub def n() -> String {");
     await K("Enter");
-    await p.keyboard.type("int.to_s");
-    await until("a suggestion from the server", async () => (await p.locator(".option").allTextContents()).some((t) => t.includes("to_string")), 20000);
+    await p.keyboard.type("int.");
+    await until("everything the module has, in a list that scrolls", async () => { const all = await options(); return all.length > 12 && all.includes("int.parse") && all.every((t) => t.startsWith("int.")); }, 30000, async () => { await K("Backspace"); await p.keyboard.type("."); });
+    const box = await p.locator(".suggest").evaluate((e) => [e.scrollHeight > e.clientHeight, e.clientHeight]);
+    expect(box[0] && box[1] < 320, "the list should scroll in a box of its own: " + box.join());
+    await p.keyboard.type("to_s");
+    await until("the list narrowed to what fits", async () => { const all = await options(); return all[0] === "int.to_string" && all.every((t) => /to.*s/i.test(t)); }, 8000);
+    await until("what the chosen one is for, beside the list", async () => ((await p.locator(".suggest-doc").textContent().catch(() => "")) ?? "").length > 10, 8000);
     await shot("completion");
+    // Taking a letter back keeps the list; going down it keeps the choice in sight.
+    await K("Backspace");
+    expect((await options()).includes("int.to_string"), "the list closed on Backspace");
+    await p.keyboard.type("s");
+    await K("Enter");
+    await until("the function written once", async () => (await lines()).some((l) => l.trim().startsWith("int.to_string")) && !(await lines()).join("\n").includes("int.int."), 4000);
+    await back();
+
+    // A type, where a type goes.
+    await K("Control+End");
+    await p.keyboard.type("pub def t(a: Int, b: Stri");
+    await until("the type", async () => (await options()).includes("String"), 20000);
+    expect((await options())[0] === "String", "String should come first: " + (await options()).slice(0, 4).join());
+    await K("Enter");
+    await until("the type written", async () => (await lines()).some((l) => l.includes("b: String")), 4000);
+    await back();
+
+    // A function of a module that is not imported yet: taking it adds the import, and the cursor stays on its line.
+    await K("Control+End");
+    await p.keyboard.type("pub def say() {");
+    await K("Enter");
+    await p.keyboard.type("io.prin");
+    await until("functions of a module not yet imported", async () => (await options()).some((t) => t === "io.println"), 20000);
+    expect((await options()).every((t) => /p.*r.*i.*n/i.test(t)), "the list holds what does not fit: " + (await options()).slice(0, 6).join());
+    await choose("io.println");
+    await K("Enter");
+    const said = async () => (await lines()).filter((l) => l.includes("io.println"));
+    await until("the call written", async () => (await said()).length === 1, 4000);
+    expect((await said())[0].trim() === "io.println()", "the call was not written cleanly: " + JSON.stringify(await said()));
+    await p.keyboard.type('"hi"');
+    expect((await said())[0].trim() === 'io.println("hi")', "the cursor was not left between the brackets: " + JSON.stringify(await said()));
+    // By its bare name: what is written is what the server says, module and all, with the cursor between the brackets.
+    await K("End"); await K("Enter");
+    await p.keyboard.type("percent_enc");
+    await until("a function by its bare name", async () => (await options()).includes("percent_encode"), 20000);
+    await choose("percent_encode");
+    await K("Enter");
+    await p.keyboard.type('"a b"');
+    const encoded = (await lines()).filter((l) => l.includes("percent_encode"));
+    expect(encoded.length === 1 && encoded[0].trim() === 'uri.percent_encode("a b")', "the server's own text was not what was written: " + JSON.stringify(encoded));
+    await back();
+
+    // A module's path: the list stays through the slash, and narrows after it.
+    await K("Control+Home"); await K("End"); await K("Enter");
+    await p.keyboard.type("import glea");
+    await until("modules", async () => (await options()).includes("gleam/string"), 20000);
+    await p.keyboard.type("m/");
+    await p.waitForTimeout(400);
+    expect((await options()).includes("gleam/string"), "the list went away at the slash: " + (await options()).slice(0, 5).join());
+    await p.keyboard.type("str");
+    await until("only what fits after the slash", async () => { const all = await options(); return all.length > 0 && all[0].startsWith("gleam/str") && all.includes("gleam/string") && all.every((t) => /^gleam\/.*s.*t.*r/.test(t)); }, 8000);
+    await choose("gleam/string");
+    await K("Enter");
+    await until("the path written once", async () => (await lines())[1] === "import gleam/string", 4000);
+    await back();
+
+    // The same snippet from two extensions (the one that ships and the one installed) is offered once.
+    await K("Control+End");
+    await p.keyboard.type("defc");
+    await until("the snippet", async () => (await options()).includes("defc"), 8000);
+    await p.waitForTimeout(500);
+    const twice = await p.locator(".suggest .option").evaluateAll((all) => all.map((o) => o.textContent).filter((t, i, list) => list.indexOf(t) !== i));
+    expect(twice.length === 0, "offered twice: " + twice.join(" | "));
+    await back();
+    await K("Control+s");
+  });
+
+  await check("language server: a hover is drawn as the document it is", async () => {
+    await p.locator(".group.focused .content").hover({ position: { x: 5, y: 300 } });
+    const at = await line(8).evaluate((e) => { const r = e.getBoundingClientRect(); return { x: r.left, y: r.top + r.height / 2 }; });
+    const ch = await p.evaluate(() => { const probe = document.createElement("span"); probe.textContent = "0".repeat(20); probe.style.cssText = "position:absolute;visibility:hidden;font:inherit"; document.querySelector(".group.focused .content").append(probe); const w = probe.getBoundingClientRect().width / 20; probe.remove(); return w; });
+    const gutter = await p.locator(".group.focused .content").evaluate((e) => parseFloat(getComputedStyle(e).getPropertyValue("--gutter")) || 0);
+    const text = (await lines())[7];
+    const col = text.indexOf("to_string") + 3;
+    const x = await line(8).evaluate((e, col) => { const range = document.createRange(); const walker = document.createTreeWalker(e, NodeFilter.SHOW_TEXT); let left = col, node; while ((node = walker.nextNode())) { if (left <= node.length) { range.setStart(node, left); range.setEnd(node, left); return range.getBoundingClientRect().left; } left -= node.length; } return 0; }, col);
+    await p.mouse.move(x || at.x + gutter + ch * col, at.y);
+    await p.mouse.move((x || at.x + gutter + ch * col) + 2, at.y);
+    await until("the hover", async () => (await p.locator(".hover .hover-doc").count()) === 1, 20000, async () => { await p.mouse.move(x + 6, at.y + 1); await p.mouse.move(x + 2, at.y); });
+    const drawn = await p.locator(".hover .hover-doc").evaluate((e) => ({ text: e.textContent, code: e.querySelectorAll("pre.md-code").length, coloured: e.querySelectorAll("pre.md-code span[style]").length, heads: e.querySelectorAll("h1,h2,h3,h4").length, links: e.querySelectorAll("a[data-href]").length, script: e.querySelectorAll("script,iframe,img").length }));
+    expect(/String|Int/.test(drawn.text), "the hover says nothing of the code: " + drawn.text.slice(0, 80));
+    expect(drawn.code >= 1 && !drawn.text.includes("```") && !/^#+ /m.test(drawn.text) && !/\]\(https?:/.test(drawn.text), "Markdown was left as written: " + JSON.stringify(drawn).slice(0, 300));
+    expect(drawn.coloured > 0, "the code in it is not coloured");
+    expect(drawn.script === 0, "the hover holds what it should not");
+    await shot("hover");
+    await p.locator(".group.focused .content").hover({ position: { x: 5, y: 400 } });
     await K("Escape");
-    for (let i = 0; i < 4; i++) await K("Control+z");
   });
 
   await check("language server: format document", async () => {
@@ -904,19 +1055,6 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     } finally { await server.close(); }
   });
 
-  await check("AI chat streams an answer, sending the key only from the shell", async () => {
-    await open("shop.bea");
-    await K("Control+Alt+i");
-    await p.waitForSelector("#runes-chat");
-    await p.locator("#runes-chat").fill("What does double do?");
-    await K("Control+Enter");
-    await until("the answer", async () => (await p.locator(".bubble.assistant pre").last().textContent().catch(() => "")) === "It doubles a number.", 10000);
-    expect(asked[0]?.key === "test-key-123", "the API key was not sent");
-    expect(asked[0].body.messages[0].content.includes("pub def double"), "the open file was not attached");
-    expect(!(await p.evaluate(() => JSON.stringify(Object.keys(window.runesHost)) + document.documentElement.innerHTML)).includes("test-key-123"), "the key is visible to the page");
-    await shot("chat");
-  });
-
   await check("source control: a change is staged and committed", async () => {
     fs.writeFileSync(path.join(project, "CHANGES.md"), "# Changes\n");
     await K("Control+Shift+g");
@@ -1008,6 +1146,17 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     await p.locator(".diff-bar .button", { hasText: "Newer" }).click();
     await until("the way back", async () => (await p.locator(".diff-commit b").textContent()) === "More notes", 5000);
     expect(older !== "More notes", "Older did not move");
+    // The two fields say "the commit before it" and "the commit", in short names that fit.
+    const refs = await p.locator(".diff-bar .diff-ref").evaluateAll((all) => all.map((e) => [e.value, e.title]));
+    expect(/^[0-9a-f]{7}\^$/.test(refs[0][0]) && /^[0-9a-f]{7}$/.test(refs[1][0]) && refs[0][0] === refs[1][0] + "^", "the fields read " + refs.map((r) => r[0]).join(" and "));
+    expect(/^[0-9a-f]{40}\^$/.test(refs[0][1]) && /^[0-9a-f]{40}$/.test(refs[1][1]), "the full names are not kept for a hover");
+    // Comparing again from the short names still knows which commit it is.
+    await p.locator(".diff-bar .button", { hasText: "Compare" }).click();
+    await until("the same commit, compared again", async () => (await p.locator(".diff-commit b").textContent().catch(() => "")) === "More notes" && (await p.locator(".diff-rows .drow").count()) > 0, 5000);
+    await p.locator(".diff-bar .button", { hasText: "Older" }).click();
+    await until("older, from the short names", async () => (await p.locator(".diff-commit b").textContent()) === older, 5000);
+    await p.locator(".diff-bar .button", { hasText: "Newer" }).click();
+    await until("and back", async () => (await p.locator(".diff-commit b").textContent()) === "More notes", 5000);
     // A second session, from the graph, by marking one commit and comparing another with it.
     await commands(); await p.keyboard.type("Git: Open Graph"); await K("Enter");
     await p.waitForSelector(".graph-page .commit");
@@ -1186,6 +1335,69 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     await until("the edit again", async () => (await lines())[0] === "# NOTES", 5000);
   });
 
+  await check("the light bulb: whatever an extension offers for the line, fixes and refactorings alike", async () => {
+    await K("Control+z");
+    await until("the heading as it was", async () => (await lines())[0] === "# Notes", 3000);
+    await K("Control+Home");
+    await until("the bulb on the line that has something on offer", async () => (await p.locator(".group.focused .bulb").count()) === 1, 8000);
+    const where = await p.evaluate(() => { const b = document.querySelector(".group.focused .bulb").getBoundingClientRect(), l = [...document.querySelectorAll(".group.focused .row")].find((r) => r.querySelector(".ln")?.textContent === "1").getBoundingClientRect(); return Math.abs(b.top - l.top); });
+    expect(where < 3, "the bulb is not on the cursor's line: " + where);
+    await shot("bulb");
+    await K("Control+End");
+    await until("no bulb where nothing is offered", async () => (await p.locator(".group.focused .bulb").count()) === 0, 6000);
+    await K("Control+Home");
+    await p.waitForSelector(".group.focused .bulb");
+    await p.locator(".group.focused .bulb").click();
+    await typing();
+    await until("both, the fix first, each named for what it is", async () => (await p.locator(".result").allTextContents()).join(" | ") === "Shout the headingquick fix | Whisper the headingrefactor", 6000);
+    await K("ArrowDown"); await K("Enter");
+    // The refactoring had no edit until it was chosen: it is asked for then.
+    await until("the refactoring's edit", async () => (await lines())[0] === "# notes", 6000);
+    await K("Control+z");
+    await until("undo", async () => (await lines())[0] === "# Notes", 3000);
+  });
+
+  await check("completion from an extension: its own range and filter, a trigger character, and edits that come with an item", async () => {
+    const options = () => p.locator(".suggest .option b").allTextContents();
+    const original = (await lines()).join("\n");
+    const back = async () => { await K("Escape"); for (let i = 0; i < 60 && (await lines()).join("\n") !== original; i++) await K("Control+z"); expect((await lines()).join("\n") === original, "could not get back to the file as it was"); };
+    await K("Control+End");
+    // "@" is not part of a word: the list opens because the extension named it as a trigger.
+    await p.keyboard.type("see @");
+    await until("the people", async () => (await options()).join() === "@ada,@alan,@grace", 8000);
+    expect((await p.locator(".suggest-doc").textContent()).includes("trigger @") || (await p.locator(".suggest .option.on b").textContent()) === "@ada", "the trigger character was not passed on");
+    // The first one's documentation is Markdown, drawn; what could run or load is not there.
+    await until("its documentation", async () => ((await p.locator(".suggest-doc").textContent().catch(() => "")) ?? "").includes("wrote the first program"), 4000);
+    const doc = await p.locator(".suggest-doc").evaluate((e) => ({ strong: e.querySelector("strong")?.textContent, code: e.querySelectorAll("pre.md-code").length, head: e.querySelectorAll("h1,h2,h3").length, link: e.querySelector("a[data-href]")?.dataset.href, script: e.querySelectorAll("script").length, raw: e.textContent.includes("**") || e.textContent.includes("```") }));
+    expect(doc.strong === "Ada" && doc.code === 1 && doc.head === 1 && doc.link === "https://example.com/ada" && doc.script === 0 && !doc.raw && !(await p.evaluate(() => window.__doc)), "documentation: " + JSON.stringify(doc));
+    await shot("completion-doc");
+    // Typing narrows by the item's own filter text, without asking again.
+    await p.keyboard.type("gr");
+    await until("one left", async () => (await options()).join() === "@grace", 4000);
+    // Its documentation, and the line it adds, come only when the server is asked about it again.
+    await until("what was left for later", async () => ((await p.locator(".suggest-doc").textContent().catch(() => "")) ?? "").includes("found the first bug"), 5000);
+    await K("Enter");
+    await until("the mention, in place of what was typed from the @ on", async () => (await lines()).some((l) => l.endsWith("see @grace-hopper")), 4000);
+    await until("the line that comes with it, at the top", async () => (await lines())[0] === "<!-- mentions grace -->", 6000);
+    await p.keyboard.type("!");
+    expect((await lines()).some((l) => l.endsWith("see @grace-hopper!")), "the cursor did not stay after the mention: " + JSON.stringify(await lines()));
+    await back();
+    // An item that brings its edit with it: made at once.
+    await K("Control+End");
+    await p.keyboard.type("@ad");
+    await until("ada", async () => (await options())[0] === "@ada", 8000);
+    await K("Tab");
+    await until("both changes", async () => { const all = await lines(); return all[0] === "<!-- mentions ada -->" && all.some((l) => l.endsWith("@ada-lovelace")); }, 5000);
+    await back();
+    // Nothing fits: the list closes rather than showing what does not match.
+    await K("Control+End");
+    await p.keyboard.type("@zz");
+    await p.waitForTimeout(600);
+    expect((await p.locator(".suggest").count()) === 0, "a list of things that do not fit: " + (await options()).join());
+    await back();
+    await K("Control+s");
+  });
+
   await check("commands from extensions are in the command palette", async () => {
     await K("Control+Shift+p");
     await typing();
@@ -1202,9 +1414,10 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     fs.appendFileSync(path.join(project, "src/notes.md"), "changed on disk\n");
     fs.writeFileSync(path.join(project, "src/fresh.md"), "# Fresh\n");
     await K("Control+Shift+e");
+    await p.waitForTimeout(1600);
     await p.evaluate(() => window.dispatchEvent(new Event("focus")));
     const node = (name) => p.locator(".tree .node", { has: p.locator(".name", { hasText: new RegExp("^" + name.replace(".", "\\.") + "$") }) });
-    if (!(await node("notes.md").count())) await node("src").click();
+    await unfold("src");
     await until("the modified file", async () => ((await node("notes.md").getAttribute("class").catch(() => "")) ?? "").includes("git-M"), 6000);
     await until("the new file", async () => ((await node("fresh.md").getAttribute("class").catch(() => "")) ?? "").includes("git-U"), 6000);
     expect((await node("src").getAttribute("class")).includes("git-in"), "the folder does not show that it holds changes");
@@ -1233,6 +1446,7 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     await until("the file itself, as it is on disk now", async () => (await p.locator(".group.focused .tab.on").textContent()).includes("shop.bea") && (await lines()).includes("pub def triple(n: Int) -> Int {"), 5000);
     execFileSync("git", ["checkout", "--", "src/shop.bea", "src/notes.md"], { cwd: project });
     fs.rmSync(path.join(project, "src/fresh.md"));
+    await p.waitForTimeout(1600);
     await p.waitForTimeout(1600);
     await p.evaluate(() => window.dispatchEvent(new Event("focus")));
     await until("the reverted file to be read again", async () => !(await lines()).includes("pub def triple(n: Int) -> Int {"), 5000);
@@ -1363,7 +1577,8 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
       await p.waitForTimeout(500);
       if (await p.locator(".prompt").count()) await p.locator(".prompt .button", { hasText: "Delete" }).click();
     };
-    if (await node("shop.bea").count()) await node("src").click();
+    await unfold("src"); await node("src").click();
+    await until("the folder shut", async () => (await node("shop.bea").count()) === 0, 4000);
     await p.locator(".root-name").click();
 
     // A new file, from the buttons over the tree: named in place, made empty, opened.
@@ -1391,7 +1606,7 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     await node("src").click({ button: "right" });
     await p.waitForSelector(".node-menu");
     const items = await p.locator(".node-menu .result span:first-child").allTextContents();
-    expect(items.join() === "New File…,New Folder…,Rename…,Delete,Copy Path,Copy Relative Path,Show in the File Manager", "menu: " + items.join());
+    expect(items.join() === "New File…,New Folder…,New Drawing…,Rename…,Delete,Copy Path,Copy Relative Path,Show in the File Manager", "menu: " + items.join());
     await shot("explorer-menu");
     await p.locator(".node-menu .result", { hasText: "New Folder" }).click();
     await p.locator("#runes-naming").fill("deep/inner"); await K("Enter");
@@ -1456,7 +1671,7 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     await K("Control+Shift+e");
     const names = () => p.locator(".tree .node .name").allTextContents();
     const node = (name) => p.locator(".tree .node", { has: p.locator(".name", { hasText: new RegExp("^" + name.replace(/\./g, "\\.") + "$") }) });
-    if (!(await node("shop.bea").count())) await node("src").click();
+    await unfold("src");
     await until("the folder open", async () => (await names()).includes("shop.bea"), 3000);
     // Nothing here touches the window: no click, no focus, no refresh.
     fs.writeFileSync(path.join(project, "appeared.txt"), "one\n");
@@ -1511,6 +1726,131 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     await K("Control+Shift+e");
   });
 
+  await check("a language's own icon, from its extension, is used where the icon theme has none", async () => {
+    await K("Control+Shift+e");
+    const node = (name) => p.locator(".tree .node", { has: p.locator(".name", { hasText: new RegExp("^" + name.replace(/\./g, "\\.") + "$") }) });
+    await unfold("src");
+    await until("the Bea file to carry a picture", async () => (await node("shop.bea").locator("img.file-icon").count()) === 1, 4000);
+    const drawn = await node("shop.bea").locator("img.file-icon").evaluate((i) => new Promise((done) => { const say = () => done([i.src.slice(0, 5), i.naturalWidth > 0]); if (i.complete) say(); else { i.onload = say; i.onerror = say; } }));
+    expect(drawn[0] === "blob:" && drawn[1], "the icon did not draw: " + drawn.join());
+    // The theme's own icons are untouched: a file it knows keeps its glyph.
+    let markdown = [];
+    await until("a Markdown file to keep the theme's own icon", async () => { markdown = await node("notes.md").locator(".file-icon").evaluateAll((all) => all.map((e) => e.tagName + ":" + (e.textContent || e.getAttribute("src") || "").slice(0, 12))); return markdown.length === 1 && markdown[0].startsWith("SPAN:"); }, 5000).catch(async () => { throw new Error("a Markdown file lost the theme's icon: " + JSON.stringify(markdown) + " among " + JSON.stringify(await p.locator(".tree .node").evaluateAll((all) => all.map((n) => n.textContent + "/" + n.innerHTML.slice(0, 160)).slice(0, 12)))); });
+    expect((await p.locator(".tab", { hasText: "shop.bea" }).locator("img.file-icon").count()) <= 1, "tabs");
+    await shot("language-icon");
+  });
+
+  await check("blame: who last changed the line under the cursor, in the status bar", async () => {
+    execFileSync("git", ["checkout", "--", "."], { cwd: project });
+    await open("notes.md");
+    await p.locator(".group.focused .content").click({ position: { x: 300, y: 12 } });
+    await until("the line's author and age", async () => /^Ada, .+ ago/.test((await p.locator(".status .seg.blame").textContent().catch(() => "")) ?? ""), 6000);
+    const said = await p.locator(".status .seg.blame").getAttribute("title");
+    expect(/\n[^\n]*Ada · .+ ago · [0-9a-f]{7}\n/.test(said), "the hover does not tell the commit: " + said);
+    await shot("blame");
+    // A line just typed is nobody's yet; the committed lines around it still are somebody's.
+    await K("Control+End"); await K("Enter"); await p.keyboard.type("a new thought");
+    await until("a new line to be nobody's", async () => ((await p.locator(".status .seg.blame").textContent().catch(() => "")) ?? "") === "Not committed yet", 6000);
+    await K("Control+Home");
+    await until("the first line to be Ada's still", async () => /^Ada, /.test((await p.locator(".status .seg.blame").textContent().catch(() => "")) ?? ""), 6000);
+    // A click opens what that commit changed.
+    const about = (await p.locator(".status .seg.blame .blame-what").textContent()).trim();
+    await p.locator(".status .seg.blame").click();
+    await until("the commit, as a session", async () => ((await p.locator(".diff-commit b").textContent().catch(() => "")) ?? "") === about, 6000);
+    await K("Control+w");
+    // It can be turned off.
+    await open("notes.md");
+    await K("Control+z"); await K("Control+z"); await K("Control+z");
+    await commands(); await p.keyboard.type("Preferences: Open Settings"); await K("Enter");
+    await p.locator('.settings-page [aria-label="git.blame.statusBarItem.enabled"]').click();
+    await p.locator(".tab", { hasText: "notes.md" }).first().click();
+    await p.locator(".group.focused .content").click({ position: { x: 300, y: 12 } });
+    await p.waitForTimeout(700);
+    expect((await p.locator(".status .seg.blame").count()) === 0, "blame is shown although it is turned off");
+    await p.locator(".tab", { hasText: "Settings" }).first().click();
+    await p.locator('.settings-page [aria-label="git.blame.statusBarItem.enabled"]').click();
+    await p.locator(".tab", { hasText: "Settings" }).first().locator(".close, button").first().click().catch(() => {});
+    await p.locator(".tab", { hasText: "notes.md" }).first().click();
+    await p.locator(".group.focused .content").click({ position: { x: 300, y: 12 } });
+    await until("blame to come back", async () => (await p.locator(".status .seg.blame").count()) === 1, 8000);
+    execFileSync("git", ["checkout", "--", "."], { cwd: project });
+  });
+
+  await check("git settings: name, email and signing are read from git and written through it", async () => {
+    await commands(); await p.keyboard.type("Preferences: Open Settings"); await K("Enter");
+    const field = (key) => p.locator(`.settings-page [aria-label="${key}"]`);
+    await until("git's name for this repository", async () => (await field("user.name").inputValue().catch(() => "")) === "Ada", 5000);
+    const row = (key) => p.locator(".settings-page .setting", { has: p.locator(`[aria-label="${key}"]`) });
+    expect((await row("user.name").locator("small").textContent()).includes("Set for this repository"), "it does not say where the name comes from");
+    const read = (...args) => { try { return execFileSync("git", ["config", ...args], { cwd: project, env: { ...process.env, ...gitEnv } }).toString().trim(); } catch { return ""; } };
+    // For all repositories: written to the user's file, not the repository's.
+    await field("user.email").fill("ada@all.example"); await field("user.email").blur();
+    await until("the email for all repositories", async () => read("--global", "user.email") === "ada@all.example", 4000);
+    expect(read("--local", "user.email") === "ada@example.com", "the repository's own email was changed");
+    // For this repository only.
+    await p.locator('.settings-page [aria-label="Git settings scope"]').selectOption("local");
+    await field("user.name").fill("Ada at work"); await field("user.name").blur();
+    await until("the name for this repository", async () => read("--local", "user.name") === "Ada at work", 4000);
+    await field("gpg.format").selectOption("ssh");
+    await until("the format", async () => read("--local", "gpg.format") === "ssh", 4000);
+    await until("the hint to speak of a public key", async () => (await field("user.signingkey").getAttribute("placeholder")) === "~/.ssh/id_ed25519.pub", 3000);
+    await field("gpg.format").selectOption("openpgp");
+    await shot("git-settings");
+    // Emptying a field takes the setting away.
+    await field("user.name").fill(""); await field("user.name").blur();
+    await until("the setting to be gone", async () => read("--local", "user.name") === "", 4000);
+    await until("the field to show that", async () => (await field("user.name").inputValue()) === "", 4000);
+    await p.waitForTimeout(300);
+    await field("user.name").fill("Ada"); await field("user.name").blur();
+    await until("the name back", async () => read("--local", "user.name") === "Ada", 4000);
+    // The window cannot set what names a program.
+    const refused = await p.evaluate(async () => { try { await window.runesHost.gitConfigSet("gpg.program", "/tmp/evil", "local"); return "allowed"; } catch (e) { return e.message; } });
+    expect(/Bad request/.test(refused) && read("--local", "gpg.program") === "", "the page could name a program for git to run: " + refused);
+    await K("Control+w");
+  });
+
+  if (signing) await check("a signed commit: the key's passphrase is asked for in the window, and the commit is signed", async () => {
+    const config = (...args) => execFileSync("git", ["config", ...args], { cwd: project, env: { ...process.env, ...gitEnv } });
+    config("commit.gpgsign", "true"); config("user.signingkey", "ada@example.com"); config("gpg.format", "openpgp");
+    try {
+      fs.writeFileSync(path.join(project, "SIGNED.md"), "# Signed\n");
+      await K("Control+Shift+g");
+      await until("the new file", async () => (await p.locator(".change").allTextContents()).some((t) => t.includes("SIGNED.md")), 6000);
+      await p.locator('.mini[title="Stage SIGNED.md"]').click();
+      await until("it to be staged", async () => (await p.locator('.mini[title="Unstage SIGNED.md"]').count()) === 1, 5000);
+      const head = () => execFileSync("git", ["log", "-1", "--format=%G?|%s"], { cwd: project, env: { ...process.env, ...gitEnv } }).toString().trim();
+      // Giving up makes no commit, and says why.
+      await p.locator("#runes-commit").fill("A signed commit");
+      await p.locator(".commit-form .button").click();
+      await until("the passphrase to be asked for", async () => ((await p.locator(".prompt b").textContent().catch(() => "")) ?? "").startsWith("Passphrase for the signing key"), 10000);
+      expect((await p.locator("#runes-prompt").getAttribute("type")) === "password", "the passphrase is not hidden");
+      await shot("signing");
+      await p.locator(".prompt .button", { hasText: "Cancel" }).click();
+      await until("being told it was not signed", async () => ((await p.locator(".toast").textContent().catch(() => "")) ?? "").includes("could not be signed"), 8000);
+      expect(!head().includes("A signed commit"), "a commit was made without its signature");
+      // The passphrase signs it.
+      await p.locator(".commit-form .button").click();
+      await until("the question again", async () => (await p.locator("#runes-prompt").count()) === 1, 10000);
+      await p.locator("#runes-prompt").fill("open sesame"); await K("Enter");
+      await until("a commit with a good signature", async () => head() === "G|A signed commit", 12000);
+      const page = await p.evaluate(() => document.documentElement.innerHTML);
+      expect(!page.includes("open sesame"), "the passphrase is still in the page");
+    } finally {
+      config("--unset", "commit.gpgsign"); config("--unset", "user.signingkey");
+      try { execFileSync("gpgconf", ["--kill", "gpg-agent"], { stdio: "pipe", env: { ...process.env, GNUPGHOME: gnupg } }); } catch {}
+    }
+    await K("Control+Shift+e");
+  });
+
+  await check("there is no AI in 1.0: no chat, no key, nothing sent anywhere", async () => {
+    expect((await p.locator(".activity button").evaluateAll((all) => all.map((b) => b.title))).every((t) => !/chat|ai\b/i.test(t)), "a chat button is still in the activity bar");
+    await commands(); await p.keyboard.type("chat"); await p.waitForTimeout(200);
+    const found = await p.locator(".result").allTextContents();
+    await K("Escape");
+    expect(found.every((t) => !/chat|API key/i.test(t)), "commands: " + found.join(" | "));
+    expect(await p.evaluate(() => !("ai" in window.runesHost)), "the shell still offers the page an AI bridge");
+  });
+
   await check("installing a VSIX with code asks first; declining installs nothing", async () => {
     const before = fs.readdirSync(path.join(profile, "extensions")).length;
     await app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1 }); });
@@ -1519,6 +1859,187 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     await chooser.setFiles(path.join(root, "extensions/prebuilt/gleam.gleam.vsix"));
     await until("the refusal to be reported", async () => ((await p.locator(".toast").textContent().catch(() => "")) ?? "").includes("not installed"), 8000);
     expect(fs.readdirSync(path.join(profile, "extensions")).length === before, "a declined extension was written to disk");
+  });
+
+  // --- Rune Canvas: drawings kept as files of the project ---
+  const rux = path.join(project, "how.rux");
+  const drawing = () => JSON.parse(fs.readFileSync(rux, "utf8"));
+  const board = async () => { const b = await p.locator(".group.focused runes-canvas .rc-board").boundingBox(); return { x: b.x + b.width / 2, y: b.y + b.height / 2 }; };
+  const drag = async (x1, y1, x2, y2, keys = []) => {
+    const c = await board();
+    await p.mouse.move(c.x + x1, c.y + y1);
+    await p.mouse.down();
+    for (const k of keys) await p.keyboard.down(k);
+    await p.mouse.move(c.x + (x1 + x2) / 2, c.y + (y1 + y2) / 2, { steps: 4 });
+    await p.mouse.move(c.x + x2, c.y + y2, { steps: 4 });
+    await p.mouse.up();
+    for (const k of keys) await p.keyboard.up(k);
+    await settle();
+  };
+  const drawn = async () => { await settle(); return p.locator(".group.focused runes-canvas .rc-el").count(); };
+  const store = async () => { await K("Control+s"); await until("the drawing saved", async () => !(await p.locator(".group.focused .tab.on").evaluate((t) => t.classList.contains("dirty")).catch(() => true)), 4000); };
+
+  await check("canvas: a new drawing is a .rux file that opens as an empty board", async () => {
+    // The drawing goes where the explorer points: here, the open folder itself.
+    if (!(await p.locator(".root-name").count())) await K("Control+Shift+e");
+    await p.locator(".root-name").click();
+    await commands();
+    await p.keyboard.type("New Drawing");
+    await p.waitForTimeout(150);
+    await K("Enter");
+    await p.waitForFunction(() => document.activeElement?.id === "runes-naming", null, { timeout: 5000 });
+    expect((await p.locator("#runes-naming").inputValue()) === "drawing.rux", "the name offered: " + (await p.locator("#runes-naming").inputValue()));
+    // Only the stem is selected, so typing keeps the ending.
+    await p.keyboard.type("how");
+    expect((await p.locator("#runes-naming").inputValue()) === "how.rux", "typing replaced the ending too");
+    await K("Enter");
+    await p.waitForSelector(".group.focused runes-canvas.empty", { timeout: 6000 });
+    expect(fs.existsSync(rux), "no file was made");
+    expect((await status()).includes("Rune Canvas"), "the status bar does not say Rune Canvas: " + (await status()));
+    expect((await p.locator(".group.focused .row").count()) === 0, "the text of the file is on show as well");
+    await until("the board to have the keyboard", async () => p.evaluate(() => document.activeElement?.tagName === "RUNES-CANVAS"), 3000);
+    await shot("canvas-empty");
+  });
+
+  await check("canvas: shapes, a label, and an arrow tied to both ends are drawn and saved as readable JSON", async () => {
+    await K("r");
+    await drag(-200, -80, -60, 0);
+    await K("o");
+    await drag(120, 20, 260, 110);
+    expect((await drawn()) === 2, "two shapes expected, got " + (await drawn()));
+    // Double click in the rectangle to write in it.
+    const c = await board();
+    await p.mouse.dblclick(c.x - 130, c.y - 40);
+    await p.waitForFunction(() => document.activeElement?.classList.contains("rc-write"), null, { timeout: 3000 });
+    await p.keyboard.type("Shop");
+    await K("Escape");
+    await K("a");
+    await drag(-100, -30, 180, 60);
+    expect((await drawn()) === 3, "an arrow expected, got " + (await drawn()));
+    await store();
+    const text = fs.readFileSync(rux, "utf8");
+    const file = drawing();
+    expect(file.rune === "canvas" && file.version === 1, "the file does not say what it is");
+    expect(text.trim().split("\n").length === file.elements.length + 6, "one element to a line is expected:\n" + text);
+    const [rect, oval, arrow] = file.elements;
+    expect(rect.type === "rect" && rect.text === "Shop" && oval.type === "ellipse" && arrow.type === "arrow", "what was drawn: " + text);
+    expect(arrow.from === rect.id && arrow.to === oval.id, "the arrow is not tied to both shapes: " + JSON.stringify(arrow));
+    expect((await p.locator(".group.focused runes-canvas .rc-text").first().textContent()).includes("Shop"), "the label is not drawn");
+    await shot("canvas");
+  });
+
+  await check("canvas: a tied arrow follows its shape; undo and redo", async () => {
+    const before = drawing().elements[2];
+    await K("v");
+    // An empty shape is taken hold of by its outline, so that things inside it can be reached.
+    await drag(190, 110, 190, 210);
+    await store();
+    const moved = drawing().elements;
+    expect(moved[1].y > 100, "the ellipse did not move: " + JSON.stringify(moved[1]));
+    expect(moved[2].to === moved[1].id && moved[2].y + moved[2].h > before.y + before.h + 50, "the arrow did not follow: " + JSON.stringify(moved[2]));
+    await K("Control+z");
+    await store();
+    expect(JSON.stringify(drawing().elements[2]) === JSON.stringify(before), "undo did not put the arrow back");
+    await K("Control+Shift+z");
+    await store();
+    expect(JSON.stringify(drawing().elements) === JSON.stringify(moved), "redo did not move it again");
+    // Delete takes the selection away; the arrow lets go of what is gone.
+    await K("Delete");
+    expect((await drawn()) === 2, "delete did not remove the ellipse");
+    await K("Control+z");
+    expect((await drawn()) === 3, "undo did not bring it back");
+  });
+
+  await check("canvas: the editor's own keys still work over a board, and the board's keys stay in it", async () => {
+    await K("Control+a");
+    await until("the whole drawing selected", async () => (await settle(), await p.locator(".group.focused runes-canvas .rc-each").count()) === 3, 3000);
+    await K("Escape");
+    await commands();
+    expect((await p.locator("#runes-palette").count()) === 1, "the palette did not open over a board");
+    await K("Escape");
+    await until("the board to have the keyboard back", async () => p.evaluate(() => document.activeElement?.tagName === "RUNES-CANVAS"), 3000);
+  });
+
+  await check("canvas: the file can be read as text, and drawn again", async () => {
+    await p.locator(".group.focused runes-canvas .rc-top .rc-button[aria-label='Show the file as text']").click();
+    await until("the text", async () => (await lines()).join("\n").includes('"rune": "canvas"'), 4000);
+    expect((await p.locator(".canvas-raw").count()) === 1, "nothing offers the way back");
+    await p.locator(".canvas-raw button").click();
+    await p.waitForSelector(".group.focused runes-canvas");
+    expect((await drawn()) === 3, "the drawing did not come back whole");
+  });
+
+  await check("canvas: a change on disk is drawn, and a linked element opens its file at the line", async () => {
+    await store();
+    const file = drawing();
+    file.elements[0].link = "src/shop.bea:7";
+    file.elements.push({ id: "extra", type: "diamond", x: file.elements[0].x, y: file.elements[0].y + 200, w: 120, h: 80, stroke: "violet", fill: "violet", text: "from disk" });
+    fs.writeFileSync(rux, JSON.stringify(file));
+    // Files are read again when the window is come back to.
+    await p.waitForTimeout(1600);
+    await p.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await until("the new element", async () => (await drawn()) === 4, 8000);
+    expect((await p.locator(".group.focused runes-canvas .rc-link").count()) === 1, "the link is not marked");
+    const c = await board();
+    const spot = await p.locator(".group.focused runes-canvas .rc-el[data-type='rect']").boundingBox();
+    await p.keyboard.down("Control");
+    await p.mouse.click(spot.x + 6, spot.y + spot.height / 2);
+    await p.keyboard.up("Control");
+    await until("the linked file", async () => (await status()).includes("Ln 7"), 5000);
+    expect((await p.locator(".group.focused .tab.on").textContent()).includes("shop.bea"), "the wrong file opened");
+    await open("how.rux");
+    await p.waitForSelector(".group.focused runes-canvas");
+  });
+
+  await check("canvas: pictures are saved as PNG and SVG, and only pictures", async () => {
+    const png = path.join(work, "how.png"), svg = path.join(work, "how.svg");
+    await app.evaluate(({ dialog }, to) => { dialog.showSaveDialog = async (_w, o) => ({ canceled: false, filePath: /png/i.test(JSON.stringify(o.filters ?? "")) ? to.png : to.svg }); }, { png, svg });
+    const top = p.locator(".group.focused runes-canvas .rc-top");
+    await top.locator(".rc-button[aria-label='Save the drawing as a picture']").click();
+    await top.locator(".rc-menu button", { hasText: "PNG…" }).click();
+    await until("the PNG", async () => fs.existsSync(png), 6000);
+    expect(fs.readFileSync(png).subarray(1, 4).toString() === "PNG" && fs.statSync(png).size > 2000, "that is not a picture");
+    await top.locator(".rc-button[aria-label='Save the drawing as a picture']").click();
+    await top.locator(".rc-menu button", { hasText: "SVG…" }).click();
+    await until("the SVG", async () => fs.existsSync(svg), 6000);
+    const picture = fs.readFileSync(svg, "utf8");
+    expect(picture.startsWith("<svg") && picture.includes("Shop") && !/<script|onload|javascript:|foreignObject/i.test(picture), "the SVG is not a plain picture");
+    const refused = await p.evaluate(async () => {
+      const tries = ["data:text/html;base64,PGgxPmhpPC9oMT4=", "data:image/png;base64,PGgxPmhpPC9oMT4=", "file:///etc/passwd", ""];
+      const out = [];
+      for (const t of tries) out.push(await window.runesHost.saveImage("x.png", t).then((v) => v || "refused", () => "refused"));
+      return out;
+    });
+    expect(refused.every((r) => r === "refused"), "saveImage wrote something that is not a PNG: " + refused.join());
+  });
+
+  await check("security: a hostile drawing is shown as inert shapes, and a broken one says so", async () => {
+    fs.writeFileSync(path.join(project, "evil.rux"), JSON.stringify({ rune: "canvas", version: 1, elements: [
+      { id: "a", type: "rect", x: 0, y: 0, w: 200, h: 80, text: "<img src=x onerror=\"window.__canvas=1\"><script>window.__canvas=1</script>", stroke: "url(javascript:1)", fill: "\"><script>window.__canvas=1</script>", link: "javascript:window.__canvas=1" },
+      { id: "b", type: "text", x: 0, y: 120, text: "up", link: "../../../etc/passwd" },
+      { id: "c", type: "<script>", x: 0, y: 0, w: 5, h: 5 },
+      { id: "d", type: "ellipse", x: "1e999", y: {}, w: -5, h: null, link: "https://evil.example/x", __proto__: { polluted: 1 } },
+    ] }));
+    await open("evil.rux");
+    await p.waitForSelector(".group.focused runes-canvas .rc-el");
+    const facts = await p.evaluate(() => {
+      const c = document.querySelector(".group.focused runes-canvas");
+      return { ran: window.__canvas === 1, tags: [...c.querySelectorAll(".rc-world *")].map((n) => n.tagName.toLowerCase()).filter((t) => !["g", "path", "text", "tspan", "rect", "title", "circle", "ellipse", "line", "polyline"].includes(t)),
+        handlers: [...c.querySelectorAll(".rc-world *")].some((n) => [...n.attributes].some((a) => /^on/i.test(a.name) || /javascript:|url\(/i.test(a.value))), links: c.querySelectorAll(".rc-link").length, shown: c.querySelector(".rc-text")?.textContent ?? "", polluted: ({}).polluted };
+    });
+    expect(!facts.ran && facts.tags.length === 0 && !facts.handlers, "the file's text became markup: " + JSON.stringify(facts));
+    expect(facts.shown.includes("<img"), "the text should be shown as it was written");
+    expect(facts.links === 0, "a link that leaves the project was kept");
+    expect(facts.polluted === undefined, "the file reached Object.prototype");
+    fs.writeFileSync(path.join(project, "broken.rux"), "{ this is not a drawing");
+    await open("broken.rux");
+    await p.waitForSelector(".group.focused runes-canvas .rc-problem", { timeout: 5000 });
+    expect((await p.locator(".group.focused runes-canvas .rc-tools").isHidden()), "tools are offered for a file that cannot be drawn");
+    await shot("canvas-problem");
+    await p.locator(".rc-problem button").click();
+    await until("the text of the broken file", async () => (await lines()).join("").includes("this is not a drawing"), 4000);
+    expect(fs.readFileSync(path.join(project, "broken.rux"), "utf8") === "{ this is not a drawing", "a file that could not be read was written over");
+    for (const name of ["evil.rux", "broken.rux"]) fs.rmSync(path.join(project, name));
   });
 
   await check("security: the page has no Node, cannot navigate, open windows or eval", async () => {
@@ -1549,7 +2070,6 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
   });
 
   await app.close();
-  api.close();
   registry.close();
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

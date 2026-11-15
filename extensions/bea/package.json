@@ -19,7 +19,11 @@
         "extensions": [
           ".bea"
         ],
-        "configuration": "./language-configuration.json"
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/beatrix.svg",
+          "dark": "./icons/beatrix.svg"
+        }
       }
     ],
     "grammars": [

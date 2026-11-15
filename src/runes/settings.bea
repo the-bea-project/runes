@@ -27,10 +27,8 @@ pub type Settings {
   side_right: Bool,
   animations: Bool,
   pie: List(Slice),
-  ai_provider: String,
-  ai_model: String,
-  ai_base_url: String,
   check_updates: Bool,
+  blame: Bool,
   shell: String,
 }
 
@@ -64,10 +62,8 @@ pub const defaults = Settings(
   side_right: False,
   animations: True,
   pie: default_pie,
-  ai_provider: "anthropic",
-  ai_model: "",
-  ai_base_url: "",
   check_updates: True,
+  blame: True,
   shell: "",
 )
 
@@ -106,10 +102,8 @@ pub const template = "{
     ] }
   ],
 
-  // AI chat. \"anthropic\" or \"openai\". The key is set with the command
-  // \"Runes: Set AI API Key\" and is stored encrypted, never in this file.
-  \"runes.ai.provider\": \"anthropic\",
-  \"runes.ai.model\": \"\",
+  // Who last changed the line the cursor is on, in the status bar.
+  \"git.blame.statusBarItem.enabled\": true,
 
   \"runes.update.check\": true,
   // The shell terminals start. Empty means your login shell.
@@ -245,10 +239,8 @@ pub def parse(text: String) -> Settings {
       [] -> d.pie
       items -> items
     },
-    ai_provider: get(all, "runes.ai.provider", decode.string, d.ai_provider),
-    ai_model: get(all, "runes.ai.model", decode.string, d.ai_model),
-    ai_base_url: get(all, "runes.ai.baseUrl", decode.string, d.ai_base_url),
     check_updates: get(all, "runes.update.check", decode.bool, d.check_updates),
+    blame: get(all, "git.blame.statusBarItem.enabled", decode.bool, d.blame),
     shell: get(all, "terminal.shell", decode.string, d.shell),
   )
 }

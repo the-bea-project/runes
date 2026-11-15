@@ -1,0 +1,5 @@
+{
+  "name": "Rune Canvas",
+  "scopeName": "source.rune",
+  "patterns": [{ "include": "source.json" }]
+}

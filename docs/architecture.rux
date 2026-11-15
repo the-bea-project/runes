@@ -1,0 +1,27 @@
+{
+  "rune": "canvas",
+  "version": 1,
+  "elements": [
+    {"id":"title","type":"text","x":0,"y":-110,"text":"How Runes is put together","size":28,"seed":1},
+    {"id":"hint","type":"text","x":0,"y":-68,"text":"Ctrl+click a box to open the file it stands for.","size":14,"stroke":"grey","seed":1},
+    {"id":"window","type":"rect","x":0,"y":0,"w":700,"h":190,"stroke":"grey","dash":"dashed","seed":8019},
+    {"id":"window-says","type":"text","x":16,"y":10,"text":"The window: no Node, no network","size":14,"stroke":"grey","seed":1},
+    {"id":"bea","type":"rect","x":24,"y":60,"w":216,"h":90,"text":"Model, update, view\nwritten in Bea","stroke":"blue","fill":"blue","link":"src/runes/app.bea","seed":15938},
+    {"id":"bridge","type":"rect","x":280,"y":60,"w":170,"h":90,"text":"Bridge to\nthe page","stroke":"teal","fill":"teal","link":"src/runes_ffi.mjs","seed":23857},
+    {"id":"canvas","type":"rect","x":510,"y":60,"w":160,"h":90,"text":"Rune Canvas","stroke":"violet","fill":"violet","link":"src/runes_canvas.mjs","seed":31776},
+    {"id":"preload","type":"rect","x":280,"y":270,"w":170,"h":70,"text":"Preload","stroke":"amber","fill":"amber","link":"shell/preload.cjs","seed":39695},
+    {"id":"shell","type":"rect","x":280,"y":420,"w":170,"h":80,"text":"Shell","stroke":"green","fill":"green","link":"shell/main.cjs","seed":47614},
+    {"id":"disk","type":"rect","x":0,"y":420,"w":190,"h":80,"text":"Files, Git,\nterminals","stroke":"grey","fill":"grey","link":"shell/git.cjs","seed":55533},
+    {"id":"host","type":"rect","x":540,"y":420,"w":190,"h":80,"text":"Extension host\n(a process apart)","stroke":"orange","fill":"orange","link":"shell/exthost/host.cjs","seed":63452},
+    {"id":"servers","type":"ellipse","x":800,"y":415,"w":190,"h":90,"text":"Language\nservers","stroke":"pink","fill":"pink","seed":71371},
+    {"id":"market","type":"diamond","x":285,"y":570,"w":160,"h":110,"text":"Open VSX","stroke":"red","seed":79290},
+    {"id":"a1","type":"arrow","x":246,"y":105,"w":28,"h":0,"head":"both","from":"bea","to":"bridge","seed":87209},
+    {"id":"a2","type":"arrow","x":456,"y":105,"w":48,"h":0,"head":"both","from":"bridge","to":"canvas","seed":95128},
+    {"id":"a3","type":"arrow","x":365,"y":156,"w":0,"h":108,"text":"named calls only","size":14,"from":"bridge","to":"preload","seed":103047},
+    {"id":"a4","type":"arrow","x":365,"y":346,"w":0,"h":68,"text":"checked messages","size":14,"from":"preload","to":"shell","seed":110966},
+    {"id":"a5","type":"arrow","x":274,"y":460,"w":-78,"h":0,"from":"shell","to":"disk","seed":118885},
+    {"id":"a6","type":"arrow","x":456,"y":460,"w":78,"h":0,"head":"both","from":"shell","to":"host","seed":126804},
+    {"id":"a7","type":"arrow","x":736,"y":460,"w":58,"h":0,"dash":"dashed","head":"both","from":"host","to":"servers","seed":134723},
+    {"id":"a8","type":"arrow","x":365,"y":506,"w":0,"h":58,"text":"https","size":14,"dash":"dotted","from":"shell","to":"market","seed":142642}
+  ]
+}

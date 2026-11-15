@@ -9,7 +9,7 @@ import gleam/result
 import gleam/string
 import lustre/effect.{type Effect}
 import runes/buffer.{type Pos, Pos}
-import runes/doc.{type Completion, type Doc, type Lang, Completion, Doc, Item, Lang}
+import runes/doc.{type Completion, type Doc, type Item, type Lang, Completion, Doc, Item, Lang}
 import runes/extension.{type Extension, Config}
 import runes/git.{type Row, Commit}
 import runes/keymap.{type Binding}
@@ -184,7 +184,7 @@ def ext_listen(
 ) -> Nil
 
 @external(javascript, "../runes_ffi.mjs", "lsp_actions")
-def lsp_actions(path: String, line: Int, col: Int, end_line: Int, end_col: Int, done: fn(List((Int, String))) -> Nil) -> Nil
+def lsp_actions(path: String, line: Int, col: Int, end_line: Int, end_col: Int, done: fn(List((Int, String, String))) -> Nil) -> Nil
 
 @external(javascript, "../runes_ffi.mjs", "lsp_apply_action")
 def lsp_apply_action(id: Int, done: fn(String) -> Nil) -> Nil
@@ -256,7 +256,22 @@ def doc_closed(path: String) -> Nil
 def doc_saved(path: String) -> Nil
 
 @external(javascript, "../runes_ffi.mjs", "lsp_complete")
-def lsp_complete(path: String, line: Int, col: Int, done: fn(List((String, String, String, Bool))) -> Nil) -> Nil
+def lsp_complete(
+  path: String,
+  line: Int,
+  col: Int,
+  ch: String,
+  done: fn(Bool, Bool, List((String, String, String, Bool, String, Int, Int, String, String, String, Int, List((Int, Int, Int, Int, String))))) -> Nil,
+) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "lsp_resolve")
+def lsp_resolve(id: Int, wait: Bool, done: fn(String, String, List((Int, Int, Int, Int, String))) -> Nil) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "suggest_reveal")
+def suggest_reveal() -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "lsp_actions_soon")
+def lsp_actions_soon(path: String, line: Int, col: Int, end_line: Int, end_col: Int, done: fn(Int, Bool) -> Nil) -> Nil
 
 @external(javascript, "../runes_ffi.mjs", "lsp_hover")
 def lsp_hover(path: String, line: Int, col: Int, done: fn(String) -> Nil) -> Nil
@@ -267,18 +282,14 @@ def lsp_definition(path: String, line: Int, col: Int, done: fn(String, Int, Int)
 @external(javascript, "../runes_ffi.mjs", "lsp_format")
 def lsp_format(path: String, done: fn(List((Int, Int, Int, Int, String))) -> Nil) -> Nil
 
-@external(javascript, "../runes_ffi.mjs", "ai_send")
-def ai_send(
-  provider: String,
-  model: String,
-  base_url: String,
-  messages: List((String, String)),
-  on_delta: fn(String) -> Nil,
-  on_done: fn(String) -> Nil,
-) -> Nil
+@external(javascript, "../runes_ffi.mjs", "git_blame")
+def git_blame(path: String, line: Int, dirty: Bool, text: fn() -> String, done: fn(Bool, String, String, Int, String) -> Nil) -> Nil
 
-@external(javascript, "../runes_ffi.mjs", "ai_set_key")
-def ai_set_key(provider: String, key: String, done: fn(String) -> Nil) -> Nil
+@external(javascript, "../runes_ffi.mjs", "git_config")
+def git_config(done: fn(List((String, String, String))) -> Nil) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "git_config_set")
+def git_config_set(key: String, value: String, scope: String, done: fn(String) -> Nil) -> Nil
 
 @external(javascript, "../runes_ffi.mjs", "git_status")
 def git_status(done: fn(Bool, String, Int, Int, List((String, String, String))) -> Nil) -> Nil
@@ -432,6 +443,16 @@ pub const at_tab = "runes://at/"
 
 /// A tab that shows a file on disk, as opposed to a view of Runes' own, an untitled
 /// buffer, or a file as it was in the past.
+/// Drawings: the language their files have, and how their names end.
+pub const canvas_language = "rune"
+
+pub const canvas_extension = ".rux"
+
+/// Whether a file is on show as a board to draw on, not as text to type in.
+pub def is_canvas(model: Model, d: Doc) -> Bool {
+  d.language == canvas_language and not list.contains(model.raw, d.path)
+}
+
 pub def on_disk(d: Doc) -> Bool {
   d.language != "runes" and not d.untitled and not string.starts_with(d.path, "runes://")
 }
@@ -519,14 +540,23 @@ pub type Query {
   word: Bool,
 }
 
-pub type Chat {
-  role: String,
-  text: String,
+/// Who last changed a line of a file, as git tells it. `known` is false when git has no
+/// answer (no repository, a file it has never seen); `hash` is "" for a line not committed yet.
+/// `version` is the edit of the file the answer was true for.
+pub type Blame {
+  path: String,
+  line: Int,
+  version: Int,
+  known: Bool,
+  hash: String,
+  author: String,
+  time: Int,
+  summary: String,
 }
 
 pub type Overlay {
   Closed
-  /// A list to pick from: "commands", "files", "themes", "line" or "ai-key".
+  /// A list to pick from: "commands", "files", "themes" or "line".
   Palette(kind: String, query: String, index: Int)
   /// The pie menu, centred on a point. `hold` means releasing the button picks.
   /// `path` says which submenu is open ([] for the top level), and `back` remembers where
@@ -542,6 +572,8 @@ pub type Hover {
   group: Int,
   at: Pos,
   text: String,
+  /// From a language server, to be drawn as Markdown; otherwise plain words (a problem's message).
+  rich: Bool,
 }
 
 pub type Model {
@@ -590,10 +622,6 @@ pub type Model {
   hover: Option(Hover),
   diagnostics: Dict(String, List(Diagnostic)),
   output: List(String),
-  chat: List(Chat),
-  draft: String,
-  chat_busy: Bool,
-  chat_attach: Bool,
   heights: Dict(Int, Int),
   tops: Dict(String, Int),
   /// Where to put the cursor once a file has been read.
@@ -638,6 +666,8 @@ pub type Model {
   /// Every comparison is a session of its own: a commit being read, two branches side by
   /// side, two files. They stay in the list until they are closed there.
   sessions: List(Compare),
+  /// Drawings (.rux files) that are being shown as their text rather than as a board.
+  raw: List(String),
   session_ids: Int,
   /// A commit set aside in the graph, to compare another one with.
   marked: String,
@@ -660,6 +690,11 @@ pub type Model {
   /// The explorer: a name being typed, and the file or folder last pointed at.
   naming: Option(Naming),
   pointed: String,
+  blame: Option(Blame),
+  /// Git's settings as it reads them here: (key, value, where it is set), and whether changes
+  /// are made for this repository ("local") or for all of this person's ("global").
+  git_config: List((String, String, String)),
+  git_scope: String,
   /// Time travel. For each file being looked at in the past (by its path in the
   /// repository): the commit shown, and every commit that changed the file, newest first.
   travel: Dict(String, String),
@@ -680,7 +715,10 @@ pub type Model {
   ext_tab: String,
   pages: Dict(String, Page),
   /// Quick fixes extensions offer where the cursor is.
-  actions: List((Int, String)),
+  actions: List((Int, String, String)),
+  /// Where a language server has something to offer (a fix, a refactoring): the file, the
+  /// line, the edit of the file it was true for, and whether a fix is among it.
+  bulb: Option((String, Int, Int, Bool)),
   market_note: String,
   show_builtin: Bool,
   paint: Int,
@@ -719,12 +757,19 @@ pub type Msg {
   ExplorerDid(action: String, path: String)
   NamingTyped(text: String)
   NamingDone(keep: Bool)
+  NamingLeft
   FileMade(path: String, folder: Bool, problem: String)
   FileMoved(from: String, to: String, problem: String)
   FileGone(path: String, removed: Bool, problem: String)
   /// The disk changed under the explorer: folders whose contents did, files whose text did,
   /// and whether the repository itself moved.
   FilesChanged(dirs: List(String), files: List(String), git: Bool)
+  Blamed(found: Blame)
+  GitConfigAsked
+  GitConfigLoaded(found: List((String, String, String)))
+  GitConfigSet(key: String, value: String)
+  GitConfigDone(problem: String)
+  GitScopePicked(scope: String)
   GitDiscarded(paths: List(String))
   GitDiscardDone(done: Bool, problem: String)
   FileOpened(path: String)
@@ -771,19 +816,24 @@ pub type Msg {
   ThemePicked(label: String)
   FolderPicked(path: String)
   CompletionPicked(index: Int)
-  Completed(path: String, version: Int, items: List((String, String, String, Bool)))
+  /// A language server's answer, with where it was asked: the line, the column and the text of
+  /// the line up to there. `known` is false when the character typed meant nothing to it.
+  Completed(
+    path: String,
+    line: Int,
+    col: Int,
+    before: String,
+    known: Bool,
+    incomplete: Bool,
+    items: List((String, String, String, Bool, String, Int, Int, String, String, String, Int, List((Int, Int, Int, Int, String)))),
+  )
+  /// More about one item, asked for when it was rested on or taken. `apply` means it was
+  /// taken, and the changes that come with it (an import) are to be made.
+  CompletionResolved(path: String, id: Int, detail: String, text: String, edits: List((Int, Int, Int, Int, String)), apply: Bool)
   Diagnosed(path: String, items: List((Int, Int, Int, Int, Int, String, String)))
   Noted(level: String, text: String)
   Defined(path: String, line: Int, col: Int)
   Formatted(path: String, version: Int, edits: List((Int, Int, Int, Int, String)))
-  ChatTyped(text: String)
-  ChatSent
-  ChatDelta(text: String)
-  ChatDone(problem: String)
-  ChatCleared
-  ChatAttachToggled
-  AiKeySet(key: String)
-  AiKeyStored(problem: String)
   GitRefresh
   GitStatus(repo: Bool, branch: String, ahead: Int, behind: Int, files: List((String, String, String)))
   GitLogged(commits: List((String, List(String), String, Int, List(String), String)))
@@ -819,6 +869,12 @@ pub type Msg {
   CompareFilePicked(id: Int, path: String)
   CompareSide(id: Int, left: Bool, file: String, lines: List(String))
   CompareOption(id: Int, option: String)
+  /// A drawing changed on its board: the new text of its file.
+  CanvasEdited(path: String, text: String)
+  /// Show a drawing as text, or the text as a drawing again.
+  CanvasRaw(path: String)
+  /// An element of a drawing points at a file of the project ("src/shop.bea" or "src/shop.bea:12").
+  CanvasLink(link: String)
   /// Move a session that shows one commit to the commit before or after it.
   CompareStepped(id: Int, by: Int)
   SessionPicked(id: Int)
@@ -881,7 +937,8 @@ pub type Msg {
   ChangePeekMoved(by: Int)
   ChangePeekClosed
   ChangeReverted
-  ActionsFound(found: List((Int, String)))
+  ActionsFound(found: List((Int, String, String)))
+  BulbFound(path: String, line: Int, version: Int, count: Int, fix: Bool)
   ActionPicked(id: Int)
   ExtDone(problem: String)
   ExtEdits(path: String, edits: List((Int, Int, Int, Int, String)))
@@ -934,6 +991,8 @@ pub const commands = [
   ("editor.action.quickFix", "Quick Fix…"),
   ("workbench.action.terminal.rename", "Terminal: Rename…"),
   ("runes.terminals", "Terminal: Go to Terminal…"),
+  ("runes.canvas.new", "Rune Canvas: New Drawing…"),
+  ("runes.canvas.toggleText", "Rune Canvas: Show the Drawing as Text, or the Text as a Drawing"),
   ("markdown.showPreview", "Markdown: Open Preview"),
   ("markdown.showPreviewToSide", "Markdown: Open Preview to the Side"),
   ("runes.terminalToEditor", "Terminal: Move Terminal into the Editor Area"),
@@ -941,8 +1000,6 @@ pub const commands = [
   ("workbench.view.extensions", "View: Show Extensions"),
   ("workbench.actions.view.problems", "View: Show Problems"),
   ("workbench.action.output.toggleOutput", "View: Show Output"),
-  ("workbench.action.chat.open", "Chat: Open Chat"),
-  ("runes.ai.setKey", "Runes: Set AI API Key"),
   ("workbench.action.terminal.toggleTerminal", "Terminal: Toggle Terminal"),
   ("workbench.action.terminal.new", "Terminal: Create New Terminal"),
   ("workbench.action.openSettings", "Preferences: Open Settings"),
@@ -1036,10 +1093,6 @@ pub def init(_flags: Nil) -> (Model, Effect(Msg)) {
     hover: None,
     diagnostics: dict.new(),
     output: [],
-    chat: [],
-    draft: "",
-    chat_busy: False,
-    chat_attach: True,
     heights: dict.new(),
     tops: dict.new(),
     goto: None,
@@ -1068,6 +1121,7 @@ pub def init(_flags: Nil) -> (Model, Effect(Msg)) {
     bases: dict.new(),
     base_ids: 0,
     sessions: [],
+    raw: [],
     session_ids: 0,
     marked: "",
     refs: [],
@@ -1082,6 +1136,10 @@ pub def init(_flags: Nil) -> (Model, Effect(Msg)) {
     prompt: None,
     naming: None,
     pointed: "",
+    blame: None,
+    bulb: None,
+    git_config: [],
+    git_scope: "global",
     travel: dict.new(),
     histories: dict.new(),
     trees: dict.new(),
@@ -1235,9 +1293,13 @@ def above(model: Model, path: String) -> List(String) {
 /// What the explorer acts on when no path is named: what was pointed at, else the file being edited.
 def pointed_at(model: Model) -> String {
   active = group(model, model.focus).active
-  case model.pointed, within(active, model.root) {
-    "", True -> active
-    pointed, _ -> pointed
+  // What was pointed at may be gone since: removed by another program, or with its folder.
+  listed = dict.get(model.tree, dir_of(model.pointed)) |> result.unwrap([]) |> list.any(fn(entry) { entry.0 == base_name(model.pointed) })
+  still_there = model.pointed != "" and { model.pointed == model.root or listed }
+  case still_there, within(active, model.root) {
+    True, _ -> model.pointed
+    False, True -> active
+    False, False -> ""
   }
 }
 
@@ -1299,13 +1361,6 @@ pub def entries(model: Model) -> List(Entry) {
           Ok(n), Some(d) -> [Entry("Go to line " <> int.to_string(n), "", Jumped(d.path, n - 1, 0))]
           _, _ -> [Entry("Type a line number", "", OverlayClosed)]
         }
-        "ai-key" -> [
-          Entry(
-            "Store this key for " <> model.settings.ai_provider,
-            "kept encrypted on this machine",
-            AiKeySet(string.trim(query)),
-          ),
-        ]
         "branches" -> case list.filter(model.refs, fn(r) { r.0 != "tag" and not string.ends_with(r.1, "/HEAD") }) {
           [] -> [Entry("No branches were found", "", OverlayClosed)]
           found -> list.map(found, fn(r) {
@@ -1330,8 +1385,8 @@ pub def entries(model: Model) -> List(Entry) {
           found -> list.map(found, fn(c) { Entry(session_title(model, c), "session", SessionPicked(c.id)) })
         }
         "actions" -> case model.actions {
-          [] -> [Entry("No quick fixes are offered here", "", OverlayClosed)]
-          found -> list.map(found, fn(a) { Entry(a.1, "quick fix", ActionPicked(a.0)) })
+          [] -> [Entry("Nothing is offered here: no fixes, no refactorings", "", OverlayClosed)]
+          found -> list.map(found, fn(a) { Entry(a.1, a.2, ActionPicked(a.0)) })
         }
         _ ->
           list.append(
@@ -1341,7 +1396,7 @@ pub def entries(model: Model) -> List(Entry) {
           )
       }
       case kind {
-        "line" | "ai-key" -> all
+        "line" -> all
         _ -> {
           wanted = string.lowercase(query) |> string.split(" ") |> list.filter(fn(w) { w != "" })
           all
@@ -1487,10 +1542,14 @@ def change_kept(model: Model, with: fn(Doc, Lang) -> Doc) -> (Model, Effect(Msg)
       False -> changed
     }
   }
+  drawing = case doc(model) {
+    Some(d) -> is_canvas(model, d)
+    None -> False
+  }
   case doc(model) {
     None -> (model, effect.none())
-    // The settings and graph tabs are not text.
-    Some(d) if d.language == "runes" -> (model, effect.none())
+    // The settings and graph tabs are not text, and neither is a drawing on its board.
+    Some(d) if d.language == "runes" or drawing -> (model, effect.none())
     Some(d) -> {
       changed = with(d, lang(model, d.language))
       edited = changed.version != d.version
@@ -1979,7 +2038,7 @@ def next_problem(model: Model, by: Int) -> (Model, Effect(Msg)) {
       case target {
         Ok(p) -> {
           (moved, effects) = jump(model, d.path, p.from)
-          (Model(moved | hover: Some(Hover(model.focus, p.from, p.message))), effects)
+          (Model(moved | hover: Some(Hover(model.focus, p.from, p.message, False))), effects)
         }
         Error(_) -> toast(model, "No problems in this file")
       }
@@ -2039,7 +2098,6 @@ pub def run(model: Model, command: String) -> (Model, Effect(Msg)) {
     "workbench.action.showCommands" -> open_palette(model, "commands")
     "workbench.action.selectTheme" -> open_palette(model, "themes")
     "workbench.action.gotoLine" -> open_palette(model, "line")
-    "runes.ai.setKey" -> open_palette(model, "ai-key")
     "workbench.action.files.save" -> save(closed)
     "workbench.action.files.newUntitledFile" -> {
       n = model.untitled + 1
@@ -2082,6 +2140,11 @@ pub def run(model: Model, command: String) -> (Model, Effect(Msg)) {
       _ -> (Model(closed | panel: ""), focus_editor())
     }
     "workbench.view.explorer" -> side("explorer")
+    "runes.canvas.new" -> update(Model(closed | side: "explorer"), ExplorerDid("newCanvas", ""))
+    "runes.canvas.toggleText" -> case doc(model) {
+      Some(d) if d.language == canvas_language -> update(closed, CanvasRaw(d.path))
+      _ -> toast(closed, "Open a drawing (a .rux file) first.")
+    }
     "explorer.newFile" -> update(Model(closed | side: "explorer"), ExplorerDid("newFile", ""))
     "explorer.newFolder" -> update(Model(closed | side: "explorer"), ExplorerDid("newFolder", ""))
     "renameFile" -> update(Model(closed | side: "explorer"), ExplorerDid("rename", ""))
@@ -2090,7 +2153,6 @@ pub def run(model: Model, command: String) -> (Model, Effect(Msg)) {
     "workbench.files.action.collapseExplorerFolders" -> update(closed, ExplorerDid("collapse", ""))
     "workbench.view.extensions" -> side("extensions")
     "workbench.view.search" -> (Model(closed | side: "search"), effect.from(fn(_) { focus("runes-search") }))
-    "workbench.action.chat.open" -> (Model(closed | side: "chat"), effect.from(fn(_) { focus("runes-chat") }))
     "workbench.actions.view.problems" -> open_panel(closed, "problems")
     "workbench.action.output.toggleOutput" -> open_panel(closed, "output")
     "workbench.action.terminal.toggleTerminal" -> case model.panel {
@@ -2101,7 +2163,10 @@ pub def run(model: Model, command: String) -> (Model, Effect(Msg)) {
       id = model.terminal_ids + 1
       open_panel(Model(closed | terminals: list.append(model.terminals, [id]), terminal: id, terminal_ids: id), "terminal")
     }
-    "workbench.action.openSettings" -> open_view(closed, settings_tab, "Settings")
+    "workbench.action.openSettings" -> {
+      (opened, opening) = open_view(closed, settings_tab, "Settings")
+      (opened, effect.batch([opening, effect.from(fn(dispatch) { git_config(fn(found) { dispatch(GitConfigLoaded(found)) }) })]))
+    }
     "workbench.action.openSettingsJson" -> update(closed, FileOpened(model.settings_path))
     "workbench.view.scm" -> (Model(closed | side: "git"), refresh_git(model.until))
     "runes.compare" -> update(closed, CompareOpened("HEAD", "", ""))
@@ -2246,7 +2311,7 @@ pub def run(model: Model, command: String) -> (Model, Effect(Msg)) {
     "editor.action.triggerSuggest" -> case doc(model) {
       Some(d) -> (
         Model(closed | completion: doc.complete(d, lang(model, d.language), True)),
-        effect.batch([focus_editor(), ask_completion(d)]),
+        effect.batch([focus_editor(), ask_completion(d, "")]),
       )
       None -> (closed, effect.none())
     }
@@ -2288,10 +2353,84 @@ pub def run(model: Model, command: String) -> (Model, Effect(Msg)) {
   }
 }
 
-def ask_completion(d: Doc) -> Effect(Msg) {
+def ask_completion(d: Doc, ch: String) -> Effect(Msg) {
+  line = d.cursor.line
+  col = d.cursor.col
+  before = buffer.cut(buffer.line(d.lines, line), 0, col)
   effect.from(fn(dispatch) {
-    lsp_complete(d.path, d.cursor.line, d.cursor.col, fn(items) { dispatch(Completed(d.path, d.version, items)) })
+    // The server must have the text as it is now, this keystroke included, before it is asked:
+    // effects are not promised to run in the order they were made.
+    doc_changed(d.path, d.version, d.lines)
+    lsp_complete(d.path, line, col, ch, fn(known, incomplete, items) { dispatch(Completed(d.path, line, col, before, known, incomplete, items)) })
   })
+}
+
+/// What a language server offered, out of everything a list holds.
+def served(c: Completion) -> List(Item) {
+  list.filter(c.all, fn(i) { i.id >= 0 })
+}
+
+/// The list as it should be after the text or the cursor changed on its line: what the server
+/// offered when it was opened is kept and matched against what is typed now, with the
+/// editor's own snippets and words beside it.
+def resuggest(model: Model, d: Doc) -> Option(Completion) {
+  local = doc.local_items(d, lang(model, d.language), False)
+  case model.completion {
+    Some(c) if c.line == d.cursor.line -> doc.suggest(d, list.append(served(c), local), c.incomplete)
+    _ -> doc.suggest(d, local, False)
+  }
+}
+
+/// More about the item the list has come to rest on, when the server has more to say.
+def ask_about(model: Model) -> Effect(Msg) {
+  case model.completion, doc(model) {
+    Some(c), Some(d) -> case doc.chosen(c) {
+      Some(item) if item.id >= 0 and item.doc == "" ->
+        effect.from(fn(dispatch) {
+          suggest_reveal()
+          lsp_resolve(item.id, True, fn(detail, text, edits) { dispatch(CompletionResolved(d.path, item.id, detail, text, edits, False)) })
+        })
+      _ -> effect.from(fn(_) { suggest_reveal() })
+    }
+    _, _ -> effect.none()
+  }
+}
+
+/// Takes the chosen item: writes it, makes the changes that come with it, and asks the server
+/// whether there are more of those (some name the import an item needs only once it is taken).
+def take(model: Model, c: Completion) -> (Model, Effect(Msg)) {
+  item = doc.chosen(c)
+  (changed, moved) = change(Model(model | completion: None), fn(d, _) {
+    written = doc.accept(d, c)
+    case item {
+      Some(i) -> apply_around(written, i.edits)
+      None -> written
+    }
+  })
+  late = case item, doc(changed) {
+    Some(i), Some(d) if i.id >= 0 and i.edits == [] ->
+      effect.from(fn(dispatch) { lsp_resolve(i.id, False, fn(detail, text, edits) { dispatch(CompletionResolved(d.path, i.id, detail, text, edits, True)) }) })
+    _, _ -> effect.none()
+  }
+  (changed, effect.batch([moved, late]))
+}
+
+/// Changes elsewhere in the file that come with something just written at the cursor. The
+/// cursor stays on its text: lines added or taken away above it move it down or up.
+def apply_around(d: Doc, edits: List((Int, Int, Int, Int, String))) -> Doc {
+  case edits {
+    [] -> d
+    _ -> {
+      shift = list.fold(edits, 0, fn(sum, e) {
+        case e.2 < d.cursor.line or { e.2 == d.cursor.line and e.3 == 0 } {
+          True -> sum + list.length(string.split(e.4, "\n")) - 1 - { e.2 - e.0 }
+          False -> sum
+        }
+      })
+      changed = apply_edits(d, edits)
+      Doc(changed | cursor: buffer.clamp(changed.lines, Pos(d.cursor.line + shift, d.cursor.col)), anchor: buffer.clamp(changed.lines, Pos(d.anchor.line + shift, d.anchor.col)))
+    }
+  }
 }
 
 /// Applies a language server's edits, last first so earlier places stay true.
@@ -2314,13 +2453,72 @@ def apply_edits(d: Doc, edits: List((Int, Int, Int, Int, String))) -> Doc {
 /// group closing, a tab dropped on an edge, maximising), the groups slide to their new
 /// places, and each is put back at the scroll position it had: the window draws them
 /// afresh, and a fresh scroller starts at the top.
+/// The line blame is wanted for: (file inside the folder, line, edit of the file), or nothing
+/// when there is no repository, the setting is off, or what is open is not a file of the folder.
+def blame_spot(model: Model) -> Option((String, Int, Int)) {
+  case model.repo and model.settings.blame, doc(model) {
+    True, Some(d) -> case on_disk(d) and within(d.path, model.root) and d.path != model.root and not is_canvas(model, d) {
+      True -> Some((d.path, d.cursor.line, d.version))
+      False -> None
+    }
+    _, _ -> None
+  }
+}
+
+/// Where the light bulb is asked for: the file, the cursor's line, the edit of the file, and
+/// the selection. Nothing for the editor's own pages or while several cursors are at work.
+def bulb_spot(model: Model) -> Option((String, Int, Int, Pos, Pos)) {
+  case doc(model) {
+    Some(d) -> case d.language != "runes" and on_disk(d) and d.more == [] and not is_canvas(model, d) {
+      True -> {
+        (from, to) = doc.selection(d)
+        Some((d.path, d.cursor.line, d.version, from, to))
+      }
+      False -> None
+    }
+    None -> None
+  }
+}
+
+/// Whether some text is one character that belongs in a name.
+def is_word(text: String) -> Bool {
+  string.length(text) == 1 and { doc.word_at(text, 1) }.0 == 0
+}
+
 pub def update(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
-  (stepped, done) = step(model, msg)
-  (next, effects) = case stepped.expanded != model.expanded or stepped.root != model.root {
-    False -> (stepped, done)
+  (moved, acted) = step(model, msg)
+  (stepped, done) = case blame_spot(moved) == blame_spot(model) and moved.repo == model.repo {
+    True -> (moved, acted)
+    False -> case blame_spot(moved), doc(moved) {
+      Some((path, line, version)), Some(d) -> {
+        root = moved.root
+        lines = d.lines
+        (moved, effect.batch([acted, effect.from(fn(dispatch) {
+          git_blame(string.drop_start(path, string.length(root) + 1), line, d.version != d.saved, fn() { string.join(lines, "\n") }, fn(known, hash, author, time, summary) {
+            dispatch(Blamed(Blame(path, line, version, known, hash, author, time, summary)))
+          })
+        })]))
+      }
+      _, _ -> (Model(moved | blame: None), acted)
+    }
+  }
+  (lit, lighting) = case bulb_spot(stepped) == bulb_spot(model) {
+    True -> (stepped, done)
+    False -> case bulb_spot(stepped), doc(stepped) {
+      Some((path, line, version, from, to)), Some(_) -> (
+        Model(stepped | bulb: None),
+        effect.batch([done, effect.from(fn(dispatch) {
+          lsp_actions_soon(path, from.line, from.col, to.line, to.col, fn(count, fix) { dispatch(BulbFound(path, line, version, count, fix)) })
+        })]),
+      )
+      _, _ -> (Model(stepped | bulb: None), done)
+    }
+  }
+  (next, effects) = case lit.expanded != model.expanded or lit.root != model.root {
+    False -> (lit, lighting)
     True -> {
-      dirs = [stepped.root, ..list.filter(stepped.expanded, fn(dir) { dir != stepped.root })]
-      (stepped, effect.batch([done, effect.from(fn(_) { watch_dirs(dirs) })]))
+      dirs = [lit.root, ..list.filter(lit.expanded, fn(dir) { dir != lit.root })]
+      (lit, effect.batch([lighting, effect.from(fn(_) { watch_dirs(dirs) })]))
     }
   }
   case layout.shape(next.layout) != layout.shape(model.layout) or next.maximized != model.maximized {
@@ -2406,11 +2604,28 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
       (changed, moved) = change_each(model, fn(d, l, _) { doc.typed(d, l, text) })
       case doc(changed) {
         Some(d) -> {
-          completion = doc.complete(d, lang(changed, d.language), False)
-          (Model(changed | completion:), effect.batch([moved, case completion, text {
-            Some(_), _ | _, "." -> ask_completion(d)
-            _, _ -> effect.none()
-          }]))
+          wordy = is_word(text)
+          blank = string.trim(text) == ""
+          completion = case blank {
+            True -> None
+            False -> resuggest(Model(changed | completion: model.completion), d)
+          }
+          // The server is asked when a list is to be opened, when the one on show has nothing
+          // of the server's left that fits, when the server said it had more, and whenever a
+          // character that is not part of a word is typed: it may be one the server acts on
+          // (the dot after a module, the slash in an import), and it says so if it is not.
+          holds = case completion {
+            Some(c) -> list.any(c.items, fn(i) { i.id >= 0 }) and not c.incomplete
+            None -> False
+          }
+          asking = case blank, wordy, holds {
+            True, _, _ -> effect.none()
+            False, True, True -> effect.none()
+            False, True, False -> ask_completion(d, "")
+            False, False, _ -> ask_completion(d, text)
+          }
+          shown = Model(changed | completion:, hover: None)
+          (shown, effect.batch([moved, asking, ask_about(shown)]))
         }
         None -> (changed, moved)
       }
@@ -2434,25 +2649,66 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
       })
       (changed, focus_editor())
     }
-    Completed(path, version, items) -> case doc(model) {
-      Some(d) if d.path == path and d.version == version and items != [] -> {
-        line = buffer.line(d.lines, d.cursor.line)
-        (start, _) = doc.word_at(line, d.cursor.col)
-        prefix = string.lowercase(buffer.cut(line, start, d.cursor.col))
-        served = items
-          |> list.filter(fn(i) { string.starts_with(string.lowercase(i.0), prefix) })
-          |> list.map(fn(i) { Item(i.0, i.1, i.2, i.3) })
-        local = case model.completion {
-          Some(c) -> list.filter(c.items, fn(i) { not list.any(served, fn(s) { s.label == i.label }) })
-          None -> []
-        }
-        case list.take(list.append(served, local), 12) {
-          [] -> (model, effect.none())
-          all -> (Model(model | completion: Some(Completion(from: start, items: all, index: 0))), effect.none())
+    Completed(path, line, col, before, known, incomplete, items) -> case doc(model) {
+      // The answer is for where it was asked. It still holds if the cursor is on that line,
+      // at or past that column, and nothing before that column has changed: more may have
+      // been typed since, and the items are matched against that.
+      Some(d) if known and d.path == path and d.cursor.line == line and d.cursor.col >= col and d.more == [] -> {
+        text = buffer.line(d.lines, line)
+        case buffer.cut(text, 0, col) == before {
+          False -> (model, effect.none())
+          True -> {
+            (word, _) = doc.word_at(before, col)
+            fresh = list.map(items, fn(i) {
+              Item(i.0, i.1, i.2, i.3, i.4, case i.5 < 0 {
+                True -> word
+                False -> i.5
+              }, i.6, i.7, i.8, i.9, i.10, i.11)
+            })
+            local = doc.local_items(d, lang(model, d.language), False)
+            // An answer that comes while a list is open must not move the choice the person
+            // has made in it: the same item stays chosen where it is still on offer.
+            was = option.then(model.completion, doc.chosen) |> option.map(fn(i) { i.label }) |> option.unwrap("")
+            moved_on = option.map(model.completion, fn(c) { c.index > 0 }) |> option.unwrap(False)
+            listed = doc.suggest(d, list.append(fresh, local), incomplete) |> option.map(fn(c) {
+              at = list.index_map(c.items, fn(i, n) { (i.label, n) }) |> list.find(fn(e) { e.0 == was })
+              case moved_on, at {
+                True, Ok((_, n)) -> Completion(c | index: n)
+                _, _ -> c
+              }
+            })
+            shown = Model(model | completion: listed)
+            (shown, ask_about(shown))
+          }
         }
       }
       _ -> (model, effect.none())
     }
+    CompletionResolved(path, id, detail, text, edits, apply) -> case apply, doc(model) {
+      True, Some(d) if d.path == path and edits != [] -> change(model, fn(d, _) { apply_around(d, edits) })
+      False, _ -> {
+        fill = fn(items: List(Item)) {
+          list.map(items, fn(i) {
+            case i.id == id {
+              True -> Item(i | doc: text, detail: case detail {
+                "" -> i.detail
+                _ -> detail
+              }, edits: case i.edits {
+                [] -> edits
+                _ -> i.edits
+              })
+              False -> i
+            }
+          })
+        }
+        (Model(model | completion: option.map(model.completion, fn(c) { Completion(c | items: fill(c.items), all: fill(c.all)) })), effect.none())
+      }
+      _, _ -> (model, effect.none())
+    }
+    BulbFound(path, line, version, count, fix) -> (Model(model | bulb: case count > 0 {
+      True -> Some((path, line, version, fix))
+      False -> None
+    }), effect.none())
 
     Resized -> (
       Model(model | heights: list.fold(model.groups, model.heights, fn(heights, g) { dict.insert(heights, g.id, view_height(g.id)) })),
@@ -2502,7 +2758,7 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
         })
         case inside, problem {
           False, _ -> (Model(model | hover: None), effect.none())
-          True, Ok(p) -> (Model(model | hover: Some(Hover(group_id, p.from, p.message))), effect.none())
+          True, Ok(p) -> (Model(model | hover: Some(Hover(group_id, p.from, p.message, False))), effect.none())
           True, Error(_) -> (
             model,
             effect.from(fn(dispatch) { lsp_hover(d.path, line, col, fn(found) { dispatch(Hovered(group_id, at, found)) }) }),
@@ -2511,7 +2767,7 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
       }
       _, _ -> (model, effect.none())
     }
-    Hovered(group_id, at, text) -> (Model(model | hover: Some(Hover(group_id, at, text))), effect.none())
+    Hovered(group_id, at, text) -> (Model(model | hover: Some(Hover(group_id, at, text, True))), effect.none())
 
     PieEvent(kind, x, y) -> case string.split(kind, "\n"), model.overlay {
       ["node", path, what], _ -> {
@@ -2597,21 +2853,29 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
       closed = Model(model | overlay: Closed)
       inside = path != "" and path != model.root and within(path, model.root)
       case action {
-        "newFile" | "newFolder" -> {
+        "newFile" | "newFolder" | "newCanvas" -> {
           dir = folder_for(model, path)
           kind = case action {
-            "newFile" -> "file"
-            _ -> "folder"
+            "newFolder" -> "folder"
+            _ -> "file"
+          }
+          // A drawing is a file like any other; it is offered a name that ends as drawings do.
+          offered = case action {
+            "newCanvas" -> "drawing" <> canvas_extension
+            _ -> ""
           }
           expanded = case list.contains(model.expanded, dir) {
             True -> model.expanded
             False -> [dir, ..model.expanded]
           }
           (
-            Model(closed | naming: Some(Naming(kind, dir, "")), expanded:),
+            Model(closed | naming: Some(Naming(kind, dir, offered)), expanded:),
             effect.from(fn(dispatch) {
               read_dir(dir, fn(found) { dispatch(DirRead(dir, found)) })
-              focus("runes-naming")
+              case offered {
+                "" -> focus("runes-naming")
+                _ -> focus_stem("runes-naming")
+              }
             }),
           )
         }
@@ -2627,6 +2891,11 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
       }
     }
     NamingTyped(text) -> (Model(model | naming: option.map(model.naming, fn(n) { Naming(n | text:) })), effect.none())
+    // Leaving the field keeps what was typed. A name that was only offered, and never touched, is not one.
+    NamingLeft -> case model.naming {
+      Some(n) if n.kind == "file" and n.text == "drawing" <> canvas_extension -> update(model, NamingDone(False))
+      _ -> update(model, NamingDone(True))
+    }
     NamingDone(keep) -> {
       name = model.naming |> option.map(fn(n) { string.trim(n.text) }) |> option.unwrap("")
       parts = string.split(name, "/")
@@ -2752,6 +3021,18 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
         False -> refresh_status()
       },
     ]))
+    Blamed(found) -> (Model(model | blame: Some(found)), effect.none())
+    GitConfigAsked -> (model, effect.from(fn(dispatch) { git_config(fn(found) { dispatch(GitConfigLoaded(found)) }) }))
+    GitConfigLoaded(found) -> (Model(model | git_config: found), effect.none())
+    GitScopePicked(scope) -> (Model(model | git_scope: scope), effect.none())
+    GitConfigSet(key, value) -> (model, effect.from(fn(dispatch) { git_config_set(key, string.trim(value), model.git_scope, fn(problem) { dispatch(GitConfigDone(problem)) }) }))
+    GitConfigDone(problem) -> {
+      (told, timer) = case problem {
+        "" -> (model, effect.none())
+        _ -> toast(model, problem)
+      }
+      (told, effect.batch([timer, effect.from(fn(dispatch) { git_config(fn(found) { dispatch(GitConfigLoaded(found)) }) })]))
+    }
     GitDiscarded(paths) -> (model, effect.from(fn(dispatch) { git_discard(paths, fn(done, problem) { dispatch(GitDiscardDone(done, problem)) }) }))
     GitDiscardDone(done, problem) -> case problem, done {
       "", False -> (model, effect.none())
@@ -3309,6 +3590,38 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
       True -> Compare(session(model, id) | from: text)
       False -> Compare(session(model, id) | to: text)
     }), effect.none())
+    CanvasEdited(path, text) -> case find_doc(model, path) {
+      Some(d) -> {
+        lines = string.split(text, "\n")
+        case lines == d.lines {
+          True -> (model, effect.none())
+          False -> (set_doc(model, Doc(d | lines:, version: d.version + 1, cursor: Pos(0, 0), anchor: Pos(0, 0), more: [])), effect.none())
+        }
+      }
+      None -> (model, effect.none())
+    }
+    CanvasRaw(path) -> case list.contains(model.raw, path) {
+      True -> (Model(model | raw: list.filter(model.raw, fn(p) { p != path })), focus_editor())
+      False -> (Model(model | raw: [path, ..model.raw]), focus_editor())
+    }
+    CanvasLink(link) -> {
+      // "file" or "file:line", inside the open folder; the board has already refused anything else.
+      (file, line) = case string.split(link, ":") |> list.reverse {
+        [last, first, ..more] -> case int.parse(last) {
+          Ok(n) -> (string.join(list.reverse([first, ..more]), ":"), n)
+          Error(_) -> (link, 0)
+        }
+        _ -> (link, 0)
+      }
+      path = model.root <> "/" <> file
+      case string.contains(file, "..") or model.root == "" {
+        True -> (model, effect.none())
+        False -> update(Model(model | goto: case line > 0 {
+          True -> Some((path, Pos(line - 1, 0)))
+          False -> None
+        }), FileOpened(path))
+      }
+    }
     CompareOption(id, option) -> {
       c = session(model, id)
       case option {
@@ -3324,7 +3637,7 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
     CompareStepped(id, by) -> {
       c = session(model, id)
       hashes = list.map(model.rows, fn(row) { row.commit.hash })
-      at = list.index_map(hashes, fn(h, i) { (h, i) }) |> list.find(fn(e) { e.0 == session_commit(c) })
+      at = list.index_map(hashes, fn(h, i) { (h, i) }) |> list.find(fn(e) { session_commit(c) != "" and string.starts_with(e.0, session_commit(c)) })
       case at {
         Ok((_, i)) -> case list.drop(hashes, int.max(i + by, 0)) {
           [hash, .._] if i + by >= 0 -> {
@@ -3742,7 +4055,7 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
 
     CompletionPicked(index) -> case model.completion {
       Some(c) -> {
-        (changed, moved) = change(Model(model | completion: None), fn(d, _) { doc.accept(d, Completion(c | index:)) })
+        (changed, moved) = take(model, Completion(c | index:))
         (changed, effect.batch([moved, focus_editor()]))
       }
       None -> (model, effect.none())
@@ -3768,63 +4081,6 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
       _, _ -> (model, effect.none())
     }
 
-    ChatTyped(text) -> (Model(model | draft: text), effect.none())
-    ChatAttachToggled -> (Model(model | chat_attach: not model.chat_attach), effect.none())
-    ChatCleared -> (Model(model | chat: [], chat_busy: False), effect.none())
-    ChatSent -> case string.trim(model.draft), model.chat_busy {
-      "", _ | _, True -> (model, effect.none())
-      question, False -> {
-        // The open file rides along with the first question, when asked to.
-        context = case model.chat_attach, doc(model), model.chat {
-          True, Some(d), [] ->
-            "The file I have open is " <> relative(model, d.path) <> ":\n\n```" <> d.language <> "\n" <> string.join(list.take(d.lines, 1500), "\n") <> "\n```\n\n"
-          _, _, _ -> ""
-        }
-        history = list.append(model.chat, [Chat("user", question)])
-        sent = list.index_map(history, fn(c, i) {
-          case i {
-            0 -> (c.role, context <> c.text)
-            _ -> (c.role, c.text)
-          }
-        })
-        s = model.settings
-        (
-          Model(model | chat: list.append(history, [Chat("assistant", "")]), draft: "", chat_busy: True),
-          effect.from(fn(dispatch) {
-            ai_send(s.ai_provider, s.ai_model, s.ai_base_url, sent, fn(text) { dispatch(ChatDelta(text)) }, fn(problem) {
-              dispatch(ChatDone(problem))
-            })
-          }),
-        )
-      }
-    }
-    ChatDelta(text) -> case list.reverse(model.chat) {
-      [last, ..earlier] -> (Model(model | chat: list.reverse([Chat(last.role, last.text <> text), ..earlier])), effect.none())
-      [] -> (model, effect.none())
-    }
-    ChatDone(problem) -> case problem, list.reverse(model.chat) {
-      "", _ -> (Model(model | chat_busy: False), effect.none())
-      _, [last, ..earlier] -> (
-        Model(model | chat_busy: False, chat: list.reverse([Chat("problem", problem), ..case last.text {
-          "" -> earlier
-          _ -> [last, ..earlier]
-        }])),
-        effect.none(),
-      )
-      _, [] -> (Model(model | chat_busy: False), effect.none())
-    }
-    AiKeySet(key) -> case key {
-      "" -> (Model(model | overlay: Closed), effect.none())
-      _ -> (
-        Model(model | overlay: Closed),
-        effect.from(fn(dispatch) { ai_set_key(model.settings.ai_provider, key, fn(problem) { dispatch(AiKeyStored(problem)) }) }),
-      )
-    }
-    AiKeyStored(problem) -> toast(model, case problem {
-      "" -> "The key for " <> model.settings.ai_provider <> " is stored, encrypted, on this machine."
-      _ -> problem
-    })
-
     UpdateFound(version, url) -> toast(Model(model | update: Some((version, url))), "Runes " <> version <> " is available. Click the version in the status bar to get it.")
     UpdateOpened -> case model.update {
       Some((_, url)) -> (model, effect.from(fn(_) { open_external(url) }))
@@ -3848,15 +4104,30 @@ def key_in_editor(
   moves: Bool,
 ) -> (Model, Effect(Msg)) {
   case model.completion, key {
-    Some(c), "ArrowDown" if editor -> (
-      Model(model | completion: Some(Completion(c | index: { c.index + 1 } % list.length(c.items)))),
-      effect.none(),
-    )
-    Some(c), "ArrowUp" if editor -> (
-      Model(model | completion: Some(Completion(c | index: { c.index + list.length(c.items) - 1 } % list.length(c.items)))),
-      effect.none(),
-    )
-    Some(c), "Enter" | Some(c), "Tab" if editor -> change(Model(model | completion: None), fn(d, _) { doc.accept(d, c) })
+    Some(c), "ArrowDown" | Some(c), "ArrowUp" | Some(c), "PageDown" | Some(c), "PageUp" if editor -> {
+      count = list.length(c.items)
+      index = case key {
+        "ArrowDown" -> { c.index + 1 } % count
+        "ArrowUp" -> { c.index + count - 1 } % count
+        "PageDown" -> int.min(c.index + 8, count - 1)
+        _ -> int.max(c.index - 8, 0)
+      }
+      shown = Model(model | completion: Some(Completion(c | index:)))
+      (shown, ask_about(shown))
+    }
+    Some(c), "Enter" | Some(c), "Tab" if editor -> take(model, c)
+    // Taking a letter back keeps the list open, matched against what is left.
+    Some(_), "Backspace" if editor and not ctrl -> {
+      (changed, moved) = change_each(model, fn(d, l, _) { doc.editor_key(d, l, key, ctrl, shift, 1) })
+      shown = case doc(changed) {
+        Some(d) -> Model(changed | completion: case buffer.cut(buffer.line(d.lines, d.cursor.line), int.max(d.cursor.col - 1, 0), d.cursor.col) |> is_word {
+          True -> resuggest(Model(changed | completion: model.completion), d)
+          False -> None
+        })
+        None -> Model(changed | completion: None)
+      }
+      (shown, effect.batch([moved, ask_about(shown)]))
+    }
     Some(_), "Escape" -> (Model(model | completion: None), effect.none())
     _, "Escape" if model.finding -> update(model, FindClosed)
     _, "Escape" -> change_kept(Model(model | hover: None, peek: None), fn(d, _) { doc.single(d) })
