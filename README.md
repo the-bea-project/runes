@@ -25,37 +25,37 @@ from the marketplace or from a `.vsix` file.
 
 A clean, familiar workspace with split panes, a block minimap and an integrated terminal.
 
-[▶ Watch the editor demo](demo/familiar.mp4)
+![Editor demo](demo/familiar.mp4)
 
 ### Pie menu
 
 Hold the right mouse button or `Ctrl+Shift+Space` to open a customisable radial command menu.
 
-[▶ Watch the pie menu demo](demo/pie_menu.mp4)
+![Pie menu demo](demo/pie_menu.mp4)
 
 ### SSH sessions
 
 Browse, edit and work on remote projects over SSH, without installing anything on the remote machine.
 
-[▶ Watch the SSH demo](demo/ssh_sessions.mp4)
+![SSH demo](demo/ssh_sessions.mp4)
 
 ### Extensions
 
 Install language support, themes and more from Open VSX or a local `.vsix` file.
 
-[▶ Watch the extensions demo](demo/extensions.mp4)
+![Extensions demo](demo/extensions.mp4)
 
 ### VCS history navigation & diff
 
 Explore Git history, compare changes and travel through earlier versions of a file.
 
-[▶ Watch the VCS demo](demo/vcs.mp4)
+![VCS demo](demo/vcs.mp4)
 
 ### Diagramming
 
 Create a `.rux` file to draw diagrams, connect shapes and link them to your code with Rune Canvas.
 
-[▶ Watch the diagramming demo](demo/drawing.mp4)
+![Diagramming demo](demo/drawing.mp4)
 
 ## Run it
 
