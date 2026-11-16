@@ -2,7 +2,7 @@
 // machine for. The window is sandboxed and loads nothing from the network; all it can do
 // goes through the handlers below, and every one of them checks who is asking.
 "use strict";
-const { app, BrowserWindow, dialog, ipcMain, nativeImage, net, protocol, Menu, session, shell, utilityProcess } = require("electron");
+const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, protocol, Menu, session, shell, utilityProcess } = require("electron");
 const fs = require("node:fs/promises");
 const fsSync = require("node:fs");
 const crypto = require("node:crypto");
@@ -11,9 +11,7 @@ const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { relaxed, unpack, manifestOf, identity } = require("./vsix.cjs");
 const files = require("./files.cjs");
-const update = require("./update.cjs");
 const git = require("./git.cjs");
-const ask = require("./ask.cjs");
 const fonts = require("./fonts.cjs");
 const market = require("./market.cjs");
 const ssh = require("./ssh.cjs");
@@ -73,9 +71,16 @@ async function startFolder() {
 
 // --- Extensions ----------------------------------------------------------------------------------
 
+/** Extensions the person has switched off: installed still, but nothing of theirs is used or run. */
+function disabledExtensions() {
+  try { const all = JSON.parse(fsSync.readFileSync(user("extensions-disabled.json"), "utf8")); return Array.isArray(all) ? all.filter((id) => typeof id === "string").map((id) => id.toLowerCase()) : []; }
+  catch { return []; }
+}
+
 /** Every installed extension that brings code, unpacked and ready for the extension host. */
 function codeExtensions() {
   const found = new Map();
+  const off = new Set(disabledExtensions());
   const sources = [];
   try { for (const n of JSON.parse(fsSync.readFileSync(path.join(dist, "extensions/index.json"), "utf8"))) sources.push(path.join(dist, "extensions", n)); } catch {}
   try { for (const n of fsSync.readdirSync(user("extensions"))) if (n.endsWith(".vsix")) sources.push(user("extensions", n)); } catch {}
@@ -84,6 +89,7 @@ function codeExtensions() {
       const bytes = fsSync.readFileSync(source);
       const manifest = manifestOf(bytes);
       if (!manifest.main) continue;
+      if (off.has(`${manifest.publisher}.${manifest.name}`.toLowerCase())) continue;
       const id = identity(manifest);
       const dir = user("unpacked", `${id}-${String(manifest.version).replace(/[^\w.-]/g, "_")}`);
       if (!fsSync.existsSync(path.join(dir, "package.json"))) unpack(bytes, dir);
@@ -99,19 +105,72 @@ let host = null;
 let window = null;
 let folder = "";
 
+// How each extension with code stands, and what it has said: kept here so the window can show
+// it whenever it is asked for, however long ago it was said. "" is the host itself.
+const running = new Map();
+const KEPT_LINES = 2000;
+let runningTick = null;
+function runningChanged() {
+  if (runningTick) return;
+  runningTick = setTimeout(() => { runningTick = null; if (window && !window.isDestroyed()) window.webContents.send("runes:ext", { type: "running" }); }, 250);
+}
+function runningEntry(id, name) {
+  if (!running.has(id)) running.set(id, { id, name: name ?? id, version: "", state: id ? "waiting" : "active", ms: 0, error: "", lines: [], dropped: 0 });
+  return running.get(id);
+}
+function said(id, channel, textSaid) {
+  const entry = runningEntry(running.has(id) ? id : "", "Extension host");
+  for (const line of String(textSaid).replace(/\r/g, "").split("\n").slice(0, 400)) {
+    entry.lines.push([Date.now(), String(channel).slice(0, 80), line.slice(0, 4000)]);
+  }
+  if (entry.lines.length > KEPT_LINES) { entry.dropped += entry.lines.length - KEPT_LINES; entry.lines.splice(0, entry.lines.length - KEPT_LINES); }
+  runningChanged();
+}
+
+/**
+ * Ends an extension host: it is asked to stop, so that extensions can end what they started
+ * (their language servers, above all), and is made to if it has not gone soon after.
+ */
+function endHost(old) {
+  if (!old) return;
+  try { old.postMessage({ type: "stop" }); } catch {}
+  setTimeout(() => { try { old.kill(); } catch {} }, 2500);
+}
+
 function startHost() {
-  host?.kill();
-  host = utilityProcess.fork(path.join(__dirname, "exthost", "host.cjs"), [], { serviceName: "Runes Extension Host", stdio: "inherit" });
+  endHost(host);
+  host = utilityProcess.fork(path.join(__dirname, "exthost", "host.cjs"), [], { serviceName: "Runes Extension Host", stdio: "pipe" });
   const mine = host;
-  mine.on("message", (m) => { if (host === mine && window && !window.isDestroyed()) window.webContents.send("runes:ext", m); });
+  const extensions = codeExtensions();
+  running.clear();
+  runningEntry("", "Extension host");
+  for (const e of extensions) Object.assign(runningEntry(e.id, e.manifest.displayName ?? e.manifest.name), { version: String(e.manifest.version ?? "") });
+  runningChanged();
+  // What the host's process prints (an extension's child process writing to its parent, say).
+  mine.stdout?.on("data", (d) => { if (host === mine) said("", "stdout", d.toString("utf8")); });
+  mine.stderr?.on("data", (d) => { if (host === mine) said("", "stderr", d.toString("utf8")); });
+  mine.on("message", (m) => {
+    if (host !== mine || !m || typeof m !== "object") return;
+    if (m.type === "status") {
+      const entry = runningEntry(String(m.extension));
+      Object.assign(entry, { state: String(m.state), ms: Number(m.ms) || entry.ms, error: String(m.error ?? "") });
+      if (m.error) said(entry.id, "Errors", m.error);
+      return runningChanged();
+    }
+    if (m.type === "output") return said(String(m.extension ?? ""), m.channel ?? "", m.text ?? "");
+    if (m.type === "note" && m.level === "log") return said("", "Host", m.text ?? "");
+    if (window && !window.isDestroyed()) window.webContents.send("runes:ext", m);
+  });
   mine.on("exit", (code) => {
     if (host !== mine) return;
     host = null;
-    if (code && window && !window.isDestroyed()) window.webContents.send("runes:ext", { type: "note", level: "error", text: "The extension host stopped unexpectedly. Reopen the folder to start it again." });
+    for (const entry of running.values()) if (entry.id && entry.state !== "failed") entry.state = "stopped";
+    said("", "Host", "The extension host stopped" + (code ? " with code " + code : "") + ".");
+    if (code && window && !window.isDestroyed()) window.webContents.send("runes:ext", { type: "note", level: "error", text: "The extension host stopped unexpectedly. Reload Runes to start it again." });
   });
   mine.postMessage({
     type: "init", root: folder, appRoot: path.join(__dirname, ".."), storage: user("extension-storage"),
-    settings: readSettings(), extensions: codeExtensions(),
+    settings: readSettings(), extensions,
   });
 }
 
@@ -165,6 +224,36 @@ function leaveRemote(note) {
 // --- Files of the open folder, and noticing when they change ---------------------------------------
 
 /** A path the window names for changing: it must lie inside the open folder, and not be the folder itself. */
+const shq = (value) => "'" + String(value).replace(/'/g, "'\\''") + "'";
+/** A name in a folder that nothing has yet: "notes.md", then "notes copy.md", "notes copy 2.md". */
+async function freeName(dir, name, copying) {
+  const P = remote ? path.posix : path;
+  const exists = (file) => (remote ? remote.exists(file) : fs.access(file).then(() => true, () => false));
+  if (!(await exists(P.join(dir, name)))) return P.join(dir, name);
+  const dot = name.startsWith(".") ? -1 : name.lastIndexOf(".");
+  const [stem, ending] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
+  for (let n = 1; n < 1000; n++) {
+    const candidate = P.join(dir, `${stem} ${copying ? "copy" : "moved"}${n > 1 ? " " + n : ""}${ending}`);
+    if (!(await exists(candidate))) return candidate;
+  }
+  throw new Error(name + " already exists");
+}
+/** Sends a file or folder of this machine to the machine reached over SSH. */
+async function upload(from, to, info, sent) {
+  if (info.isDirectory()) {
+    await remote.create(to, true);
+    for (const entry of await fs.readdir(from, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) continue;
+      await upload(path.join(from, entry.name), path.posix.join(to, entry.name), await fs.stat(path.join(from, entry.name)), sent);
+    }
+    return;
+  }
+  if (!info.isFile()) return;
+  sent.files += 1; sent.bytes += info.size;
+  if (sent.files > 5000 || sent.bytes > 2 * 1024 * 1024 * 1024) throw new Error("That is too much to send over SSH in one go (5000 files or 2 GB)");
+  await remote.call("fastPut", from, to);
+}
+
 function within(file) {
   const P = remote ? path.posix : path;
   text(file);
@@ -362,7 +451,103 @@ const handlers = {
     }
     return true;
   },
+  /** Several at once, asked about once. Resolves to the paths that are gone. */
+  filesRemove: async (list) => {
+    if (!Array.isArray(list) || !list.length || list.length > 500) throw new Error("Bad request");
+    const P = remote ? path.posix : path;
+    // A folder takes what is in it: nothing under a folder that is going is asked for again.
+    const all = [...new Set(list.map((f) => within(f)))].sort();
+    const full = all.filter((f) => !all.some((other) => other !== f && f.startsWith(other + P.sep)));
+    const names = full.slice(0, 8).map((f) => P.basename(f)).join(", ") + (full.length > 8 ? " and " + (full.length - 8) + " more" : "");
+    if (remote) {
+      if (!(await question("confirm", "Delete " + full.length + " items for good?", names + "\n\non " + remoteSession.name + ". There is no trash on the other machine. Folders go with everything in them. This cannot be undone.", "Delete"))) return [];
+      for (const f of full) await remote.remove(f);
+      return full;
+    }
+    if (!(await question("confirm", "Move " + full.length + " items to the trash?", names + "\n\nFolders go with everything in them. You can bring them back from the trash.", "Move to trash"))) return [];
+    const gone = [];
+    for (const f of full) {
+      try { await shell.trashItem(f); gone.push(f); }
+      catch {
+        if (!(await question("confirm", "Delete " + P.basename(f) + " for good?", "It could not be moved to the trash on this system.\n" + f + "\n\nThis cannot be undone.", "Delete"))) continue;
+        await fs.rm(f, { recursive: true, force: true });
+        gone.push(f);
+      }
+    }
+    return gone;
+  },
   fileReveal: (file) => { if (!remote) shell.showItemInFolder(within(file)); },
+  /**
+   * Copies or moves files and folders of the open folder into one of its folders. Nothing is
+   * written over: a name that is taken gets " copy" added. Resolves to the new paths.
+   */
+  filePlace: async (sources, into, move) => {
+    if (!Array.isArray(sources) || !sources.length || sources.length > 500) throw new Error("Bad request");
+    const P = remote ? path.posix : path;
+    const dir = text(into) === folder ? folder : within(into);
+    const made = [];
+    for (const source of sources) {
+      const from = within(source);
+      if (dir === from || dir.startsWith(from + P.sep)) throw new Error("A folder cannot be put inside itself");
+      if (move && P.dirname(from) === dir) { made.push(from); continue; }
+      const to = await freeName(dir, P.basename(from), !move);
+      if (remote) {
+        if (move) await remote.rename(from, to);
+        else await remote.exec("cp -R -- " + shq(from) + " " + shq(to));
+      } else if (move) {
+        await fs.rename(from, to).catch(async (e) => { if (e.code !== "EXDEV") throw e; await fs.cp(from, to, { recursive: true, errorOnExist: true, force: false }); await fs.rm(from, { recursive: true, force: true }); });
+      } else {
+        await fs.cp(from, to, { recursive: true, errorOnExist: true, force: false });
+      }
+      made.push(to);
+    }
+    if (remote) remote.forget(dir);
+    return made;
+  },
+  /**
+   * Files and folders dragged in from outside Runes (or copied in a file manager) are copied
+   * into a folder of the open folder. Where each one lives is asked of the system by the
+   * preload, from the dropped thing itself. Nothing is written over, and only inside the folder.
+   */
+  fileImport: async (paths, into) => {
+    if (!Array.isArray(paths) || !paths.length || paths.length > 500) throw new Error("Bad request");
+    const P = remote ? path.posix : path;
+    const dir = text(into) === folder ? folder : within(into);
+    const made = [];
+    for (const given of paths) {
+      const from = path.resolve(text(given));
+      if (!path.isAbsolute(given) || given.includes("\0")) throw new Error("Bad request");
+      const info = await fs.stat(from);
+      if (!remote && (dir === from || dir.startsWith(from + path.sep))) throw new Error("A folder cannot be put inside itself");
+      const to = await freeName(dir, path.basename(from), true);
+      if (remote) await upload(from, to, info, { files: 0, bytes: 0 });
+      else await fs.cp(from, to, { recursive: true, errorOnExist: true, force: false });
+      made.push(to);
+    }
+    if (remote) remote.forget(dir);
+    return made;
+  },
+  /**
+   * Files copied in a file manager, as the system's clipboard names them (absolute paths).
+   * File managers put them there as a list of file:// addresses, under one name or another.
+   */
+  clipboardFiles: async () => {
+    const found = [];
+    try {
+      for (const item of await clipboard.read()) {
+        for (const type of item.types) {
+          if (!/uri-list|gnome-copied-files|file-url|FileNameW/i.test(type)) continue;
+          const data = await item.getType(type).catch(() => null);
+          const raw = typeof data === "string" ? data : typeof data?.text === "function" ? await data.text() : "";
+          for (const line of raw.split(/\r?\n|\0/)) {
+            if (line.startsWith("file://")) { try { found.push(require("node:url").fileURLToPath(line.trim())); } catch {} }
+          }
+        }
+        if (found.length) break;
+      }
+    } catch {}
+    return [...new Set(found)].slice(0, 500);
+  },
   /** Which folders the explorer has open, so they can be followed. */
   watchDirs: (dirs) => watch(Array.isArray(dirs) ? dirs : []),
 
@@ -416,6 +601,23 @@ const handlers = {
     await fs.rm(user("extensions", path.basename(text(name)).replace(/[^\w.-]/g, "_")), { force: true });
     startHost();
   },
+  /** The ids ("publisher.name", lower case) of the extensions that are switched off. */
+  extensionsDisabled: () => disabledExtensions(),
+  /** Switches an extension on or off. The extension host starts afresh, without it or with it. */
+  extensionEnable: async (id, on) => {
+    const key = text(id, 200).toLowerCase();
+    if (!/^[\w-]+\.[\w.-]+$/.test(key)) throw new Error("Bad request");
+    const off = new Set(disabledExtensions());
+    if (on) off.delete(key); else off.add(key);
+    await fs.mkdir(user(), { recursive: true });
+    await fs.writeFile(user("extensions-disabled.json"), JSON.stringify([...off].sort(), null, 2));
+    startHost();
+    return [...off];
+  },
+  /** Every extension with code: whether it is running, how long it took to start, and what it has said. */
+  extensionsRunning: () => [...running.values()].map((e) => ({ id: e.id, name: e.name, version: e.version, state: e.state, ms: e.ms, error: e.error, dropped: e.dropped, lines: e.lines })),
+  /** Starts the extension host again: every extension is loaded afresh. */
+  extensionsRestart: () => { startHost(); },
   marketSearch: (query) => market.search(text(query, 200), (url, options) => net.fetch(url, options)),
   marketDownload: (namespace, name) => market.download(text(namespace, 120), text(name, 120), (url, options) => net.fetch(url, options)),
 
@@ -428,7 +630,6 @@ const handlers = {
   gitShow: (hash) => git.show(folder, text(hash, 40)),
   gitStage: (paths) => git.stage(folder, paths),
   gitUnstage: (paths) => git.unstage(folder, paths),
-  gitCommit: (message) => git.commit(folder, message),
   /** Asks first: this is the one thing in source control that loses work. Resolves true when done. */
   gitDiscard: async (paths) => {
     if (!Array.isArray(paths) || !paths.length) throw new Error("Bad request");
@@ -442,9 +643,6 @@ const handlers = {
   gitRefs: () => git.refs(folder),
   /** Who last changed a line; `content` is the text being edited, when it differs from the disk. */
   gitBlame: (name, line, content) => git.blame(folder, text(name), whole(line, 0, 10_000_000), typeof content === "string" ? text(content, 20 << 20) : undefined),
-  gitConfig: () => git.config(folder),
-  gitConfigSet: (key, value, scope) => git.setConfig(folder, text(key, 100), text(value, 1000), text(scope, 10)),
-  gitSwitch: (kind, name) => git.switchTo(folder, text(kind, 10), text(name, 200)),
   marketReadme: (namespace, name) => market.readme(text(namespace, 100), text(name, 100), (address, options) => net.fetch(address, options)),
   marketIcon: (url) => market.icon(text(url, 600), (address, options) => net.fetch(address, options), pictures, (bytes, type) => {
     // A photograph of an icon is brought down to the size it is shown at.
@@ -536,10 +734,18 @@ const handlers = {
   termResize: (id, cols, rows) => { try { terminals.get(id)?.resize(whole(cols, 2, 1000), whole(rows, 1, 1000)); } catch {} },
   termKill: (id) => { terminals.get(id)?.kill(); terminals.delete(id); },
 
-  checkUpdate: () => (readSettings()["runes.update.check"] === false ? null : update.check(app.getVersion())),
+  /**
+   * Starts Runes afresh in the same window: the page is loaded again and the extension host
+   * with it. The folder (and a machine reached over SSH) stay as they are.
+   */
+  reload: () => {
+    for (const [id, term] of terminals) { try { term.kill(); } catch {} terminals.delete(id); }
+    unwatch();
+    endHost(host); host = null;
+    setTimeout(() => { if (window && !window.isDestroyed()) window.webContents.reload(); }, 30);
+  },
   zoom: (by) => { const w = window.webContents; w.setZoomLevel(by === 0 ? 0 : Math.max(-3, Math.min(5, w.getZoomLevel() + (by > 0 ? 0.5 : -0.5)))); },
   devtools: () => window.webContents.toggleDevTools(),
-  /** Only ever https, and only github.com: this is used for the update link. */
   /**
    * A link in a readme or a Markdown preview. Only http(s), and only after the user has seen
    * the whole address and agreed: the text of a link says nothing about where it goes.
@@ -554,24 +760,15 @@ const handlers = {
     });
     if (answer.response === 0) shell.openExternal(target.href);
   },
-  openExternal: (url) => { if (/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/releases\//.test(text(url, 500))) shell.openExternal(url); },
 };
 
 
-// Questions from git, ssh and gpg (a signing key's passphrase, mostly) are asked in the window.
-let asking = null;
-function listenForQuestions() {
-  ask.serve((kind, prompt) => {
-    const title = prompt.trim().replace(/:$/, "") || "Git needs an answer";
-    const where = folder ? "Asked by git, working in " + path.basename(folder) + "." : "Asked by git.";
-    if (kind === "confirm") return question("confirm", title, where, "Yes");
-    return question(kind, title, where + (kind === "secret" ? " It is handed straight to git and is not kept by Runes." : ""));
-  }, { scripts: user("helpers") }).then((served) => { asking = served; git.environment(served.env); },
-    (error) => console.warn("Runes: git cannot ask questions here:", error.message));
-}
+// Something that went wrong where nothing was waiting for it is written down, and the app
+// carries on: the alternative is a box that stops every window until it is answered.
+process.on("uncaughtException", (e) => { console.error("[runes]", e?.stack ?? e); });
+process.on("unhandledRejection", (e) => { console.error("[runes]", e?.stack ?? e); });
 
 app.whenReady().then(() => {
-  listenForQuestions();
   // dist/ is served as runes://app/, so the page can fetch its own files and nothing else.
   protocol.handle("runes", async (request) => {
     const url = new URL(request.url);
@@ -613,7 +810,6 @@ app.whenReady().then(() => {
 
 app.on("window-all-closed", () => {
   unwatch();
-  asking?.close();
   remote?.end();
   for (const term of terminals.values()) { try { term.kill(); } catch {} }
   host?.postMessage({ type: "stop" });

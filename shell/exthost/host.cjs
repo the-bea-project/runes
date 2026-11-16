@@ -20,7 +20,7 @@ const host = {
     const document = host.active && host.documents.get(host.active);
     if (!document) return undefined;
     const zero = new Position(0, 0);
-    return { document, selection: new shim.Range(zero, zero), selections: [], options: { tabSize: 2, insertSpaces: true }, viewColumn: 1, edit: async () => false, setDecorations() {}, revealRange() {} };
+    return { document, selection: new shim.Selection(zero, zero), selections: [new shim.Selection(zero, zero)], visibleRanges: [], options: { tabSize: host.tabSize ?? 4, insertSpaces: host.insertSpaces ?? true }, viewColumn: 1, edit: async () => false, insertSnippet: async () => false, setDecorations() {}, revealRange() {}, show() {}, hide() {} };
   },
   diagnosticsChanged(uri) {
     const key = uri.toString();
@@ -47,6 +47,39 @@ host.applyEdit = (edit) => {
   if (!files.length) return false;
   port.send({ type: "edits", files });
   return true;
+};
+
+// Files of the open folder whose names fit a glob such as [two stars]/[star].py or "{a,b}/x.toml".
+host.findFiles = async (glob, base, max = 2000) => {
+  if (!base || typeof glob !== "string") return [];
+  let source = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*" && glob[i + 1] === "*") { source += "(?:.*/)?"; i += glob[i + 2] === "/" ? 2 : 1; }
+    else if (c === "*") source += "[^/]*";
+    else if (c === "?") source += "[^/]";
+    else if (c === "{") source += "(?:";
+    else if (c === "}") source += ")";
+    else if (c === ",") source += "|";
+    else source += /[\w/-]/.test(c) ? c : "\\" + c;
+  }
+  let test;
+  try { test = new RegExp("^" + source + "$"); } catch { return []; }
+  const found = [];
+  let seen = 0;
+  const walk = async (dir, rel, depth) => {
+    if (found.length >= max || depth > 12 || seen > 20000) return;
+    let entries = [];
+    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      seen += 1;
+      const at = rel ? rel + "/" + e.name : e.name;
+      if (e.isDirectory()) { if (e.name !== "node_modules" && e.name !== ".git" && !e.isSymbolicLink()) await walk(path.join(dir, e.name), at, depth + 1); }
+      else if (test.test(at) && found.length < max) found.push(URI.file(path.join(dir, e.name)));
+    }
+  };
+  await walk(base, "", 0);
+  return found;
 };
 
 /** The quick fixes last offered, so the one the user picks can be found again. */
@@ -107,10 +140,15 @@ function context(entry) {
   };
 }
 
+/** Tell the shell how an extension stands, for the list of running extensions. */
+const status = (id, state, more = {}) => port.send({ type: "status", extension: id, state, ...more });
+
 async function activate(id) {
   const entry = loaded.get(id);
   if (!entry || entry.activated) return;
   entry.activated = true;
+  const began = Date.now();
+  status(id, "starting");
   try {
     const main = path.resolve(entry.dir, entry.manifest.main);
     if (!main.startsWith(entry.dir + path.sep)) throw new Error("its main script lies outside the extension");
@@ -118,10 +156,11 @@ async function activate(id) {
     entry.context = context(entry);
     entry.description.exports = await entry.module.activate?.(entry.context);
     entry.description.isActive = true;
+    status(id, "active", { ms: Date.now() - began });
     note("log", `[Extension Host] activated ${id}`);
   } catch (e) {
-    note("error", `The extension ${id} failed to start: ${e?.message ?? e}`);
-    note("log", `[Extension Host] ${e?.stack ?? e}`);
+    status(id, "failed", { ms: Date.now() - began, error: String(e?.stack ?? e?.message ?? e).slice(0, 4000) });
+    note("error", `The extension ${id} failed to start: ${e?.message ?? e}. Its output is under Extensions, Running Extensions.`);
   }
 }
 
@@ -359,7 +398,7 @@ async function answer(m) {
         if (uri?.scheme === "file" && range) return { path: uri.fsPath, line: range.start.line, col: range.start.character };
       }
       if (m.kind === "format") {
-        const edits = await provider.provideDocumentFormattingEdits(document, { tabSize: 2, insertSpaces: true }, token);
+        const edits = await provider.provideDocumentFormattingEdits(document, { tabSize: m.tabSize ?? 4, insertSpaces: m.insertSpaces ?? true }, token);
         if (edits?.length) return edits.map((e) => ({ line: e.range.start.line, col: e.range.start.character, endLine: e.range.end.line, endCol: e.range.end.character, text: e.newText }));
       }
     } catch (e) {
@@ -379,7 +418,9 @@ port.listen(async (m) => {
         entry.api = shim.create(host, description);
         loaded.set(extension.id, entry);
         host.extensions.set(extension.id, description);
+        status(extension.id, "waiting");
       }
+      host.languages = m.languages ?? [];
       wake();
     } else if (m.type === "settings") {
       host.settings = m.settings ?? {};
@@ -390,7 +431,9 @@ port.listen(async (m) => {
     else if (m.type === "saved") saved(m);
     else if (m.type === "request") port.send({ type: "response", id: m.id, result: await answer(m) });
     else if (m.type === "stop") {
-      await Promise.allSettled([...loaded.values()].map((e) => e.module?.deactivate?.()));
+      // Extensions are given a moment to put things away; one that never finishes does not keep the host alive.
+      setTimeout(() => process.exit(0), 1500).unref?.();
+      await Promise.allSettled([...loaded.values()].map((e) => { try { return e.module?.deactivate?.(); } catch { return undefined; } }));
       process.exit(0);
     }
   } catch (e) {
@@ -398,5 +441,17 @@ port.listen(async (m) => {
   }
 });
 
-process.on("uncaughtException", (e) => note("log", `[Extension Host] uncaught: ${e?.stack ?? e}`));
-process.on("unhandledRejection", (e) => note("log", `[Extension Host] unhandled: ${e?.stack ?? e}`));
+/** The extension some code belongs to, going by the files named in a stack. */
+function owner(stack) {
+  for (const [id, entry] of loaded) if (String(stack).includes(entry.dir + path.sep)) return id;
+  return "";
+}
+const said = (extension, channel, text) => port.send({ type: "output", extension, channel, text: String(text).slice(0, 4000) });
+process.on("uncaughtException", (e) => said(owner(e?.stack), "Errors", `uncaught: ${e?.stack ?? e}`));
+process.on("unhandledRejection", (e) => said(owner(e?.stack), "Errors", `unhandled: ${e?.stack ?? e}`));
+// What extensions print with console.log and the like is theirs to see too.
+for (const level of ["log", "info", "warn", "error", "debug"]) {
+  console[level] = (...parts) => said(owner(new Error().stack), "Console", (level === "warn" || level === "error" ? level + ": " : "") + parts.map((p) => (typeof p === "string" ? p : p instanceof Error ? p.stack ?? p.message : (() => { try { return JSON.stringify(p); } catch { return String(p); } })())).join(" "));
+}
+// The host lives only as long as the editor that started it.
+process.on("disconnect", () => process.exit(0));

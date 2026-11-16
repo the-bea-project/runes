@@ -16,30 +16,21 @@ function over(remote) {
   P = remote ? path.posix : path;
 }
 
-// What a git on this machine is run with besides the usual: the programs that let git, ssh
-// and gpg put their questions to Runes (see ask.cjs). Set once by the shell.
-let helpers = {};
-function environment(extra) { helpers = extra ?? {}; }
-
 function local(root, args, input, more = {}) {
   return new Promise((resolve, reject) => {
     const child = execFile("git", ["-c", "core.quotepath=off", "-c", "color.ui=false", ...args],
-      { cwd: root, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, ...helpers, ...more, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0", LC_ALL: "C" } },
+      { cwd: root, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, ...more, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0", LC_ALL: "C" } },
       (error, stdout, stderr) => (error ? reject(new Error(told(stderr || error.message))) : resolve(stdout)));
-    if (input !== undefined) child.stdin.end(input);
+    // Git may be gone before it has read what it is sent (a file it will not take, say): its own
+    // answer says what went wrong, and a pipe that closed early must not bring the shell down.
+    child.stdin?.on("error", () => {});
+    if (input !== undefined) child.stdin?.end(input);
   });
 }
 
 /** What git said went wrong, in a line or two a person can act on. */
 function told(stderr) {
   const lines = String(stderr).trim().split("\n").map((l) => l.trim()).filter(Boolean);
-  if (lines.some((l) => /Please tell me who you are|empty ident name|unable to auto-detect email/i.test(l))) {
-    return "Git does not know who you are yet. Set your name and email under Git in the settings, then commit again.";
-  }
-  if (lines.some((l) => /failed to sign the data|failed to write commit object|Couldn't (load|find) (public )?key|No private key found/i.test(l))) {
-    const why = lines.filter((l) => !/^(error|fatal): (gpg )?failed to (sign the data|write commit object)/i.test(l) && !/^\[GNUPG:\]/.test(l)).map((l) => l.replace(/^(error|fatal|gpg): /i, "")).filter((l, i, all) => all.indexOf(l) === i);
-    return "The commit could not be signed" + (why.length ? ": " + why.slice(0, 2).join("; ") : "") + ". Check the signing key under Git in the settings.";
-  }
   return lines[0] ?? "";
 }
 
@@ -183,23 +174,6 @@ async function refs(root) {
   } catch { return []; }
 }
 
-/**
- * Moves the working tree to another branch. A remote branch is followed by a local one of
- * the same name; a tag or commit is checked out on its own, detached. Git refuses, and
- * says why, when files that are changed here would be overwritten.
- */
-async function switchTo(root, kind, name) {
-  ref(name);
-  if (kind === "branch") return void (await git(root, ["switch", "--no-guess", name]));
-  if (kind === "remote") {
-    const local = name.slice(name.indexOf("/") + 1);
-    ref(local);
-    const have = await git(root, ["rev-parse", "--verify", "--quiet", "refs/heads/" + local]).then(() => true, () => false);
-    return void (await git(root, have ? ["switch", "--no-guess", local] : ["switch", "--track", "-c", local, "refs/remotes/" + name]));
-  }
-  await git(root, ["switch", "--detach", name]);
-}
-
 const stage = (root, files) => git(root, ["add", "--", ...inside(root, files)]);
 const unstage = (root, files) => git(root, ["reset", "-q", "HEAD", "--", ...inside(root, files)]).catch(() => git(root, ["rm", "-q", "--cached", "--", ...inside(root, files)]));
 /**
@@ -219,71 +193,6 @@ async function discard(root, files) {
   const loose = paths.filter((file) => !committed.has(file));
   if (loose.length) await git(root, ["clean", "-q", "-f", "--", ...loose]);
 }
-
-async function commit(root, message) {
-  if (typeof message !== "string" || !message.trim() || message.length > 20000) throw new Error("A commit needs a message");
-  // The message goes in on standard input, so nothing in it can be read as an option.
-  if (runner !== local || !helpers.RUNES_GPG_WRAPPER) return void (await git(root, ["commit", "-q", "-F", "-"], message));
-  // On this machine gpg is run through a stand-in that can ask for the key's passphrase in
-  // the window (helpers/gpg.cjs). It is named for this one command only, through the
-  // environment, so nobody's git configuration is touched.
-  const real = (await setting(root, "gpg.openpgp.program")) || (await setting(root, "gpg.program")) || "gpg";
-  await local(root, ["commit", "-q", "-F", "-"], message, {
-    RUNES_GPG: real, GIT_CONFIG_COUNT: "2",
-    GIT_CONFIG_KEY_0: "gpg.program", GIT_CONFIG_VALUE_0: helpers.RUNES_GPG_WRAPPER,
-    GIT_CONFIG_KEY_1: "gpg.openpgp.program", GIT_CONFIG_VALUE_1: helpers.RUNES_GPG_WRAPPER,
-  });
-}
-
-// --- Who commits, and how commits are signed ---
-
-/** One setting as git sees it from this folder, "" when it is not set. */
-async function setting(root, key) {
-  try { return (await git(root, ["config", "--get", key])).replace(/\n$/, ""); } catch { return ""; }
-}
-
-// The settings the window may read and change. Nothing that names a program to run is here:
-// a page that could set `gpg.program` or `core.sshCommand` could run anything.
-const SETTINGS = {
-  "user.name": (v) => v.length <= 200,
-  "user.email": (v) => v.length <= 200 && !/\s/.test(v),
-  "user.signingkey": (v) => v.length <= 1000,
-  "commit.gpgsign": (v) => v === "true" || v === "false",
-  "tag.gpgsign": (v) => v === "true" || v === "false",
-  "gpg.format": (v) => ["openpgp", "ssh", "x509"].includes(v),
-  "init.defaultBranch": (v) => /^[\w./-]{1,100}$/.test(v),
-  "pull.rebase": (v) => v === "true" || v === "false",
-};
-
-/** [[key, value, where it is set: "local", "global", "system" or ""]] for every setting above. */
-async function config(root) {
-  const out = [];
-  for (const key of Object.keys(SETTINGS)) {
-    let value = "", scope = "";
-    try {
-      const line = (await git(root, ["config", "--show-scope", "--get", key])).replace(/\n$/, "");
-      const tab = line.indexOf("\t");
-      scope = line.slice(0, tab); value = line.slice(tab + 1);
-    } catch {}
-    out.push([key, value, scope]);
-  }
-  return out;
-}
-
-/** Sets one of the settings above for this repository ("local") or for this user ("global"). "" removes it. */
-async function setConfig(root, key, value, scope) {
-  if (!Object.hasOwn(SETTINGS, key) || !["local", "global"].includes(scope) || typeof value !== "string") throw new Error("Bad request");
-  if (/[\x00-\x1f\x7f]/.test(value) || value.startsWith("-")) throw new Error("That value cannot be used");
-  if (value === "") {
-    // Removing what is not there is not a failure (git answers 5).
-    try { await git(root, ["config", "--" + scope, "--unset-all", key]); } catch {}
-    return;
-  }
-  if (!SETTINGS[key](value)) throw new Error("That value cannot be used for " + key);
-  await git(root, ["config", "--" + scope, key, value]);
-}
-
-// --- Blame ---
 
 /**
  * Who last changed one line (counted from 0), and when: { hash, author, mail, time, summary },
@@ -306,4 +215,4 @@ async function blame(root, name, line, text) {
   return { hash, author: field("author"), mail: field("author-mail").replace(/^<|>$/g, ""), time: Number(field("author-time")) || 0, summary: field("summary").slice(0, 300) };
 }
 
-module.exports = { over, environment, blame, config, setConfig, status, log, days, tree, history, show, stage, unstage, discard, commit, file, changed, refs, switchTo, EMPTY_TREE };
+module.exports = { over, blame, status, log, days, tree, history, show, stage, unstage, discard, file, changed, refs, EMPTY_TREE };

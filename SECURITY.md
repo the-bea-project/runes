@@ -1,4 +1,4 @@
-# Security review of Runes 1.1.0
+# Security review of Runes 1.2.0
 
 What was checked, what was changed because of it, and what remains. Reviewed against the code
 in this repository; the automated checks named below are in `shell/shell.test.cjs` and
@@ -25,15 +25,9 @@ in this repository; the automated checks named below are in `shell/shell.test.cj
 | A VSIX writing outside its folder (zip slip) | Each entry's resolved path must stay inside the extension's folder | unit test |
 | A VSIX expanding without limit | Unpacking stops past 600 MB | unit test |
 | Silent install of code | An extension with a `main` script needs a native confirmation naming its publisher; declining writes nothing | e2e |
-| A signing key's passphrase leaking | It is asked for in the window, sent to the shell, handed to gpg on a pipe (never a command line, never a file) and dropped. It is not logged and not kept; gpg's own agent may remember it, as it would from a terminal | unit test, end-to-end: the passphrase is absent from the page, the launchers and the repository's settings |
-| Another program asking questions in Runes' name, or reading an answer | The helpers reach the shell over a socket in a folder only this user can enter (a named pipe on Windows), and every question must carry a random token made when Runes starts and given only to the git it runs; a question without it is dropped unasked | unit test |
-| The page making git run a program | Git settings are changed only through a fixed list of names (`user.name`, `user.email`, `user.signingkey`, `commit.gpgsign`, `tag.gpgsign`, `gpg.format`, `init.defaultBranch`, `pull.rebase`); nothing that names a program (`gpg.program`, `core.sshCommand`, aliases, hooks) can be set; values may not start with `-` or hold line breaks | unit test, end-to-end: the handler is called from the page |
-| The gpg stand-in left in someone's configuration | It is named for the one commit only, through the environment (`GIT_CONFIG_COUNT`), never written to any config file | unit test |
 | A marketplace "picture" that is something else | What the registry calls a file is ignored; the first bytes must be those of a PNG, JPEG, GIF, WebP or SVG, it must be under 4 MB as fetched and under 1 MB as shown (large ones are scaled down), and it is only ever shown in an `<img>`, where an SVG cannot run script. The cache on disk is believed only if it holds a `data:image/` address | unit test |
-| Update link pointing elsewhere | Only a release URL of the configured repository is accepted; only github.com release links are opened | unit test |
-| Options or commands smuggled into git | git runs without a shell; paths must lie inside the open folder and may not start with `-`; hashes must be hex; the commit message goes in on standard input | unit test |
-| A branch, tag or commit name used to smuggle an option into git (compare, read an old version, switch branch) | Names must match a strict pattern, cannot start with `-` and cannot contain `..`; git runs without a shell | unit test |
-| Switching branch destroying work | `git switch` is run plainly, never with `--force` or `--discard-changes`; git's refusal is shown as it is | unit test, end-to-end |
+| Options or commands smuggled into git | git runs without a shell; paths must lie inside the open folder and may not start with `-`; hashes must be hex | unit test |
+| A branch, tag or commit name used to smuggle an option into git (compare, read an old version) | Names must match a strict pattern, cannot start with `-` and cannot contain `..`; git runs without a shell | unit test |
 | A marketplace icon used to load something else into the window | Icons are fetched by the shell, only from the registry's own origin, only as an image type, at most 600 KB, and handed to the page as a `data:` address shown in an `<img>` | unit test |
 | A quick fix or extension command changing files behind the user's back | Edits from extensions are applied only to files that are open, as ordinary undoable edits; nothing is written to disk until the user saves | end-to-end |
 | Markdown (a file being previewed, or an extension's readme from the marketplace) bringing script or markup into the window | The renderer escapes everything and emits only its own fixed set of tags; HTML in the source is dropped, script and style bodies included. The page's content security policy would refuse inline script regardless | unit test, end-to-end |
@@ -56,6 +50,14 @@ in this repository; the automated checks named below are in `shell/shell.test.cj
 | A drawing (`.rux`) from someone else | The file is data and is rebuilt field by field: known element types, finite numbers within bounds, colours and line styles only from the lists the board offers, ids of plain characters, text and element counts capped. Text reaches the page only as text nodes; nothing from the file is used as markup, as a style, or as an address. A newer format is refused, not guessed at | unit: `test/canvas.test.mjs`; e2e: a hostile drawing shows inert shapes and runs nothing |
 | A drawing's link to a file | Only a relative path inside the open folder, without `..`, a scheme or a leading `/`, checked when the file is read and again when the link is followed. It opens the file in the editor and nothing else | unit; e2e |
 | Saving a picture of a drawing | `saveImage` writes only what decodes to a PNG (by its first bytes), only to the place chosen in the save dialogue. SVG pictures are built from the same checked elements, with no script, no foreign content and no outside references | e2e: other data is refused |
+| Copying, moving or deleting in the explorer reaching outside the open folder | `filePlace`, `fileImport` and `filesRemove` resolve every path they are given: what is copied or moved from, and the folder it goes to, must lie inside the open folder (a file brought in from outside may come from anywhere the person could read, and only ever lands inside). Nothing is written over: a name that is taken gets "copy" added. A folder cannot be put into itself. Deleting several asks once, naming them | e2e: requests naming `/etc`, `/tmp`, a relative path, the folder itself and a folder inside itself are all refused |
+| Files copied in a file manager, pasted into the explorer | The system's clipboard is read by the shell, only when Paste is used, and only for the names of files; they are copied in as above | e2e |
+| An extension id used as a path when switching it off | The id must be `publisher.name` in plain characters; the list is one JSON file in the profile. A switched-off extension is never unpacked for the extension host or handed to it | e2e: `../../etc/passwd` is refused; a disabled extension is gone from the running list |
+| What extensions print reaching the page as markup | Output channels, console output and errors are kept by the shell as text (capped at 2000 lines an extension, 4000 characters a line) and drawn as text nodes | e2e |
+| A language's rules set by an extension as it runs (`setLanguageConfiguration`) | Handed to the window as JSON: patterns as text, compiled with `new RegExp` inside the page and only ever tested against the line being typed on; a pattern that does not compile is passed over | unit: `test/layout.test.mjs`, `test/vscode-api.test.cjs` |
+| Reload losing work | Refused while any file has changes that are not saved; otherwise the page and the extension host start afresh and the open files are opened again | e2e |
+| The terminal's clipboard | Pasting reads the clipboard only on Ctrl+Shift+V, Ctrl+V or Shift+Insert in a focused terminal; copying writes only what is selected there | e2e |
+| A merge conflict settled wrongly | Settling one is an ordinary edit of the open file: it can be undone, and nothing is written or staged until the person saves and stages | e2e; unit: `test/layout.test.mjs` |
 | Dependencies | What ships (`npm audit --omit=dev`): 0 known vulnerabilities at the time of this build. The release tooling, which is not shipped, has one moderate advisory: see below | `npm audit` |
 
 ## Changed during the review
@@ -65,6 +67,10 @@ in this repository; the automated checks named below are in `shell/shell.test.cj
 - `app.enableSandbox()` was added, so any renderer is sandboxed, not just the main window.
 - VSIX unpacking gained the size limit above.
 - Extension storage file names are derived from the manifest and stripped to `[\w.-]`.
+- 1.2.0 took out what Runes had no need to do itself: committing (and with it the handling of
+  signing passphrases and the stand-ins for gpg and askpass), switching branch, changing git's
+  settings, and the check for updates with its one outside address. The shell has fewer
+  requests to answer, and none of them now reaches the network except the marketplace's.
 
 ## Known and accepted
 
@@ -73,11 +79,6 @@ in this repository; the automated checks named below are in `shell/shell.test.cj
   page that could run its own script could answer them itself. Such a page could already
   overwrite any file in the open folder through the save handler, so this adds no new reach;
   and the content security policy is what stops such script from running at all.
-- **Signing has been tried with GPG keys on Linux only.** SSH signing keys go through the
-  same question (ssh's askpass), and Windows gets launchers of its own, but neither could be
-  run where this release was built. On a machine reached over SSH, git signs there and Runes
-  cannot pass a passphrase along: the key has to be unlocked on that machine.
-- **The passphrase question is drawn in the window**, as the others are. See the first point.
 - **A moderate advisory in the release tooling.** `minimatch`, pulled in by electron-builder,
   can be made slow by a crafted pattern (GHSA-g3hv-75wg-m249). It runs only when building
   installers, on patterns from this repository's own configuration, and is not part of the
@@ -92,7 +93,7 @@ in this repository; the automated checks named below are in `shell/shell.test.cj
 - **Open VSX is a public registry.** Runes does not verify publishers or signatures beyond
   what the registry does. The confirmation names the publisher; check it.
 - **Git runs your repository's configuration.** Hooks and configured programs (an editor, a
-  pager, a credential helper) are git's, not Runes'. Committing and switching branch run the repository's hooks.
+  pager, a credential helper) are git's, not Runes'. Runes itself only reads, stages, unstages and discards: it never commits, switches branch, fetches or pushes.
 - **No workspace trust.** Opening a folder starts the language servers its files call for, and
   runs `git status` and `git log` in it.
 - **The window can read and write any file you can.** It is an editor. The protection is that
@@ -101,7 +102,7 @@ in this repository; the automated checks named below are in `shell/shell.test.cj
 - **`@lydell/node-pty` is a beta release** (1.2.0-beta), used because it ships prebuilt
   binaries for Linux, macOS and Windows.
 - **Installers are not signed, and Electron fuses and ASAR integrity are not set.** Do both before
-  distributing binaries; they also matter before adding self-installing updates.
+  distributing binaries.
 - **`--no-sandbox`.** Only for running as root (CI). Do not launch Runes that way normally.
 
 ## Reporting

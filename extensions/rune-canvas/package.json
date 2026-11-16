@@ -2,7 +2,7 @@
   "name": "rune-canvas",
   "displayName": "Rune Canvas",
   "description": "Drawings kept as files in a project (.rux): the icon for them, and colouring for when one is read as text.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "publisher": "runes",
   "license": "Apache-2.0",
   "engines": {

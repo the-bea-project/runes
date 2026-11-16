@@ -162,9 +162,8 @@ test("a connected machine: files, search, git and a shell, with nothing installe
     assert.equal(status.branch, "main");
     assert.deepEqual(status.files.map((f) => f[0]).sort(), ["README.md", "run.sh", "src/main.txt", "src/new file.txt"]);
     await git.stage(project, ["src/new file.txt"]);
-    await git.commit(project, "Add a file\n\nwith 'quotes' and $(nothing run)");
-    assert.equal(run("log", "-1", "--format=%B").trim(), "Add a file\n\nwith 'quotes' and $(nothing run)");
-    assert.equal(await git.file(project, "HEAD", "src/new file.txt"), "fresh\n");
+    assert.deepEqual((await git.status(project)).files.find((f) => f[0] === "src/new file.txt"), ["src/new file.txt", "A", " "]);
+    assert.equal(await git.file(project, "HEAD", "src/main.txt"), "one\nNeedle two\n", "the committed text, read on the other machine");
     await assert.rejects(git.file(project, "HEAD", "../../etc/passwd"), /outside the folder/);
     git.over(null);
 

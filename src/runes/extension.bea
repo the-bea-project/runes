@@ -60,6 +60,12 @@ pub type Extension {
 pub type Config {
   line_comment: String,
   pairs: List((String, String)),
+  /// One step of indentation for the file being edited: some spaces, or a tab. Filled in by
+  /// the editor for each file; "" here.
+  unit: String,
+  /// The language's whole configuration file, as text: its rules for Enter and for
+  /// indentation are read from it where they are needed.
+  rules: String,
 }
 
 pub type Snippet {
@@ -234,9 +240,11 @@ pub def config(text: String) -> Config {
         [] -> list.flatten(brackets)
         _ -> list.flatten(closing)
       },
+      unit: "",
+      rules: text,
     ))
   }
-  json.parse(text, decoder) |> result.unwrap(Config("", []))
+  json.parse(text, decoder) |> result.unwrap(Config("", [], "", text))
 }
 
 /// Reads a snippets file: one entry per prefix.

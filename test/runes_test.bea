@@ -400,7 +400,7 @@ pub def typing_goes_to_every_cursor_and_undoes_as_one_test() {
 
 pub def new_lines_at_several_cursors_keep_the_others_in_place_test() {
   start = Doc(text(["ab", "cd", "ef"], Pos(0, 1)) | more: [(Pos(1, 1), Pos(1, 1)), (Pos(2, 1), Pos(2, 1))])
-  split = doc.each(start, doc.enter)
+  split = doc.each(start, fn(d) { doc.enter(d, lang_with("  ", "")) })
   should.equal(split.lines, ["a", "b", "c", "d", "e", "f"])
   should.equal([split.cursor, ..list.map(split.more, fn(m) { m.1 })] |> list.map(fn(p) { p.line }) |> list.sort(int.compare), [1, 3, 5])
   marked = doc.each(split, fn(d) { doc.put(d, ">", True) })
@@ -510,4 +510,107 @@ pub def taking_a_suggestion_replaces_what_was_typed_of_it_test() {
   // One that says it replaces what follows the cursor too.
   over = doc.Item("io.println", "", "io.println", False, "function", 2, 5, "io.println", "1", "", 1, [])
   should.equal(option.map(doc.suggest(at, [over], False), fn(c) { doc.accept(at, c).lines }), option.Some(["  io.println"]))
+}
+
+// --- Indentation by the language's rules, in the file's own steps ---
+
+def lang_with(unit: String, rules: String) -> doc.Lang {
+  doc.Lang("x", "X", "", extension.Config("", [("{", "}"), ("(", ")")], unit, rules), [], [], [])
+}
+
+const python_rules = "{\"onEnterRules\":[{\"beforeText\":\"^\\\\s*(?:def|class|if|else|for|while).*?:\\\\s*$\",\"action\":{\"indent\":\"indent\"}},{\"beforeText\":\"^\\\\s+(?:pass|break|continue)\\\\s*$\",\"action\":{\"indent\":\"outdent\"}}]}"
+
+pub def enter_indents_after_what_opens_a_block_test() {
+  py = lang_with("    ", python_rules)
+  opened = doc.enter(text(["def f():"], Pos(0, 8)), py)
+  should.equal(opened.lines, ["def f():", "    "])
+  should.equal(opened.cursor, Pos(1, 4))
+  // Deeper still, from where the line itself stands.
+  deeper = doc.enter(text(["    if x:"], Pos(0, 9)), py)
+  should.equal(deeper.lines, ["    if x:", "        "])
+  // A line that ends a block steps back; any other keeps its depth.
+  should.equal(doc.enter(text(["        pass"], Pos(0, 12)), py).lines, ["        pass", "    "])
+  should.equal(doc.enter(text(["    x = 1"], Pos(0, 9)), py).lines, ["    x = 1", "    "])
+}
+
+pub def enter_between_brackets_opens_them_out_test() {
+  tabs = lang_with("\t", "")
+  spread = doc.enter(text(["a {}"], Pos(0, 3)), tabs)
+  should.equal(spread.lines, ["a {", "\t", "}"])
+  should.equal(spread.cursor, Pos(1, 1))
+  // Without a closing bracket after the cursor there is nothing to put below.
+  should.equal(doc.enter(text(["  call("], Pos(0, 7)), lang_with("  ", "")).lines, ["  call(", "    "])
+  // No rules at all, and nothing open: the depth is kept.
+  should.equal(doc.enter(text(["    plain"], Pos(0, 9)), lang_with("  ", "")).lines, ["    plain", "    "])
+}
+
+pub def rules_that_bring_their_own_text_test() {
+  // JavaScript's own rule for a brace: "indent and outdent", adding a tab. The tab is the step.
+  js = "{\"onEnterRules\":[{\"beforeText\":\"^.*\\\\{[^\\\\}]*$\",\"afterText\":\"^\\\\s*\\\\}.*$\",\"action\":{\"indent\":\"indentOutdent\",\"appendText\":\"\\t\"}},{\"beforeText\":\"^\\\\s*/\\\\*\\\\*\",\"afterText\":\"^\\\\s*\\\\*/$\",\"action\":{\"indent\":\"indentOutdent\",\"appendText\":\" * \"}}]}"
+  should.equal(doc.enter(text(["\tif (x) {}"], Pos(0, 9)), lang_with("\t", js)).lines, ["\tif (x) {", "\t\t", "\t}"])
+  should.equal(doc.enter(text(["  if (x) {}"], Pos(0, 10)), lang_with("  ", js)).lines, ["  if (x) {", "    ", "  }"])
+  // A documentation comment is carried on, and its end put below.
+  should.equal(doc.enter(text(["/** */"], Pos(0, 3)), lang_with("  ", js)).lines, ["/**", " * ", " */"])
+}
+
+pub def tab_goes_to_the_next_step_and_backspace_back_one_test() {
+  four = lang_with("    ", "")
+  should.equal(doc.tab(text(["ab"], Pos(0, 2)), four).lines, ["ab  "])
+  should.equal(doc.tab(text([""], Pos(0, 0)), four).lines, ["    "])
+  should.equal(doc.tab(text(["x"], Pos(0, 1)), lang_with("\t", "")).lines, ["x\t"])
+  should.equal(doc.backspace(text(["        x"], Pos(0, 8)), four, False).lines, ["    x"])
+  // Six spaces are a step and a half: back to the step.
+  should.equal(doc.backspace(text(["      x"], Pos(0, 6)), four, False).lines, ["    x"])
+  should.equal(doc.backspace(text(["  x"], Pos(0, 2)), lang_with("  ", ""), False).lines, ["x"])
+}
+
+pub def selected_lines_are_indented_and_drawn_back_by_one_step_test() {
+  four = lang_with("    ", "")
+  both = Doc(text(["a", "b"], Pos(1, 1)) | anchor: Pos(0, 0))
+  should.equal(doc.tab(both, four).lines, ["    a", "    b"])
+  should.equal(doc.outdent(Doc(text(["        a", "  b", "\tc"], Pos(2, 1)) | anchor: Pos(0, 0)), four).lines, ["    a", "b", "c"])
+  should.equal(doc.outdent(Doc(text(["\t\ta", "\tb"], Pos(1, 1)) | anchor: Pos(0, 0)), lang_with("\t", "")).lines, ["\ta", "b"])
+}
+
+pub def a_closing_bracket_is_drawn_back_as_it_is_typed_test() {
+  two = lang_with("  ", "")
+  closed = doc.typed(text(["if x {", "  y", "  "], Pos(2, 2)), two, "}")
+  should.equal(closed.lines, ["if x {", "  y", "}"])
+  should.equal(closed.cursor, Pos(2, 1))
+  // One that already stands where it belongs is left there.
+  should.equal(doc.typed(text(["if x {", "  y", ""], Pos(2, 0)), two, "}").lines, ["if x {", "  y", "}"])
+  // Straight after the opening line: back to the opening line's depth.
+  should.equal(doc.typed(text(["  if x {", "    "], Pos(1, 4)), two, "}").lines, ["  if x {", "  }"])
+  // In the middle of a line a bracket is only a bracket.
+  should.equal(doc.typed(text(["  a = b"], Pos(0, 7)), two, "}").lines, ["  a = b}"])
+}
+
+pub def the_cursor_steps_over_whole_characters_test() {
+  family = "👨‍👩‍👧"
+  lines = ["a" <> family <> "b"]
+  after = buffer.right(lines, Pos(0, 1))
+  should.equal(after, Pos(0, 1 + buffer.len(family)))
+  should.equal(buffer.left(lines, after), Pos(0, 1))
+  should.equal(buffer.right(["e\u{301}x"], Pos(0, 0)), Pos(0, 2))
+  // Backspace takes the whole of it.
+  should.equal(doc.backspace(text(lines, after), lang_with("  ", ""), False).lines, ["ab"])
+  should.equal(doc.vcol("日本", 2), 4)
+  should.equal(doc.col_at("日本語", 4), 2)
+}
+
+pub def settings_for_indentation_wrapping_and_folding_test() {
+  s = settings.parse("{\"editor.tabSize\": 8, \"editor.insertSpaces\": false, \"editor.wordWrap\": \"on\", \"editor.folding\": false, \"[python]\": {\"editor.tabSize\": 3}, \"[go]\": {\"editor.insertSpaces\": true}}")
+  should.equal(s.tab_size, 8)
+  should.equal(s.insert_spaces, False)
+  should.equal(s.word_wrap, True)
+  should.equal(s.folding, False)
+  should.equal(list.key_find(s.language_indent, "python"), Ok((3, True)))
+  should.equal(list.key_find(s.language_indent, "go"), Ok((4, True)))
+  // What ships: four spaces, and each language's own habit.
+  d = settings.parse("{}")
+  should.equal((d.tab_size, d.insert_spaces, d.detect_indentation, d.word_wrap, d.guides, d.folding), (4, True, True, False, True, True))
+  should.equal(list.key_find(d.language_indent, "gleam"), Ok((2, True)))
+  should.equal(list.key_find(d.language_indent, "go"), Ok((4, False)))
+  should.equal(settings.parse("{\"editor.tabSize\": 99, \"editor.wordWrap\": \"off\"}").tab_size, 16)
+  should.equal(settings.parse("{\"editor.wordWrap\": \"bounded\"}").word_wrap, True)
 }

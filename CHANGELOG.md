@@ -2,6 +2,64 @@
 
 Runes follows [semantic versioning](https://semver.org) from 1.0.0 on.
 
+## 1.2.0
+
+Editing
+- **Indentation follows the language and the file.** Enter, Tab and Backspace go by the
+  language's own rules (`onEnterRules`, `indentationRules` and brackets from its
+  configuration, and whatever an extension adds as it runs), so Python indents after a colon
+  and steps back after `pass`. Each file is indented the way it already is, tabs or spaces
+  and how many; the status bar shows it and a click changes it. `editor.tabSize`,
+  `editor.insertSpaces`, `editor.detectIndentation`, and per language (`"[python]": {…}`).
+- **Code folding**: a mark beside every block, Ctrl+Shift+[ and Ctrl+Shift+], Fold All and
+  Unfold All. **Indent guides**. **Bracket matching**, and Ctrl+Shift+\ to go to the pair.
+- **Word wrap** (Alt+Z, `editor.wordWrap`).
+- **Ctrl+click goes to the definition**, into a library's own files when that is where it is.
+- **Wide characters and emoji** take the room they are drawn in: the caret stands where the
+  text is, and steps over a whole character at a time.
+
+Extensions
+- **The Python extension works**: completion, hovers, go to definition and its Enter rules,
+  through its Jedi language server. (Pylance is Microsoft's and may only run in Microsoft's
+  editors; it is not on Open VSX.) Much more of the `vscode` API is there for large
+  extensions to start against.
+- **Running Extensions**: a page, from the Extensions view, listing every extension with
+  code: whether it has started, how long that took, why it failed, and everything it has
+  written to its output channels, its console and its errors. The extension host can be
+  restarted from there.
+- **Extensions can be switched off and on** without uninstalling them.
+
+Explorer
+- Several files and folders are chosen with Ctrl and Shift; **copy, cut and paste**; files are
+  **dragged between folders** (Ctrl copies); files and folders **dropped in from outside** are
+  copied in, as are files copied in the system's file manager; several are deleted at once.
+
+Git
+- Runes shows and stages; it no longer commits, switches branch or edits git's settings.
+  Those are done in the terminal. Seeing changes, staging, discarding, the graph, sessions,
+  blame and time travel are as they were.
+- **Merge conflicts** are listed in Source Control and settled in the editor: Accept current,
+  Accept incoming or Accept both, above each conflict. Staging the file marks it resolved.
+
+Rune Canvas
+- **Lines and arrows bend.** Pull the middle of one and it bends there; pull again between
+  two points for another bend. Double click a bend to take it out. Tied ends still follow
+  their shapes, and labels sit at the middle of the curve.
+
+Also
+- **Runes: Reload** (Ctrl+Alt+R) starts the editor afresh in the same window, with the same
+  files open.
+- The terminal copies with Ctrl+Shift+C (or Ctrl+C while something is selected) and pastes
+  with Ctrl+Shift+V, Ctrl+V or Shift+Insert.
+- The check for updates is gone. New releases are on the releases page.
+- Fixed: Ctrl+Shift with a punctuation key (Ctrl+Shift+`) was not recognised as a key binding.
+- Fixed: blame on a file git does not know (a new one, say) could stop the whole window
+  behind an error box. Git going away early is now simply no answer, and an error nothing
+  was waiting for is written to the log rather than shown in a box that blocks everything.
+- Fixed: a Markdown list item holding a line separator character stalled the preview.
+- Fixed: the message that an extension failed to start could be covered at once by the
+  message that it was installed.
+
 ## 1.1.0
 
 - **Rune Canvas**: drawings kept as files of the project. A `.rux` file opens as a board to

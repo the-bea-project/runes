@@ -46,8 +46,8 @@ Windows and macOS runners, and attaches them to a GitHub release.
 3. The release appears under Releases with every file and its checksum. The workflow can
    also be run by hand from the Actions tab; the files are then workflow artifacts.
 
-Set `REPOSITORY` in `shell/update.cjs` to the repository that holds the releases, so the
-editor's update check finds them.
+Runes does not look for updates or install them. A new release is taken from the Releases
+page and put in place of the old one by hand.
 
 ## How each one installs
 
@@ -96,6 +96,5 @@ carry the same number). To publish 1.0.0, the first stable release:
     git tag -a v1.0.0 -m "Runes 1.0.0"
     git push origin v1.0.0
 
-The tag is what the update check in older copies looks for: a release named `v1.0.0` on the
-repository's releases page, not marked as a pre-release. Add the notes from `CHANGELOG.md` to
-it and attach the files from `release/` with their `SHA256SUMS.txt`.
+Name the release after the tag on the repository's releases page. Add the notes from
+`CHANGELOG.md` to it and attach the files from `release/` with their `SHA256SUMS.txt`.

@@ -1,12 +1,13 @@
 // The only things the page may ask the machine for. Each is one named request to the shell.
 "use strict";
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 const call = (name) => (...args) => ipcRenderer.invoke("runes:" + name, ...args);
 const direct = ["info", "root", "pickFolder", "readDir", "walk", "readFile", "writeFile", "saveAs", "userFiles", "search",
-  "replaceInFiles", "extensions", "installExtension", "removeExtension", "checkUpdate", "zoom", "devtools", "openExternal", "openLink",
-  "marketSearch", "marketDownload", "gitStatus", "gitLog", "gitShow", "gitStage", "gitUnstage", "gitCommit", "gitFile", "gitChanged", "gitRefs", "gitSwitch", "gitDays", "gitTree", "gitHistory", "promptAnswer", "sshSessions", "sshSave", "sshRemove", "sshImport", "sshForget", "sshConnect", "sshOpen", "sshDisconnect", "marketIcon", "marketReadme", "fonts", "fontAdd", "fontRemove",
-  "fileCreate", "fileRename", "fileRemove", "fileReveal", "watchDirs", "gitDiscard", "gitBlame", "gitConfig", "gitConfigSet", "saveImage"];
+  "replaceInFiles", "extensions", "installExtension", "removeExtension", "zoom", "devtools", "openLink",
+  "marketSearch", "marketDownload", "gitStatus", "gitLog", "gitShow", "gitStage", "gitUnstage", "gitFile", "gitChanged", "gitRefs", "gitDays", "gitTree", "gitHistory", "promptAnswer", "sshSessions", "sshSave", "sshRemove", "sshImport", "sshForget", "sshConnect", "sshOpen", "sshDisconnect", "marketIcon", "marketReadme", "fonts", "fontAdd", "fontRemove",
+  "fileCreate", "fileRename", "fileRemove", "fileReveal", "watchDirs", "gitDiscard", "gitBlame", "saveImage",
+  "extensionsDisabled", "extensionEnable", "extensionsRunning", "extensionsRestart", "reload", "filePlace", "fileImport", "clipboardFiles", "filesRemove"];
 
 let onExtension = () => {};
 ipcRenderer.on("runes:ext", (_event, message) => onExtension(message));
@@ -24,6 +25,9 @@ contextBridge.exposeInMainWorld("runesHost", {
   onPrompt: (listener) => { onPrompt = listener; },
   onSsh: (listener) => { onSsh = listener; },
   onFiles: (listener) => { onFiles = listener; },
+  // Where a file dropped onto the window lives. Only the system can say; the page hands over
+  // the dropped file itself and cannot make one up.
+  pathOf: (file) => { try { return webUtils.getPathForFile(file) || ""; } catch { return ""; } },
   ...Object.fromEntries(direct.map((name) => [name, call(name)])),
   ext: {
     send: (message) => ipcRenderer.invoke("runes:extSend", message),

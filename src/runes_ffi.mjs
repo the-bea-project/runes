@@ -3,6 +3,7 @@
 // (the desktop shell, or an in-browser stand-in).
 import { toList } from "../prelude.mjs";
 import "./runes_canvas_view.mjs";
+import * as Layout from "./runes_layout.mjs";
 
 // The npm packages are loaded when the editor boots, not when this file is read,
 // so that `bea run` in plain Node can still say how Ink is meant to be started.
@@ -14,7 +15,6 @@ async function libraries() {
 }
 
 const base = () => new URL("./", document.baseURI);
-const TAB = 4;
 
 // --- Strings, in UTF-16 units (Gleam's own string functions walk graphemes) -------------
 
@@ -31,23 +31,64 @@ export function matches(line, query) {
   return toList(out);
 }
 
-/** The column on screen of a column in the text: tabs reach the next tab stop. */
-export function vcol(line, col) {
-  if (line.indexOf("\t") === -1) return col;
-  let v = 0;
-  for (let i = 0; i < col && i < line.length; i++) v += line[i] === "\t" ? TAB - (v % TAB) : 1;
-  return v;
+// Where text stands (cell widths, wrapping, folds, indentation) is worked out in runes_layout.mjs.
+export const vcol = Layout.vcol;
+export const col_at = Layout.col_at;
+/** The next place left or right of a column where a cursor can stand: never inside a character. */
+export const char_step = Layout.step;
+export const detect_indent = (lines) => Layout.detect_indent(lines.toArray());
+export const enter_rule = Layout.enter_rule;
+export const outdents = Layout.outdents;
+export const merge_rules = Layout.merge_rules;
+// Merge conflicts in a file, by git's markers.
+export const conflicts = Layout.conflicts;
+export const conflict_kind = Layout.conflict_kind;
+export const conflict_count = Layout.conflict_count;
+export const conflict_list = (table) => toList(Layout.conflict_list(table));
+export const conflict_at = Layout.conflict_at;
+export function conflict_taken(table, lines, index, which) {
+  const found = Layout.conflict_taken(table, lines, index, which);
+  return found ? [true, found[0], found[1], toList(found[2])] : [false, 0, 0, toList([])];
 }
-
-export function col_at(line, target) {
-  if (line.indexOf("\t") === -1) return Math.min(target, line.length);
-  let v = 0;
-  for (let i = 0; i < line.length; i++) {
-    const w = line[i] === "\t" ? TAB - (v % TAB) : 1;
-    if (v + w / 2 > target) return i;
-    v += w;
-  }
-  return line.length;
+let onLanguage = () => {};
+/** `said(language, rules)` when an extension, as it runs, says how a language is indented. */
+export function language_listen(said) { onLanguage = said; }
+// Asked for on every drawing of the editor: the answer for the same text and place is kept.
+let pairAsked = [null, -1, -1, "", null];
+export function bracket_pair(lines, line, col, source) {
+  if (pairAsked[0] === lines && pairAsked[1] === line && pairAsked[2] === col && pairAsked[3] === source) return pairAsked[4];
+  const found = Layout.bracket_pair(lines, line, col, source);
+  pairAsked = [lines, line, col, source, found];
+  return found;
+}
+/** The widest of the rows on show, in cells. */
+export function widest_row(l, first, count) {
+  let most = 0;
+  for (const [, line, from, to] of Layout.rows_from(l, first, count)) most = Math.max(most, Layout.cells(l.all[line] ?? "", from, to));
+  return most;
+}
+export const shape = Layout.shape;
+export const fold_end = Layout.fold_end;
+export const depth_of = Layout.depth_of;
+export const block_of = Layout.block_of;
+export const all_blocks = (table) => toList(Layout.all_blocks(table));
+export const folds_after = (folds, before, after) => toList(Layout.folds_after(folds.toArray(), before, after));
+export const layout = Layout.layout;
+export const layout_rows = Layout.layout_rows;
+export const layout_plain = (l) => l.plain;
+export const spot = Layout.spot;
+export const row_of = Layout.row_of;
+export const line_at_row = Layout.line_at_row;
+export const spans = (l, line, from, to) => toList(Layout.spans(l, line, from, to));
+/** The width of a tab, in cells; set from the settings. */
+export function set_tab(n) {
+  Layout.set_tab(n);
+  if (inPage) document.documentElement.style.setProperty("--tab", String(Layout.tab_size()));
+}
+/** Up or down by rows in an editor, as it is laid out now: [line, column, goal]. */
+export function visual_step(group, line, col, goal, by) {
+  const l = Layout.layout_of(group);
+  return l ? Layout.vertical(l, line, col, goal, by) : [line + by, col, goal];
 }
 
 const WORD = /[\p{L}\p{N}_]/u;
@@ -150,8 +191,12 @@ export function set_chords(chords) {
   bound = new Set(chords.toArray());
 }
 
+// With Shift held, a key that types a sign is named by the key, not by the sign: Ctrl+Shift+[
+// rather than Ctrl+Shift+{, as VS Code's key bindings name it.
+const PLAIN_KEYS = { BracketLeft: "[", BracketRight: "]", Backslash: "\\", Backquote: "`", Minus: "-", Equal: "=", Semicolon: ";", Quote: "'", Comma: ",", Period: ".", Slash: "/" };
 function chordOf(e) {
-  const key = e.key === " " ? "space" : e.key.toLowerCase();
+  const plain = e.shiftKey && (e.ctrlKey || e.metaKey || e.altKey) ? PLAIN_KEYS[e.code] : undefined;
+  const key = plain ?? (e.key === " " ? "space" : e.key.toLowerCase());
   return [(e.ctrlKey || e.metaKey) && "ctrl", e.shiftKey && "shift", e.altKey && "alt", key].filter(Boolean).join("+");
 }
 
@@ -200,6 +245,11 @@ export function listen(on_key, on_text, on_paste, on_resize, on_drop, on_zoom, o
     });
   }
   window.addEventListener("resize", () => on_resize());
+  // While Ctrl is held the editor shows that a click will follow a name to its definition.
+  const ctrlHeld = (e) => document.body.classList.toggle("ctrl-held", !!(e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey);
+  window.addEventListener("keydown", ctrlHeld, true);
+  window.addEventListener("keyup", ctrlHeld, true);
+  window.addEventListener("blur", () => document.body.classList.remove("ctrl-held"));
   window.addEventListener("dragover", (e) => e.preventDefault());
   window.addEventListener("drop", async (e) => {
     e.preventDefault();
@@ -311,14 +361,39 @@ export function set_appearance(family, size, line, animations) {
 }
 
 
-/** The line and on-screen column under a point of the window, in one editor group. */
+/**
+ * The line and on-screen column under a point of the window, in one editor group. The column
+ * is that of the character under the point (or one past the line's end, beyond its text).
+ */
 export function locate(group, x, y) {
   const content = document.getElementById("content-" + group);
   if (!content) return [0, 0];
   const box = content.getBoundingClientRect();
   const w = charWidth || measure();
   const gutter = (parseFloat(content.dataset.gutter) || 6) * w;
-  return [Math.max(0, Math.floor((y - box.top) / LINE)), Math.max(0, Math.round((x - box.left - gutter) / w))];
+  const row = Math.max(0, Math.floor((y - box.top) / LINE)), cellsIn = Math.max(0, (x - box.left - gutter) / w);
+  const l = Layout.layout_of(group);
+  if (!l) return [row, Math.round(cellsIn)];
+  const [line, col, beyond] = Layout.place(l, row, cellsIn);
+  return [line, Layout.vcol(l.all[line] ?? "", col) + (beyond ? 1 : 0)];
+}
+
+const unmeasured = new Set();
+/** How many cells of text fit across an editor, for wrapping; 80 until it has been drawn once. */
+export function wrap_width(group, gutter) {
+  const el = document.getElementById("scroller-" + group);
+  if (!el || !el.clientWidth) {
+    // Not drawn yet: say so once it is, so the lines are wrapped to the real width. Once
+    // only: an editor that is never given any room must not have the window drawn for ever.
+    if (!unmeasured.has(group)) {
+      unmeasured.add(group);
+      requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
+    }
+    return 80;
+  }
+  unmeasured.delete(group);
+  const w = charWidth || measure();
+  return Math.max(20, Math.floor(el.clientWidth / w) - gutter - 2);
 }
 
 const scroller = (group) => document.getElementById("scroller-" + group);
@@ -380,6 +455,9 @@ export function reveal(group, line, column, center) {
     const el = scroller(group);
     if (!el) return;
     const w = charWidth || measure();
+    // Where the place is drawn: folds and wrapped lines move it from where its line number says.
+    const l = Layout.layout_of(group);
+    if (l) { const text = l.all[line] ?? ""; [line, column] = Layout.spot(l, line, Layout.col_at(text, column)); }
     const top = line * LINE, margin = LINE * 3;
     let to = el.scrollTop;
     if (center) to = Math.max(0, top - el.clientHeight / 2);
@@ -810,6 +888,39 @@ export function tokens(key, scope, version, lines, first, count) {
   return toList(out);
 }
 
+/**
+ * The rows of an editor to draw, from row `first`: for each, [row, line, the row's first
+ * column, its coloured pieces, which of its line's rows it is, of how many].
+ */
+export function editor_rows(l, key, scope, version, first, count) {
+  const found = Layout.rows_from(l, first, count);
+  if (!found.length) return toList([]);
+  const lastLine = found[found.length - 1][1];
+  const g = grammar(scope);
+  let cache = null;
+  documents.set(key, l.all);
+  if (g) {
+    cache = caches.get(key);
+    if (!cache || cache.scope !== scope || cache.theme !== themeVersion) {
+      cache = { scope, theme: themeVersion, version: -1, texts: [], states: [], tokens: [] };
+      caches.set(key, cache);
+    }
+    if (cache.version !== version) {
+      let same = 0;
+      const max = Math.min(cache.texts.length, l.all.length);
+      while (same < max && cache.texts[same] === l.all[same]) same++;
+      cache.texts.length = cache.states.length = cache.tokens.length = same;
+      cache.version = version;
+    }
+    extend(cache, l.all, Math.min(l.all.length, lastLine + 1));
+  }
+  return toList(found.map(([row, line, from, to, k, of]) => {
+    const text = l.all[line] ?? "";
+    const pieces = cache?.tokens[line] ?? [[text, ""]];
+    return [row, line, from, toList(Layout.fitted(pieces, text, from, to)), k, of];
+  }));
+}
+
 function readTheme(id, path, seen = new Set()) {
   const file = tidy(path);
   if (seen.has(file)) return { colors: {}, rules: [] };
@@ -1009,7 +1120,9 @@ class Minimap extends Element {
       const g = this.geometry();
       const line = (e.clientY - box.top + g.offset) / g.step - g.viewLines / 2;
       const el = scroller(this.getAttribute("group"));
-      if (el) el.scrollTop = Math.max(0, line * LINE);
+      // The map counts lines of the file; the editor may fold and wrap them.
+      const l = Layout.layout_of(this.getAttribute("group"));
+      if (el) el.scrollTop = Math.max(0, (l ? Layout.row_of(l, Math.max(0, Math.round(line))) : line) * LINE);
     };
     this.addEventListener("mousedown", (e) => {
       e.preventDefault();
@@ -1143,6 +1256,24 @@ class TerminalView extends Element {
       const fit = new FitAddon();
       term.loadAddon(fit);
       term.open(this);
+      // The clipboard. A terminal keeps Ctrl+C for stopping what runs, so copying is
+      // Ctrl+Shift+C, as in other terminals; Ctrl+C copies too while something is selected.
+      // Pasting is Ctrl+Shift+V, Ctrl+V or Shift+Insert.
+      term.attachCustomKeyEventHandler((e) => {
+        if (e.type !== "keydown") return true;
+        const ctrl = e.ctrlKey || e.metaKey, key = e.key.toLowerCase();
+        const copies = ctrl && key === "c" && (e.shiftKey || term.hasSelection());
+        const pastes = (ctrl && key === "v") || (e.shiftKey && !ctrl && key === "insert");
+        if (!copies && !pastes) return true;
+        e.preventDefault();
+        if (copies) {
+          const picked = term.getSelection();
+          if (picked) { navigator.clipboard?.writeText(picked).catch(() => {}); if (!e.shiftKey) term.clearSelection(); }
+        } else {
+          navigator.clipboard?.readText().then((text) => { if (text) term.paste(text); }, () => {});
+        }
+        return false;
+      });
       session = { term, fit };
       sessions.set(id, session);
       terminals.set(id, term);
@@ -1280,10 +1411,8 @@ function browserHost() {
       return out;
     },
     replaceInFiles: async () => ({ files: 0, count: 0, error: "Replacing across files needs the desktop app" }),
-    checkUpdate: async () => null,
     zoom: () => {},
     devtools: () => {},
-    openExternal: () => {},
   };
 }
 
@@ -1354,18 +1483,162 @@ export function replace_in_files(root, query, regex, matchCase, word, replace, s
   host.replaceInFiles(root, query, { regex, matchCase, word }, replace, skip.toArray())
     .then((r) => done(r.files, r.count, r.error ?? ""), (e) => done(0, 0, message(e)));
 }
-export function check_update(done) {
-  host.checkUpdate().then((u) => u && done(u.version, u.url), () => {});
-}
 export const zoom = (by) => host.zoom(by);
 export const toggle_devtools = () => host.devtools();
-export const open_external = (url) => host.openExternal(url);
 
 // --- Language features, from the extension host ------------------------------------------------
 
 let requests = 0;
 const waiting = new Map();
 const unsent = new Map();
+
+/**
+ * Starts Runes afresh. The files that are open are noted first and opened again afterwards;
+ * nothing else is carried over.
+ */
+export function reload_window(open) {
+  try { sessionStorage.setItem("runes-reopen", JSON.stringify(open.toArray().slice(0, 40))); } catch {}
+  if (host.reload) host.reload(); else location.reload();
+}
+/** Scrolls a list to its end once it has been drawn, unless it has been scrolled back up to read. */
+const pinned = new Map();
+export function keep_at_end(id) {
+  const before = document.getElementById(id);
+  const follow = !before || pinned.get(id) !== false || before.scrollHeight - before.scrollTop - before.clientHeight < 40;
+  requestAnimationFrame(() => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (follow) el.scrollTop = el.scrollHeight;
+    if (!el.dataset.watched) {
+      el.dataset.watched = "1";
+      el.addEventListener("scroll", () => pinned.set(id, el.scrollHeight - el.scrollTop - el.clientHeight < 40));
+    }
+  });
+}
+
+/** The files that were open when Runes was last reloaded, once. */
+export function reopened() {
+  try {
+    const found = JSON.parse(sessionStorage.getItem("runes-reopen") ?? "[]");
+    sessionStorage.removeItem("runes-reopen");
+    return toList(Array.isArray(found) ? found.filter((f) => typeof f === "string") : []);
+  } catch { return toList([]); }
+}
+
+// --- Extensions: which are switched off, and how the ones with code are getting on ---------------
+
+let onRunning = () => {};
+/** `done(ids)`: the extensions that are switched off, as "publisher.name" in lower case. */
+export function ext_disabled(done) {
+  if (!host.extensionsDisabled) return done(toList([]));
+  host.extensionsDisabled().then((ids) => done(toList(ids)), () => done(toList([])));
+}
+export function ext_enable(id, on, done) {
+  if (!host.extensionEnable) return done(toList([]), "Switching extensions on and off needs the desktop app.");
+  host.extensionEnable(id, on).then((ids) => done(toList(ids), ""), (e) => done(toList([]), message(e)));
+}
+export const ext_restart = () => { host.extensionsRestart?.(); };
+/**
+ * `done(list)`: every extension with code, as [id, name, version, state, milliseconds to
+ * start, error, lines dropped, lines], a line being [time, channel, text].
+ */
+export function ext_running(done) {
+  if (!host.extensionsRunning) return done(toList([]));
+  host.extensionsRunning().then((all) => done(toList(all.map((e) => [e.id, e.name, e.version, e.state, e.ms | 0, e.error ?? "", e.dropped | 0,
+    toList(e.lines.map((l) => [new Date(l[0]).toTimeString().slice(0, 8), l[1], l[2]]))]))), () => done(toList([])));
+}
+/** `changed()` whenever an extension starts, stops or says something. */
+export function ext_running_listen(changed) { onRunning = changed; }
+
+// --- The explorer: several files at once, copying, moving, and files from outside -----------------
+
+/** `done(new paths, problem)`. */
+export function file_place(sources, into, move, done) {
+  if (!host.filePlace) return done(toList([]), "Copying and moving need the desktop app.");
+  host.filePlace(sources.toArray(), into, move).then((made) => done(toList(made), ""), (e) => done(toList([]), message(e)));
+}
+export function file_import(paths, into, done) {
+  if (!host.fileImport) return done(toList([]), "Bringing files in needs the desktop app.");
+  host.fileImport(paths.toArray(), into).then((made) => done(toList(made), ""), (e) => done(toList([]), message(e)));
+}
+/** Files copied in the system's file manager: `done(their paths)`. */
+export function clipboard_files(done) {
+  if (!host.clipboardFiles) return done(toList([]));
+  Promise.resolve(host.clipboardFiles()).then((found) => done(toList(found ?? [])), () => done(toList([])));
+}
+/** `done(paths that are gone, problem)`: the shell asks once for all of them. */
+export function files_remove(paths, done) {
+  if (!host.filesRemove) return done(toList([]), "Deleting needs the desktop app.");
+  host.filesRemove(paths.toArray()).then((gone) => done(toList(gone), ""), (e) => done(toList([]), message(e)));
+}
+
+const TREE_KEYS = new Set(["ctrl+c", "ctrl+x", "ctrl+v", "delete", "f2", "ctrl+a", "escape"]);
+/**
+ * The explorer's own keys and its dragging. `on_key(chord)` for a key pressed while a file or
+ * folder of the tree has the keyboard; `on_move(sources, folder, copy)` when files of the tree
+ * are dropped on a folder; `on_import(paths, folder)` when files from outside Runes are.
+ */
+export function tree_listen(on_key, on_move, on_import) {
+  if (!inPage) return;
+  const tree = (e) => e.target.closest?.(".tree.files");
+  const folderOf = (e) => {
+    const node = e.target.closest?.(".tree.files .node[data-path]");
+    const root = document.querySelector(".tree.files")?.dataset.root ?? "";
+    if (!node) return [root, null];
+    if (node.classList.contains("folder")) return [node.dataset.path, node];
+    const parent = node.dataset.path.slice(0, node.dataset.path.lastIndexOf("/"));
+    return [parent || root, document.querySelector(`.tree.files .node.folder[data-path="${CSS.escape(parent)}"]`)];
+  };
+  const unmark = () => { for (const el of document.querySelectorAll(".drop-into")) el.classList.remove("drop-into"); };
+  document.addEventListener("keydown", (e) => {
+    if (!e.target.closest?.(".tree.files .node") || e.target.matches("input")) return;
+    const chord = chordOf(e);
+    if (!TREE_KEYS.has(chord)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    on_key(chord);
+  }, true);
+  document.addEventListener("dragstart", (e) => {
+    const node = e.target.closest?.(".tree.files .node[data-path]");
+    if (!node || !e.dataTransfer) return;
+    // Dragging one of several chosen files takes them all; dragging another takes only it.
+    const chosen = [...document.querySelectorAll(".tree.files .node.picked[data-path]")].map((n) => n.dataset.path);
+    const paths = chosen.includes(node.dataset.path) ? chosen : [node.dataset.path];
+    e.dataTransfer.setData("application/x-runes-paths", JSON.stringify(paths));
+    e.dataTransfer.effectAllowed = "copyMove";
+  });
+  document.addEventListener("dragover", (e) => {
+    if (!tree(e)) return unmark();
+    const types = e.dataTransfer?.types ?? [];
+    if (!types.includes("application/x-runes-paths") && !types.includes("Files")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = types.includes("Files") || e.ctrlKey ? "copy" : "move";
+    const [, node] = folderOf(e);
+    const mark = node ?? tree(e);
+    if (!mark.classList.contains("drop-into")) { unmark(); mark.classList.add("drop-into"); }
+  });
+  document.addEventListener("dragleave", (e) => { if (!e.relatedTarget || !e.relatedTarget.closest?.(".tree.files")) unmark(); });
+  document.addEventListener("dragend", unmark);
+  document.addEventListener("drop", (e) => {
+    unmark();
+    if (!tree(e)) return;
+    const [folder] = folderOf(e);
+    const own = e.dataTransfer?.getData("application/x-runes-paths");
+    if (own) {
+      e.preventDefault(); e.stopPropagation();
+      let paths = [];
+      try { paths = JSON.parse(own).filter((p) => typeof p === "string"); } catch {}
+      if (paths.length && folder) on_move(toList(paths), folder, e.ctrlKey);
+      return;
+    }
+    const files = [...(e.dataTransfer?.files ?? [])];
+    // An extension dropped on the tree is still an extension to install.
+    if (!files.length || files.every((f) => f.name.endsWith(".vsix"))) return;
+    e.preventDefault(); e.stopPropagation();
+    const paths = files.map((f) => host.pathOf?.(f) ?? "").filter(Boolean);
+    if (paths.length && folder) on_import(toList(paths), folder);
+  }, true);
+}
 
 export function ext_listen(on_diagnostics, on_note, on_edits) {
   if (!host.ext) return;
@@ -1376,6 +1649,10 @@ export function ext_listen(on_diagnostics, on_note, on_edits) {
       const done = waiting.get(m.id);
       waiting.delete(m.id);
       done?.(m.result);
+    } else if (m.type === "language") {
+      if (typeof m.language === "string" && typeof m.rules === "string") onLanguage(m.language, m.rules);
+    } else if (m.type === "running") {
+      onRunning();
     } else if (m.type === "note") {
       on_note(m.level, m.text);
     } else if (m.type === "edits") {
@@ -1610,17 +1887,6 @@ export function ago(time) {
   }
   return "just now";
 }
-export function git_config(done) {
-  if (!host.gitConfig) return done(toList([]));
-  host.gitConfig().then((found) => done(toList(found)), () => done(toList([])));
-}
-export function git_config_set(key, value, scope, done) {
-  if (!host.gitConfigSet) return done("Git settings need the desktop app.");
-  host.gitConfigSet(key, value, scope).then(() => done(""), (e) => done(message(e)));
-}
-export function git_commit(text, done) {
-  host.gitCommit(text).then(() => done(""), (e) => done(message(e)));
-}
 
 export function market_search(query, done) {
   if (!host.marketSearch) return done(toList([]), "The marketplace needs the desktop app.");
@@ -1691,10 +1957,6 @@ export function git_refs(done) {
   if (!host.gitRefs) return done(toList([]));
   host.gitRefs().then((names) => done(toList(names)), () => done(toList([])));
 }
-export function git_switch(kind, name, done) {
-  if (!host.gitSwitch) return done("Switching branches needs the desktop app.");
-  host.gitSwitch(kind, name).then(() => done(""), (e) => done(message(e)));
-}
 export function market_readme(namespace, name, done) {
   if (!host.marketReadme) return done("");
   host.marketReadme(namespace, name).then((text) => done(String(text ?? "")), () => done(""));
@@ -1738,7 +2000,11 @@ export function markdown(source, paint) {
   const out = [];
   let i = 0;
   const cells = (row) => row.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+  let last = -1;
   while (i < lines.length) {
+    // Whatever a line holds, it is passed: a line no rule below moved on from is shown as it is.
+    if (i === last) { out.push("<p>" + inline(lines[i]) + "</p>"); i++; continue; }
+    last = i;
     const line = lines[i];
     let m;
     if (!line.trim()) { i++; continue; }

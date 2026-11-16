@@ -58,6 +58,103 @@ def locate(group: Int, x: Int, y: Int) -> (Int, Int)
 @external(javascript, "../runes_ffi.mjs", "scroll_top")
 def scroll_top(group: Int) -> Int
 
+@external(javascript, "../runes_ffi.mjs", "set_tab")
+def set_tab(size: Int) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "detect_indent")
+def detect_indent(lines: List(String)) -> String
+
+/// Up or down by rows in an editor group, as it is drawn: (line, column, the column kept to).
+@external(javascript, "../runes_ffi.mjs", "visual_step")
+def visual_step(group: Int, line: Int, col: Int, goal: Int, by: Int) -> (Int, Int, Int)
+
+/// How a file's lines are indented, and the blocks that makes.
+pub type Shape
+
+@external(javascript, "../runes_ffi.mjs", "shape")
+pub def shape(key: String, version: Int, lines: List(String)) -> Shape
+
+/// The last line of the block a line opens, or -1.
+@external(javascript, "../runes_ffi.mjs", "fold_end")
+pub def fold_end(shape: Shape, line: Int) -> Int
+
+@external(javascript, "../runes_ffi.mjs", "block_of")
+def block_of(shape: Shape, line: Int) -> Int
+
+@external(javascript, "../runes_ffi.mjs", "all_blocks")
+def all_blocks(shape: Shape) -> List((Int, Int))
+
+@external(javascript, "../runes_ffi.mjs", "folds_after")
+def folds_after(folds: List((Int, Int)), before: List(String), after: List(String)) -> List((Int, Int))
+
+@external(javascript, "../runes_ffi.mjs", "bracket_pair")
+pub def bracket_pair(lines: List(String), line: Int, col: Int, rules: String) -> (Bool, Int, Int, Int, Int)
+
+/// Scrolls a list to its end, unless the person has scrolled back up it to read.
+@external(javascript, "../runes_ffi.mjs", "keep_at_end")
+def keep_at_end(id: String) -> Nil
+
+/// The merge conflicts git has left in a file, found by their markers.
+pub type Conflicts
+
+@external(javascript, "../runes_ffi.mjs", "conflicts")
+pub def conflicts(key: String, version: Int, lines: List(String)) -> Conflicts
+
+@external(javascript, "../runes_ffi.mjs", "conflict_count")
+pub def conflict_count(found: Conflicts) -> Int
+
+/// The conflict a line is in, or (when `next`) the first one below it: its number, or -1.
+@external(javascript, "../runes_ffi.mjs", "conflict_at")
+def conflict_at(found: Conflicts, line: Int, next: Bool) -> Int
+
+@external(javascript, "../runes_ffi.mjs", "conflict_list")
+pub def conflict_list(found: Conflicts) -> List((Int, Int, String, String))
+
+@external(javascript, "../runes_ffi.mjs", "conflict_taken")
+def conflict_taken(found: Conflicts, lines: List(String), index: Int, which: String) -> (Bool, Int, Int, List(String))
+
+@external(javascript, "../runes_ffi.mjs", "merge_rules")
+def merge_rules(rules: String, more: String) -> String
+
+@external(javascript, "../runes_ffi.mjs", "language_listen")
+def language_listen(said: fn(String, String) -> Nil) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "reopened")
+def reopened() -> List(String)
+
+@external(javascript, "../runes_ffi.mjs", "ext_disabled")
+def ext_disabled(done: fn(List(String)) -> Nil) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "ext_enable")
+def ext_enable(id: String, on: Bool, done: fn(List(String), String) -> Nil) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "ext_restart")
+def ext_restart() -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "ext_running")
+def ext_running(done: fn(List((String, String, String, String, Int, String, Int, List((String, String, String))))) -> Nil) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "ext_running_listen")
+def ext_running_listen(changed: fn() -> Nil) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "file_place")
+def file_place(sources: List(String), into: String, move: Bool, done: fn(List(String), String) -> Nil) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "file_import")
+def file_import(paths: List(String), into: String, done: fn(List(String), String) -> Nil) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "clipboard_files")
+def clipboard_files(done: fn(List(String)) -> Nil) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "files_remove")
+def files_remove(paths: List(String), done: fn(List(String), String) -> Nil) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "tree_listen")
+def tree_listen(on_key: fn(String) -> Nil, on_move: fn(List(String), String, Bool) -> Nil, on_import: fn(List(String), String) -> Nil) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "reload_window")
+def reload_window(open: List(String)) -> Nil
+
 @external(javascript, "../runes_ffi.mjs", "view_height")
 def view_height(group: Int) -> Int
 
@@ -164,17 +261,11 @@ def replace_in_files(
   done: fn(Int, Int, String) -> Nil,
 ) -> Nil
 
-@external(javascript, "../runes_ffi.mjs", "check_update")
-def check_update(done: fn(String, String) -> Nil) -> Nil
-
 @external(javascript, "../runes_ffi.mjs", "zoom")
 def zoom(by: Int) -> Nil
 
 @external(javascript, "../runes_ffi.mjs", "toggle_devtools")
 def toggle_devtools() -> Nil
-
-@external(javascript, "../runes_ffi.mjs", "open_external")
-def open_external(url: String) -> Nil
 
 @external(javascript, "../runes_ffi.mjs", "ext_listen")
 def ext_listen(
@@ -237,9 +328,6 @@ def git_changed(from: String, to: String, done: fn(String, List((String, String)
 @external(javascript, "../runes_ffi.mjs", "git_refs")
 def git_refs(done: fn(List((String, String))) -> Nil) -> Nil
 
-@external(javascript, "../runes_ffi.mjs", "git_switch")
-def git_switch(kind: String, name: String, done: fn(String) -> Nil) -> Nil
-
 @external(javascript, "../runes_ffi.mjs", "market_icon")
 def market_icon(url: String, done: fn(String) -> Nil) -> Nil
 
@@ -284,12 +372,6 @@ def lsp_format(path: String, done: fn(List((Int, Int, Int, Int, String))) -> Nil
 
 @external(javascript, "../runes_ffi.mjs", "git_blame")
 def git_blame(path: String, line: Int, dirty: Bool, text: fn() -> String, done: fn(Bool, String, String, Int, String) -> Nil) -> Nil
-
-@external(javascript, "../runes_ffi.mjs", "git_config")
-def git_config(done: fn(List((String, String, String))) -> Nil) -> Nil
-
-@external(javascript, "../runes_ffi.mjs", "git_config_set")
-def git_config_set(key: String, value: String, scope: String, done: fn(String) -> Nil) -> Nil
 
 @external(javascript, "../runes_ffi.mjs", "git_status")
 def git_status(done: fn(Bool, String, Int, Int, List((String, String, String))) -> Nil) -> Nil
@@ -366,9 +448,6 @@ def git_days(done: fn(List((String, Int))) -> Nil) -> Nil
 
 @external(javascript, "../runes_ffi.mjs", "git_stage")
 def git_stage(paths: List(String), staged: Bool, done: fn(String) -> Nil) -> Nil
-
-@external(javascript, "../runes_ffi.mjs", "git_commit")
-def git_commit(message: String, done: fn(String) -> Nil) -> Nil
 
 @external(javascript, "../runes_ffi.mjs", "market_search")
 def market_search(query: String, done: fn(List((String, String, String, String, String, Int, String)), String) -> Nil) -> Nil
@@ -554,6 +633,22 @@ pub type Blame {
   summary: String,
 }
 
+/// An extension that brings code, as the extension host has it: "waiting" to be needed,
+/// "starting", "active", "failed" or "stopped"; how long it took to start; and what it has
+/// said, each line with its time and the channel it was said on.
+pub type Running {
+  id: String,
+  name: String,
+  version: String,
+  state: String,
+  ms: Int,
+  error: String,
+  dropped: Int,
+  lines: List((String, String, String)),
+}
+
+pub const running_tab = "runes://running"
+
 pub type Overlay {
   Closed
   /// A list to pick from: "commands", "files", "themes" or "line".
@@ -629,7 +724,6 @@ pub type Model {
   /// The tab being dragged, and the group it left (-1 from the explorer).
   drag: Option((String, Int)),
   drop: Option((Int, Edge)),
-  update: Option((String, String)),
   /// Version control: whether the folder is a repository, and what has changed in it.
   repo: Bool,
   branch: String,
@@ -637,7 +731,6 @@ pub type Model {
   behind: Int,
   /// Changed files: path, then the staged and the unstaged state as git's letters.
   changes: List((String, String, String)),
-  message: String,
   rows: List(Row),
   /// The commit that is selected in the graph, and what it changed.
   picked: String,
@@ -668,6 +761,20 @@ pub type Model {
   sessions: List(Compare),
   /// Drawings (.rux files) that are being shown as their text rather than as a board.
   raw: List(String),
+  /// Blocks folded away, by file: the line each starts on (which stays on show) and its last line.
+  /// Extensions that are installed but switched off: nothing of theirs is used or run.
+  off: List(Extension),
+  /// The extensions with code, as the extension host reports them, and the one whose output is on show.
+  running: List(Running),
+  running_pick: String,
+  /// The explorer: the files and folders chosen (besides the one pointed at), and those
+  /// copied or cut there, waiting to be pasted.
+  chosen: List(String),
+  clip: Option((List(String), Bool)),
+  folds: Dict(String, List((Int, Int))),
+  /// One step of indentation for each open file ("\t" or some spaces), as it was read from
+  /// the file or picked in the status bar. A file not here follows the settings.
+  indents: Dict(String, String),
   session_ids: Int,
   /// A commit set aside in the graph, to compare another one with.
   marked: String,
@@ -693,9 +800,6 @@ pub type Model {
   blame: Option(Blame),
   /// Git's settings as it reads them here: (key, value, where it is set), and whether changes
   /// are made for this repository ("local") or for all of this person's ("global").
-  git_config: List((String, String, String)),
-  git_scope: String,
-  /// Time travel. For each file being looked at in the past (by its path in the
   /// repository): the commit shown, and every commit that changed the file, newest first.
   travel: Dict(String, String),
   histories: Dict(String, List((String, String, Int, String))),
@@ -729,6 +833,27 @@ pub type Model {
 
 pub type Msg {
   Booted(found: List((String, String, Bool)), problems: String, native: Bool, root: String, version: String, platform: String)
+  /// Which extensions are switched off, as the shell keeps it.
+  DisabledRead(ids: List(String))
+  ExtToggled(id: String, on: Bool)
+  ExtToggleDone(problem: String)
+  RunningAsked
+  /// A merge conflict in a file is settled: "ours", "theirs" or "both".
+  ConflictTaken(path: String, index: Int, which: String)
+  /// An extension, as it runs, has said how a language is indented.
+  LanguageRules(language: String, rules: String)
+  RunningRead(found: List((String, String, String, String, Int, String, Int, List((String, String, String)))))
+  RunningPicked(id: String)
+  HostRestarted
+  /// A file or folder of the explorer was clicked, perhaps with Ctrl or Shift held.
+  NodeClicked(path: String, folder: Bool, ctrl: Bool, shift: Bool)
+  TreeKey(chord: String)
+  /// Files of the tree were dropped on a folder, or pasted there.
+  TreeMoved(sources: List(String), into: String, copy: Bool)
+  /// Files from outside Runes were dropped on a folder, or pasted there.
+  TreeImported(paths: List(String), into: String)
+  FilesPlaced(into: String, sources: List(String), made: List(String), moved: Bool, problem: String)
+  FilesGone(paths: List(String), problem: String)
   UserFiles(settings: String, keys: String)
   UserFileRead(path: String, text: String)
   Key(key: String, ctrl: Bool, shift: Bool, alt: Bool, editor: Bool, chord: String)
@@ -740,6 +865,12 @@ pub type Msg {
   MouseDown(group: Int, x: Int, y: Int, shift: Bool, clicks: Int)
   /// Alt+click: one more cursor there.
   CursorAdded(group: Int, x: Int, y: Int)
+  /// Ctrl and a click: go to where the thing under the pointer is defined.
+  DefinitionAt(group: Int, x: Int, y: Int)
+  /// The fold mark beside a line was clicked.
+  FoldToggled(path: String, line: Int)
+  /// How the file in front is to be indented from now on: "\t", some spaces, or "" to read it from the file again.
+  IndentPicked(unit: String)
   MouseDragged(group: Int, x: Int, y: Int)
   HoverAsked(group: Int, x: Int, y: Int)
   Hovered(group: Int, at: Pos, text: String)
@@ -765,11 +896,6 @@ pub type Msg {
   /// and whether the repository itself moved.
   FilesChanged(dirs: List(String), files: List(String), git: Bool)
   Blamed(found: Blame)
-  GitConfigAsked
-  GitConfigLoaded(found: List((String, String, String)))
-  GitConfigSet(key: String, value: String)
-  GitConfigDone(problem: String)
-  GitScopePicked(scope: String)
   GitDiscarded(paths: List(String))
   GitDiscardDone(done: Bool, problem: String)
   FileOpened(path: String)
@@ -838,8 +964,6 @@ pub type Msg {
   GitStatus(repo: Bool, branch: String, ahead: Int, behind: Int, files: List((String, String, String)))
   GitLogged(commits: List((String, List(String), String, Int, List(String), String)))
   GitStaged(paths: List(String), staged: Bool)
-  GitMessageTyped(text: String)
-  GitCommitted
   GitDone(problem: String)
   CommitPicked(hash: String)
   CommitShown(hash: String, text: String)
@@ -880,8 +1004,6 @@ pub type Msg {
   SessionPicked(id: Int)
   SessionClosed(id: Int)
   CommitMarked(hash: String)
-  BranchPicked(kind: String, name: String)
-  BranchSwitched(name: String, problem: String)
   TerminalMoved(id: Int, to_editor: Bool)
   TerminalRan(id: Int, command: String)
   TerminalRename(id: Int)
@@ -945,8 +1067,6 @@ pub type Msg {
   ExtCommand(command: String)
   MarketInstalled(namespace: String, name: String)
   BuiltinToggled
-  UpdateFound(version: String, url: String)
-  UpdateOpened
   ToastDone(id: Int)
 }
 
@@ -980,7 +1100,6 @@ pub const commands = [
   ("workbench.view.scm", "View: Show Source Control"),
   ("runes.gitGraph", "Git: Open Graph"),
   ("runes.compare", "Git: Compare Branches, Commits or Files"),
-  ("git.checkout", "Git: Switch Branch…"),
   ("runes.sessions", "Git: Show Sessions"),
   ("runes.compareWithHead", "Git: Show This File's Changes"),
   ("runes.timeTravel", "Git: Time Travel Through This File"),
@@ -1012,6 +1131,20 @@ pub const commands = [
   ("editor.action.nextMatchFindAction", "Find Next"),
   ("editor.action.previousMatchFindAction", "Find Previous"),
   ("workbench.action.gotoLine", "Go to Line…"),
+  ("editor.fold", "Fold"),
+  ("editor.unfold", "Unfold"),
+  ("editor.foldAll", "Fold All"),
+  ("editor.unfoldAll", "Unfold All"),
+  ("editor.action.toggleWordWrap", "View: Toggle Word Wrap"),
+  ("editor.action.jumpToBracket", "Go to Bracket"),
+  ("editor.action.indentationToSpaces", "Indentation: Use Spaces, Use Tabs, or Detect from the File…"),
+  ("runes.reload", "Runes: Reload"),
+  ("merge-conflict.accept.current", "Merge Conflict: Accept Current Change"),
+  ("merge-conflict.accept.incoming", "Merge Conflict: Accept Incoming Change"),
+  ("merge-conflict.accept.both", "Merge Conflict: Accept Both Changes"),
+  ("merge-conflict.next", "Merge Conflict: Go to the Next Conflict"),
+  ("workbench.action.showRuntimeExtensions", "Extensions: Show Running Extensions"),
+  ("workbench.action.restartExtensionHost", "Extensions: Restart Extension Host"),
   ("editor.action.commentLine", "Toggle Line Comment"),
   ("editor.action.copyLinesDownAction", "Copy Line Down"),
   ("editor.action.selectHighlights", "Select All Occurrences"),
@@ -1036,7 +1169,6 @@ pub const commands = [
   ("workbench.action.zoomOut", "View: Zoom Out"),
   ("workbench.action.zoomReset", "View: Reset Zoom"),
   ("workbench.action.toggleDevTools", "Developer: Toggle Developer Tools"),
-  ("runes.checkForUpdates", "Runes: Check for Updates"),
 ]
 
 /// What a right click offers.
@@ -1098,13 +1230,11 @@ pub def init(_flags: Nil) -> (Model, Effect(Msg)) {
     goto: None,
     drag: None,
     drop: None,
-    update: None,
     repo: False,
     branch: "",
     ahead: 0,
     behind: 0,
     changes: [],
-    message: "",
     rows: [],
     picked: "",
     detail: "",
@@ -1122,6 +1252,14 @@ pub def init(_flags: Nil) -> (Model, Effect(Msg)) {
     base_ids: 0,
     sessions: [],
     raw: [],
+    off: [],
+    running: [],
+    // No extension is picked until one is clicked ("" is the extension host itself).
+    running_pick: "?",
+    chosen: [],
+    clip: None,
+    folds: dict.new(),
+    indents: dict.new(),
     session_ids: 0,
     marked: "",
     refs: [],
@@ -1138,8 +1276,6 @@ pub def init(_flags: Nil) -> (Model, Effect(Msg)) {
     pointed: "",
     blame: None,
     bulb: None,
-    git_config: [],
-    git_scope: "global",
     travel: dict.new(),
     histories: dict.new(),
     trees: dict.new(),
@@ -1179,6 +1315,13 @@ pub def init(_flags: Nil) -> (Model, Effect(Msg)) {
     files_listen(fn(dirs, files, git) { dispatch(FilesChanged(dirs, files, git)) })
     load_fonts(fn(families) { dispatch(FontsLoaded(families, "")) })
     watch(fn(id, command) { dispatch(TerminalRan(id, command)) }, fn() { dispatch(WindowFocused) }, fn(id) { dispatch(TerminalClosed(id)) })
+    ext_running_listen(fn() { dispatch(RunningAsked) })
+    language_listen(fn(language, rules) { dispatch(LanguageRules(language, rules)) })
+    tree_listen(
+      fn(chord) { dispatch(TreeKey(chord)) },
+      fn(sources, into, copy) { dispatch(TreeMoved(sources, into, copy)) },
+      fn(paths, into) { dispatch(TreeImported(paths, into)) },
+    )
     ext_listen(
       fn(path, items) { dispatch(Diagnosed(path, items)) },
       fn(level, text) { dispatch(Noted(level, text)) },
@@ -1228,10 +1371,63 @@ pub def problems(model: Model, path: String) -> List(Diagnostic) {
   dict.get(model.diagnostics, path) |> result.unwrap([])
 }
 
-const plain = Lang("plaintext", "Plain Text", "", Config("", []), [], [], [])
+const plain = Lang("plaintext", "Plain Text", "", Config("", [], "", ""), [], [], [])
 
 pub def lang(model: Model, id: String) -> Lang {
   list.find(model.langs, fn(l) { l.id == id }) |> result.unwrap(plain)
+}
+
+/// One step of indentation for a file: what was read from it or picked for it, else what the
+/// settings say for its language.
+pub def indent_of(model: Model, d: Doc) -> String {
+  case dict.get(model.indents, d.path) {
+    Ok(found) if found != "" -> found
+    _ -> {
+      (size, spaces) = case list.find(model.settings.language_indent, fn(entry) { entry.0 == d.language }) {
+        Ok((_, (0, spaces))) -> (model.settings.tab_size, spaces)
+        Ok((_, found)) -> found
+        Error(_) -> (model.settings.tab_size, model.settings.insert_spaces)
+      }
+      case spaces {
+        True -> string.repeat(" ", size)
+        False -> "\t"
+      }
+    }
+  }
+}
+
+/// A file's language, with how this file is indented.
+pub def lang_of(model: Model, d: Doc) -> Lang {
+  found = lang(model, d.language)
+  Lang(found | config: Config(found.config | unit: indent_of(model, d)))
+}
+
+/// The blocks folded away in a file.
+pub def folds_of(model: Model, path: String) -> List((Int, Int)) {
+  dict.get(model.folds, path) |> result.unwrap([])
+}
+
+/// After anything has happened: the folds of the file in front follow its lines, and a fold
+/// the cursor has been put inside of opens.
+def keep_folds(before: Model, after: Model) -> Model {
+  case doc(after) {
+    Some(d) -> case folds_of(after, d.path) {
+      [] -> after
+      folded -> {
+        moved = case find_doc(before, d.path) {
+          Some(was) if was.version != d.version -> folds_after(folded, was.lines, d.lines)
+          _ -> folded
+        }
+        hides = fn(f: (Int, Int), at: Pos) { at.line > f.0 and at.line <= f.1 }
+        open = list.filter(moved, fn(f) { not { hides(f, d.cursor) or hides(f, d.anchor) or list.any(d.more, fn(m) { hides(f, m.1) }) } })
+        case open == folded {
+          True -> after
+          False -> Model(after | folds: dict.insert(after.folds, d.path, open))
+        }
+      }
+    }
+    None -> after
+  }
 }
 
 /// The language of a file, going by its name.
@@ -1309,6 +1505,34 @@ def reread(model: Model, dirs: List(String)) -> Effect(Msg) {
   effect.from(fn(dispatch) { list.each(shown, fn(dir) { read_dir(dir, fn(found) { dispatch(DirRead(dir, found)) }) }) })
 }
 
+/// Every file and folder the explorer shows, top to bottom.
+pub def shown_paths(model: Model, dir: String) -> List(String) {
+  dict.get(model.tree, dir) |> result.unwrap([]) |> list.flat_map(fn(entry) {
+    full = dir <> "/" <> entry.0
+    case entry.1 and list.contains(model.expanded, full) {
+      True -> [full, ..shown_paths(model, full)]
+      False -> [full]
+    }
+  })
+}
+
+def index_in(all: List(String), wanted: String) -> Int {
+  list.index_map(all, fn(path, i) { (path, i) }) |> list.find(fn(pair) { pair.0 == wanted }) |> result.map(fn(pair) { pair.1 }) |> result.unwrap(-1)
+}
+
+/// What an action on one file of the tree acts on: everything chosen, when that file is
+/// among it, otherwise the file alone. A folder that is chosen takes what is under it.
+def chosen_with(model: Model, path: String) -> List(String) {
+  case list.contains(model.chosen, path) {
+    True -> list.filter(model.chosen, fn(p) { not list.any(model.chosen, fn(other) { other != p and within(p, other) and p != other }) })
+    False -> [path]
+  }
+}
+
+def ask_running() -> Effect(Msg) {
+  effect.from(fn(dispatch) { ext_running(fn(found) { dispatch(RunningRead(found)) }) })
+}
+
 def rewalk(model: Model) -> Effect(Msg) {
   root = model.root
   effect.from(fn(dispatch) { walk(root, fn(files) { dispatch(Walked(files)) }) })
@@ -1361,16 +1585,13 @@ pub def entries(model: Model) -> List(Entry) {
           Ok(n), Some(d) -> [Entry("Go to line " <> int.to_string(n), "", Jumped(d.path, n - 1, 0))]
           _, _ -> [Entry("Type a line number", "", OverlayClosed)]
         }
-        "branches" -> case list.filter(model.refs, fn(r) { r.0 != "tag" and not string.ends_with(r.1, "/HEAD") }) {
-          [] -> [Entry("No branches were found", "", OverlayClosed)]
-          found -> list.map(found, fn(r) {
-            Entry(r.1, case r.1 == model.branch, r.0 {
-              True, _ -> "current"
-              False, "remote" -> "remote branch"
-              False, _ -> "branch"
-            }, BranchPicked(r.0, r.1))
-          })
-        }
+        "indent" -> [
+          Entry("Indent with 2 spaces", "", IndentPicked("  ")),
+          Entry("Indent with 4 spaces", "", IndentPicked("    ")),
+          Entry("Indent with 8 spaces", "", IndentPicked("        ")),
+          Entry("Indent with tabs", "a tab is drawn " <> int.to_string(model.settings.tab_size) <> " wide (editor.tabSize)", IndentPicked("\t")),
+          Entry("Detect from the file", "", IndentPicked("")),
+        ]
         "terminals" -> case model.terminals {
           [] -> [Entry("No terminals yet. Press Ctrl+` to start one.", "", OverlayClosed)]
           found -> list.map(found, fn(id) {
@@ -1429,7 +1650,7 @@ def with_extensions(model: Model, extensions: List(Extension)) -> Model {
     config = mine
       |> list.find(fn(pair) { (pair.1).configuration != "" })
       |> result.map(fn(pair) { extension.config(extension_file(pair.0, (pair.1).configuration)) })
-      |> result.unwrap(Config("", []))
+      |> result.unwrap(Config("", [], "", ""))
     scope = grammars
       |> list.find(fn(pair) { (pair.1).language == id })
       |> result.map(fn(pair) { (pair.1).scope })
@@ -1486,6 +1707,7 @@ def with_settings(model: Model, text: String) -> Model {
   parsed = settings.parse(strip_comments(text))
   applied = Model(model | settings: parsed, settings_text: text)
   set_appearance(parsed.font_family, font_size(applied), row(applied), parsed.animations)
+  set_tab(parsed.tab_size)
   with_themes(applied)
 }
 
@@ -1551,7 +1773,7 @@ def change_kept(model: Model, with: fn(Doc, Lang) -> Doc) -> (Model, Effect(Msg)
     // The settings and graph tabs are not text, and neither is a drawing on its board.
     Some(d) if d.language == "runes" or drawing -> (model, effect.none())
     Some(d) -> {
-      changed = with(d, lang(model, d.language))
+      changed = with(d, lang_of(model, d))
       edited = changed.version != d.version
       next = set_doc(Model(model | hover: None), changed)
       column = doc.vcol(buffer.line(changed.lines, changed.cursor.line), changed.cursor.col)
@@ -2098,6 +2320,88 @@ pub def run(model: Model, command: String) -> (Model, Effect(Msg)) {
     "workbench.action.showCommands" -> open_palette(model, "commands")
     "workbench.action.selectTheme" -> open_palette(model, "themes")
     "workbench.action.gotoLine" -> open_palette(model, "line")
+    "editor.action.indentationToSpaces" -> open_palette(model, "indent")
+    "editor.action.toggleWordWrap" -> update(closed, SettingChanged("editor.wordWrap", case model.settings.word_wrap {
+      True -> "\"off\""
+      False -> "\"on\""
+    }))
+    "editor.fold" | "editor.unfold" -> case doc(model) {
+      Some(d) -> {
+        blocks = shape(d.path, d.version, d.lines)
+        start = block_of(blocks, d.cursor.line)
+        folded = folds_of(model, d.path)
+        // Unfold: the fold the cursor is on. Fold: the innermost block around the cursor.
+        case command, list.find(folded, fn(f) { f.0 == d.cursor.line }) {
+          "editor.unfold", Ok(_) -> update(closed, FoldToggled(d.path, d.cursor.line))
+          "editor.fold", Error(_) if start >= 0 -> update(closed, FoldToggled(d.path, start))
+          _, _ -> (closed, effect.none())
+        }
+      }
+      None -> (closed, effect.none())
+    }
+    "editor.foldAll" -> case doc(model) {
+      Some(d) -> {
+        blocks = all_blocks(shape(d.path, d.version, d.lines))
+        // A cursor inside a block goes to the line the block folds under, which stays on show.
+        out = case list.find(blocks, fn(b) { d.cursor.line > b.0 and d.cursor.line <= b.1 }) {
+          Ok(b) -> Pos(b.0, buffer.len(buffer.line(d.lines, b.0)))
+          Error(_) -> d.cursor
+        }
+        placed = set_doc(closed, Doc(doc.single(d) | cursor: out, anchor: out, goal: -1))
+        (Model(placed | folds: dict.insert(model.folds, d.path, blocks)), effect.none())
+      }
+      None -> (closed, effect.none())
+    }
+    "editor.unfoldAll" -> case doc(model) {
+      Some(d) -> (Model(closed | folds: dict.delete(model.folds, d.path)), effect.none())
+      None -> (closed, effect.none())
+    }
+    "editor.action.jumpToBracket" -> change(closed, fn(d, l) {
+      (found, l1, c1, l2, c2) = bracket_pair(d.lines, d.cursor.line, d.cursor.col, l.config.rules)
+      here = d.cursor.line == l1 and { d.cursor.col == c1 or d.cursor.col == c1 + 1 }
+      case found, here {
+        False, _ -> d
+        True, True -> doc.move(d, Pos(l2, c2), False)
+        True, False -> doc.move(d, Pos(l1, c1), False)
+      }
+    })
+    "workbench.action.showRuntimeExtensions" -> {
+      (opened, opening) = open_view(closed, running_tab, "Running Extensions")
+      (opened, effect.batch([opening, ask_running()]))
+    }
+    "workbench.action.restartExtensionHost" -> update(closed, HostRestarted)
+    "merge-conflict.accept.current" | "merge-conflict.accept.incoming" | "merge-conflict.accept.both" | "merge-conflict.next" -> case doc(model) {
+      Some(d) -> {
+        found = conflicts(d.path, d.version, d.lines)
+        here = conflict_at(found, d.cursor.line, False)
+        case command, here >= 0, conflict_count(found) {
+          _, _, 0 -> toast(closed, "There are no merge conflicts in this file.")
+          "merge-conflict.next", _, _ -> case list.drop(conflict_list(found), conflict_at(found, d.cursor.line, True)) {
+            [next, .._] -> jump(closed, d.path, Pos(next.0, 0))
+            [] -> (closed, effect.none())
+          }
+          _, False, _ -> toast(closed, "Put the cursor inside the conflict to settle, or use the buttons above it.")
+          "merge-conflict.accept.current", True, _ -> update(closed, ConflictTaken(d.path, here, "ours"))
+          "merge-conflict.accept.incoming", True, _ -> update(closed, ConflictTaken(d.path, here, "theirs"))
+          _, True, _ -> update(closed, ConflictTaken(d.path, here, "both"))
+        }
+      }
+      None -> (closed, effect.none())
+    }
+    "runes.reload" -> {
+      // What is open comes back after the reload; what is not saved would be lost, so that is said first.
+      unsaved = list.filter(model.docs, fn(d) { on_disk(d) and d.version != d.saved }) |> list.length
+      case unsaved {
+        0 -> {
+          open = group(model, model.focus).tabs |> list.filter(fn(path) { not string.starts_with(path, "runes://") })
+          (closed, effect.from(fn(_) { reload_window(open) }))
+        }
+        n -> toast(closed, int.to_string(n) <> " file" <> case n {
+          1 -> " has"
+          _ -> "s have"
+        } <> " changes that are not saved. Save or close them, then reload.")
+      }
+    }
     "workbench.action.files.save" -> save(closed)
     "workbench.action.files.newUntitledFile" -> {
       n = model.untitled + 1
@@ -2164,19 +2468,11 @@ pub def run(model: Model, command: String) -> (Model, Effect(Msg)) {
       open_panel(Model(closed | terminals: list.append(model.terminals, [id]), terminal: id, terminal_ids: id), "terminal")
     }
     "workbench.action.openSettings" -> {
-      (opened, opening) = open_view(closed, settings_tab, "Settings")
-      (opened, effect.batch([opening, effect.from(fn(dispatch) { git_config(fn(found) { dispatch(GitConfigLoaded(found)) }) })]))
+      open_view(closed, settings_tab, "Settings")
     }
     "workbench.action.openSettingsJson" -> update(closed, FileOpened(model.settings_path))
     "workbench.view.scm" -> (Model(closed | side: "git"), refresh_git(model.until))
     "runes.compare" -> update(closed, CompareOpened("HEAD", "", ""))
-    "git.checkout" -> case model.repo {
-      True -> {
-        (opened, focusing) = open_palette(model, "branches")
-        (opened, effect.batch([focusing, effect.from(fn(dispatch) { git_refs(fn(names) { dispatch(RefsRead(names)) }) })]))
-      }
-      False -> toast(closed, "This folder is not a git repository.")
-    }
     "runes.sessions" -> open_palette(model, "sessions")
     "editor.action.dirtydiff.next" | "editor.action.dirtydiff.previous" -> case doc(model) {
       Some(d) -> {
@@ -2345,10 +2641,6 @@ pub def run(model: Model, command: String) -> (Model, Effect(Msg)) {
       (reset, effect.from(fn(_) { zoom(0) }))
     }
     "workbench.action.toggleDevTools" -> (closed, effect.from(fn(_) { toggle_devtools() }))
-    "runes.checkForUpdates" -> (
-      closed,
-      effect.from(fn(dispatch) { check_update(fn(version, url) { dispatch(UpdateFound(version, url)) }) }),
-    )
     _ -> toast(closed, "Runes has no command called " <> command)
   }
 }
@@ -2486,7 +2778,8 @@ def is_word(text: String) -> Bool {
 }
 
 pub def update(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
-  (moved, acted) = step(model, msg)
+  (stepped_once, acted) = step(model, msg)
+  moved = keep_folds(model, stepped_once)
   (stepped, done) = case blame_spot(moved) == blame_spot(model) and moved.repo == model.repo {
     True -> (moved, acted)
     False -> case blame_spot(moved), doc(moved) {
@@ -2543,15 +2836,202 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
         _ -> toast(opened, problems)
       }
       welcome = root <> "/README.md"
+      // After a reload, what was open is opened again; otherwise the folder's README.
+      again = reopened()
       (told, effect.batch([reading, timer, refresh_git(model.until), effect.from(fn(dispatch) {
         user_files(fn(settings, keys) { dispatch(UserFiles(settings, keys)) })
-        read_file(welcome, fn(text, problem) {
-          case problem {
-            "" -> dispatch(FileRead(welcome, text, ""))
-            _ -> Nil
-          }
-        })
+        ext_disabled(fn(ids) { dispatch(DisabledRead(ids)) })
+        case again {
+          [] -> read_file(welcome, fn(text, problem) {
+            case problem {
+              "" -> dispatch(FileRead(welcome, text, ""))
+              _ -> Nil
+            }
+          })
+          paths -> list.each(paths, fn(path) { dispatch(FileOpened(path)) })
+        }
       })]))
+    }
+    DisabledRead(ids) -> {
+      is_off = fn(e: Extension) { not e.builtin and list.contains(ids, string.lowercase(e.id)) }
+      all = list.append(model.extensions, model.off)
+      on = list.filter(all, fn(e) { not is_off(e) })
+      case list.length(on) == list.length(model.extensions) {
+        True -> (model, effect.none())
+        False -> {
+          applied = with_extensions(Model(model | off: list.filter(all, is_off)), on) |> with_themes
+          (applied, announce(applied))
+        }
+      }
+    }
+    // Switching an extension off keeps it installed; nothing of it is used or run until it is on again.
+    ExtToggled(id, on) -> {
+      all = list.append(model.extensions, model.off)
+      case list.find(all, fn(e) { e.id == id }) {
+        Ok(found) -> {
+          others_on = list.filter(model.extensions, fn(e) { e.id != id })
+          others_off = list.filter(model.off, fn(e) { e.id != id })
+          (enabled, off) = case on {
+            True -> (list.append(others_on, [found]), others_off)
+            False -> (others_on, [found, ..others_off])
+          }
+          applied = with_extensions(Model(model | off:), enabled) |> with_themes
+          (applied, effect.from(fn(dispatch) { ext_enable(id, on, fn(_, problem) { dispatch(ExtToggleDone(problem)) }) }))
+        }
+        Error(_) -> (model, effect.none())
+      }
+    }
+    // The extension host has started afresh: it is told again which files are open.
+    ExtToggleDone(problem) -> case problem {
+      "" -> (Model(model | diagnostics: dict.new()), effect.batch([announce(model), ask_running()]))
+      _ -> toast(model, problem)
+    }
+    LanguageRules(language, rules) -> (
+      Model(model | langs: list.map(model.langs, fn(l) {
+        case l.id == language {
+          True -> Lang(l | config: Config(l.config | rules: merge_rules(l.config.rules, rules)))
+          False -> l
+        }
+      })),
+      effect.none(),
+    )
+    ConflictTaken(path, index, which) -> case find_doc(model, path) {
+      Some(d) -> {
+        found = conflicts(d.path, d.version, d.lines)
+        (ok, start, end, kept) = conflict_taken(found, d.lines, index, which)
+        left = conflict_count(found) - 1
+        case ok {
+          False -> (model, effect.none())
+          True -> {
+            lines = list.flatten([list.take(d.lines, start), kept, list.drop(d.lines, end + 1)])
+            // An edit like any other: it can be undone, and the file is saved by the person.
+            settled = doc.edit(doc.single(d), case lines {
+              [] -> [""]
+              _ -> lines
+            }, buffer.clamp(lines, Pos(start, 0)), False)
+            changed = set_doc(Model(model | hover: None), settled)
+            (told, timer) = case left {
+              0 -> toast(changed, "No conflicts are left in " <> d.name <> ". Save it, then stage it in Source Control to mark it resolved.")
+              _ -> (changed, effect.none())
+            }
+            (told, effect.batch([timer, effect.from(fn(_) { doc_changed(settled.path, settled.version, settled.lines) })]))
+          }
+        }
+      }
+      None -> (model, effect.none())
+    }
+    RunningAsked -> case list.any(model.groups, fn(g) { g.active == running_tab }) {
+      True -> (model, ask_running())
+      False -> (model, effect.none())
+    }
+    RunningRead(found) -> (
+      Model(model | running: list.map(found, fn(r) { Running(r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7) })),
+      effect.from(fn(_) { keep_at_end("runes-running-log") }),
+    )
+    RunningPicked(id) -> (Model(model | running_pick: id), effect.from(fn(_) { keep_at_end("runes-running-log") }))
+    HostRestarted -> {
+      ext_restart()
+      (told, timer) = toast(Model(model | diagnostics: dict.new()), "The extension host was started again.")
+      (told, effect.batch([timer, announce(told), ask_running()]))
+    }
+
+    // --- The explorer: choosing several, copying, cutting, pasting, dragging ---
+    NodeClicked(path, folder, ctrl, shift) -> case ctrl, shift {
+      // Ctrl adds to what is chosen, or takes away from it; nothing is opened.
+      True, _ -> {
+        picked = case list.contains(model.chosen, path) {
+          True -> list.filter(model.chosen, fn(p) { p != path })
+          False -> list.append(model.chosen, [path])
+        }
+        (Model(model | chosen: picked, pointed: path), effect.none())
+      }
+      // Shift chooses everything from the one last pointed at to this one, as the tree shows them.
+      False, True -> {
+        shown = shown_paths(model, model.root)
+        from = case model.pointed {
+          "" -> path
+          pointed -> pointed
+        }
+        a = index_in(shown, from)
+        b = index_in(shown, path)
+        picked = case a < 0 or b < 0 {
+          True -> [path]
+          False -> list.drop(shown, int.min(a, b)) |> list.take(int.max(a, b) - int.min(a, b) + 1)
+        }
+        (Model(model | chosen: picked), effect.none())
+      }
+      False, False -> update(Model(model | chosen: []), case folder {
+        True -> DirToggled(path)
+        False -> FileOpened(path)
+      })
+    }
+    TreeKey(chord) -> case chord {
+      "ctrl+c" -> update(model, ExplorerDid("copy", ""))
+      "ctrl+x" -> update(model, ExplorerDid("cut", ""))
+      "ctrl+v" -> update(model, ExplorerDid("paste", ""))
+      "delete" -> update(model, ExplorerDid("delete", ""))
+      "f2" -> update(model, ExplorerDid("rename", ""))
+      "ctrl+a" -> (Model(model | chosen: shown_paths(model, model.root)), effect.none())
+      _ -> (Model(model | chosen: [], clip: None), effect.none())
+    }
+    TreeMoved(sources, into, copy) -> {
+      // Dropping something where it already is, or a folder into itself, does nothing.
+      wanted = list.filter(sources, fn(s) { within(s, model.root) and s != model.root and not within(into, s) and { copy or dir_of(s) != into } })
+      // The drag is over, whether or not the thing dragged is still there to say so.
+      model = Model(model | drag: None, drop: None)
+      case wanted, within(into, model.root) {
+        [], _ | _, False -> (model, effect.none())
+        _, True -> (
+          model,
+          effect.from(fn(dispatch) { file_place(wanted, into, not copy, fn(made, problem) { dispatch(FilesPlaced(into, wanted, made, not copy, problem)) }) }),
+        )
+      }
+    }
+    TreeImported(paths, into) -> case paths, within(into, model.root) {
+      [], _ | _, False -> (model, effect.none())
+      _, True -> (model, effect.from(fn(dispatch) { file_import(paths, into, fn(made, problem) { dispatch(FilesPlaced(into, [], made, False, problem)) }) }))
+    }
+    FilesPlaced(into, sources, made, moved, problem) -> case problem {
+      "" -> {
+        // What was moved keeps its tabs: each is followed as a rename is.
+        pairs = case moved {
+          True -> list.zip(sources, made) |> list.filter(fn(pair) { pair.0 != pair.1 })
+          False -> []
+        }
+        (followed, following) = list.fold(pairs, (model, effect.none()), fn(state, pair) {
+          (next, more) = update(state.0, FileMoved(pair.0, pair.1, ""))
+          (next, effect.batch([state.1, more]))
+        })
+        expanded = case list.contains(followed.expanded, into) or into == followed.root {
+          True -> followed.expanded
+          False -> [into, ..followed.expanded]
+        }
+        shown = Model(followed | expanded:, chosen: made, pointed: list.first(made) |> result.unwrap(followed.pointed), clip: case moved {
+          True -> None
+          False -> followed.clip
+        })
+        dirs = [into, ..list.map(sources, dir_of)] |> list.unique
+        (shown, effect.batch([
+          following,
+          effect.from(fn(dispatch) { list.each(dirs, fn(dir) { read_dir(dir, fn(found) { dispatch(DirRead(dir, found)) }) }) }),
+          rewalk(shown),
+          refresh_status(),
+        ]))
+      }
+      _ -> toast(model, problem)
+    }
+    FilesGone(paths, problem) -> {
+      (gone, going) = list.fold(paths, (model, effect.none()), fn(state, path) {
+        (next, more) = update(state.0, FileGone(path, True, ""))
+        (next, effect.batch([state.1, more]))
+      })
+      case problem {
+        "" -> (Model(gone | chosen: []), going)
+        _ -> {
+          (told, timer) = toast(Model(gone | chosen: []), problem)
+          (told, effect.batch([going, timer]))
+        }
+      }
     }
     UserFiles(settings_path, keys_path) -> (
       Model(model | settings_path:, keys_path:),
@@ -2566,10 +3046,7 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
           "" -> "{}"
           _ -> text
         })
-        (applied, case applied.settings.check_updates {
-          True -> effect.from(fn(dispatch) { check_update(fn(version, url) { dispatch(UpdateFound(version, url)) }) })
-          False -> effect.none()
-        })
+        (applied, effect.none())
       }
       False -> (with_bindings(model, text), effect.none())
     }
@@ -2641,6 +3118,44 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
           False -> text
         }, False)
       })
+    }
+    DefinitionAt(group_id, x, y) -> {
+      (placed, _) = update(model, MouseDown(group_id, x, y, False, 1))
+      run(placed, "editor.action.revealDefinition")
+    }
+    FoldToggled(path, line) -> case find_doc(model, path) {
+      Some(d) -> {
+        folded = folds_of(model, path)
+        end = fold_end(shape(d.path, d.version, d.lines), line)
+        next = case list.any(folded, fn(f) { f.0 == line }), end > line {
+          True, _ -> list.filter(folded, fn(f) { f.0 != line })
+          False, True -> list.sort([(line, end), ..folded], fn(a, b) { int.compare(a.0, b.0) })
+          False, False -> folded
+        }
+        // A cursor inside what is folded away goes to the line that stays.
+        inside = d.cursor.line > line and d.cursor.line <= end and next != folded and list.any(next, fn(f) { f.0 == line })
+        out = Pos(line, buffer.len(buffer.line(d.lines, line)))
+        placed = case inside {
+          True -> set_doc(model, Doc(d | cursor: out, anchor: out, more: [], goal: -1))
+          False -> model
+        }
+        (Model(placed | folds: dict.insert(placed.folds, path, next)), effect.none())
+      }
+      None -> (model, effect.none())
+    }
+    IndentPicked(unit) -> case doc(model) {
+      Some(d) -> {
+        picked = case unit {
+          "" -> detect_indent(d.lines)
+          _ -> unit
+        }
+        indents = case picked {
+          "" -> dict.delete(model.indents, d.path)
+          _ -> dict.insert(model.indents, d.path, picked)
+        }
+        (Model(model | indents:, overlay: Closed), focus_editor())
+      }
+      None -> (Model(model | overlay: Closed), effect.none())
     }
     CursorAdded(group_id, x, y) -> {
       (line, column) = locate(group_id, x, y)
@@ -2880,8 +3395,38 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
           )
         }
         "rename" if inside -> (Model(closed | naming: Some(Naming("rename", path, base_name(path)))), effect.from(fn(_) { focus_stem("runes-naming") }))
-        "delete" if inside -> (closed, effect.from(fn(dispatch) { file_remove(path, fn(removed, problem) { dispatch(FileGone(path, removed, problem)) }) }))
-        "rename" | "delete" -> toast(closed, "Point at a file or folder in the explorer first.")
+        // What is chosen in the tree, when the action is asked of one of them; else the one asked.
+        "copy" | "cut" if inside -> {
+          chosen = chosen_with(model, path)
+          n = list.length(chosen)
+          (told, timer) = toast(Model(closed | clip: Some((chosen, action == "cut"))), case n, action {
+            1, "cut" -> base_name(path) <> " will move where it is pasted."
+            1, _ -> base_name(path) <> " copied. Paste it into a folder."
+            _, "cut" -> int.to_string(n) <> " items will move where they are pasted."
+            _, _ -> int.to_string(n) <> " items copied. Paste them into a folder."
+          })
+          (told, timer)
+        }
+        "paste" -> {
+          into = folder_for(model, path)
+          case model.clip {
+            Some((sources, cut)) -> update(closed, TreeMoved(sources, into, not cut))
+            // Nothing copied in Runes: files copied in the system's file manager, if there are any.
+            None -> (closed, effect.from(fn(dispatch) {
+              clipboard_files(fn(found) {
+                case found {
+                  [] -> dispatch(Noted("info", "There is nothing to paste. Copy a file here, or in the file manager, first."))
+                  paths -> dispatch(TreeImported(paths, into))
+                }
+              })
+            }))
+          }
+        }
+        "delete" if inside -> case chosen_with(model, path) {
+          [_] | [] -> (closed, effect.from(fn(dispatch) { file_remove(path, fn(removed, problem) { dispatch(FileGone(path, removed, problem)) }) }))
+          several -> (closed, effect.from(fn(dispatch) { files_remove(several, fn(gone, problem) { dispatch(FilesGone(gone, problem)) }) }))
+        }
+        "rename" | "delete" | "copy" | "cut" -> toast(closed, "Point at a file or folder in the explorer first.")
         "copyPath" -> (closed, effect.from(fn(_) { copy_text(path) }))
         "copyRelative" -> (closed, effect.from(fn(_) { copy_text(relative(model, path)) }))
         "reveal" -> (closed, effect.from(fn(_) { file_reveal(path) }))
@@ -3022,17 +3567,6 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
       },
     ]))
     Blamed(found) -> (Model(model | blame: Some(found)), effect.none())
-    GitConfigAsked -> (model, effect.from(fn(dispatch) { git_config(fn(found) { dispatch(GitConfigLoaded(found)) }) }))
-    GitConfigLoaded(found) -> (Model(model | git_config: found), effect.none())
-    GitScopePicked(scope) -> (Model(model | git_scope: scope), effect.none())
-    GitConfigSet(key, value) -> (model, effect.from(fn(dispatch) { git_config_set(key, string.trim(value), model.git_scope, fn(problem) { dispatch(GitConfigDone(problem)) }) }))
-    GitConfigDone(problem) -> {
-      (told, timer) = case problem {
-        "" -> (model, effect.none())
-        _ -> toast(model, problem)
-      }
-      (told, effect.batch([timer, effect.from(fn(dispatch) { git_config(fn(found) { dispatch(GitConfigLoaded(found)) }) })]))
-    }
     GitDiscarded(paths) -> (model, effect.from(fn(dispatch) { git_discard(paths, fn(done, problem) { dispatch(GitDiscardDone(done, problem)) }) }))
     GitDiscardDone(done, problem) -> case problem, done {
       "", False -> (model, effect.none())
@@ -3081,7 +3615,12 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
           True -> 1
           False -> 0
         }, 0, 0, [], [], False, False, [])
-        (shown, effects) = show(Model(model | docs: list.append(model.docs, [opened])), model.focus, path)
+        // How the file is indented already decides how it goes on being indented.
+        indents = case model.settings.detect_indentation, detect_indent(lines) {
+          True, found if found != "" -> dict.insert(model.indents, path, found)
+          _, _ -> dict.delete(model.indents, path)
+        }
+        (shown, effects) = show(Model(model | docs: list.append(model.docs, [opened]), indents:, folds: dict.delete(model.folds, path)), model.focus, path)
         announce = effect.batch([effect.from(fn(_) { doc_opened(path, language, lines) }), read_base(model, path)])
         case model.goto {
           Some((wanted, at)) if wanted == path -> {
@@ -3294,7 +3833,7 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
     }
 
     ExtTab(name) -> (Model(model | ext_tab: name), effect.none())
-    ExtOpened(id) -> case list.find(model.extensions, fn(e) { e.id == id }) {
+    ExtOpened(id) -> case list.find(list.append(model.extensions, model.off), fn(e) { e.id == id }) {
       Ok(e) -> {
         key = string.lowercase(id)
         (namespace, name) = string.split_once(id, ".") |> result.unwrap((e.publisher, id))
@@ -3457,8 +3996,14 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
       _, _ if problem != "" -> toast(Model(model | market_note: ""), problem)
       "", Ok(added) -> {
         others = list.filter(model.extensions, fn(e) { e.id != id })
-        installed = with_extensions(model, list.append(others, [added])) |> with_themes
-        (told, timer) = toast(Model(installed | market_note: ""), "Installed " <> added.name <> " " <> added.version)
+        installed = with_extensions(Model(model | off: list.filter(model.off, fn(e) { e.id != id })), list.append(others, [added])) |> with_themes
+        // An extension can start, and fail, before the install itself has answered: what went
+        // wrong is the news then, and is not covered over by the news that it was installed.
+        news = case string.contains(model.toast, "failed to start") {
+          True -> model.toast
+          False -> "Installed " <> added.name <> " " <> added.version
+        }
+        (told, timer) = toast(Model(installed | market_note: ""), news)
         (told, effect.batch([timer, announce(installed)]))
       }
       "", Error(reason) -> toast(model, reason)
@@ -3466,7 +4011,7 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
     }
     Removed(id) -> {
       uninstall(id)
-      left = with_extensions(model, list.filter(model.extensions, fn(e) { e.id != id }))
+      left = with_extensions(Model(model | off: list.filter(model.off, fn(e) { e.id != id })), list.filter(model.extensions, fn(e) { e.id != id }))
       (with_themes(left), announce(left))
     }
     ThemePicked(label) -> update(Model(model | overlay: Closed), SettingChanged("workbench.colorTheme", json.to_string(json.string(label))))
@@ -3520,22 +4065,6 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
       model,
       effect.from(fn(dispatch) { git_stage(paths, staged, fn(problem) { dispatch(GitDone(problem)) }) }),
     )
-    GitMessageTyped(text) -> (Model(model | message: text), effect.none())
-    GitCommitted -> case string.trim(model.message) {
-      "" -> toast(model, "Write a commit message first.")
-      message -> (
-        model,
-        effect.from(fn(dispatch) {
-          git_commit(message, fn(problem) {
-            case problem {
-              "" -> dispatch(GitMessageTyped(""))
-              _ -> Nil
-            }
-            dispatch(GitDone(problem))
-          })
-        }),
-      )
-    }
     GitDone(problem) -> case problem {
       "" -> (model, refresh_git(model.until))
       _ -> {
@@ -3701,40 +4230,6 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
       }
     }
     CommitMarked(hash) -> (Model(model | marked: hash), effect.none())
-
-    BranchPicked(kind, name) -> case name == model.branch {
-      True -> (Model(model | overlay: Closed), focus_editor())
-      False -> (
-        Model(model | overlay: Closed),
-        effect.batch([focus_editor(), effect.from(fn(dispatch) { git_switch(kind, name, fn(problem) { dispatch(BranchSwitched(name, problem)) }) })]),
-      )
-    }
-    // The files on disk are another branch's now: read the open ones again, and the tree.
-    BranchSwitched(name, problem) -> case problem {
-      "" -> {
-        root = model.root
-        clean = list.filter(model.docs, fn(d) { on_disk(d) and d.version == d.saved }) |> list.map(fn(d) { d.path })
-        folders = dict.keys(model.tree)
-        (told, toasting) = toast(model, "Switched to " <> name <> ".")
-        (told, effect.batch([
-          toasting,
-          refresh_git(model.until),
-          effect.from(fn(dispatch) {
-            list.each(clean, fn(path) {
-              read_file(path, fn(text, failed) {
-                case failed {
-                  "" -> dispatch(Reloaded(path, text))
-                  _ -> Nil
-                }
-              })
-            })
-            list.each(folders, fn(path) { read_dir(path, fn(found) { dispatch(DirRead(path, found)) }) })
-            walk(root, fn(files) { dispatch(Walked(files)) })
-          }),
-        ]))
-      }
-      _ -> toast(model, "Could not switch to " <> name <> ": " <> problem)
-    }
 
     TerminalMoved(id, to_editor) -> {
       path = terminal_tab <> int.to_string(id)
@@ -4081,11 +4576,6 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
       _, _ -> (model, effect.none())
     }
 
-    UpdateFound(version, url) -> toast(Model(model | update: Some((version, url))), "Runes " <> version <> " is available. Click the version in the status bar to get it.")
-    UpdateOpened -> case model.update {
-      Some((_, url)) -> (model, effect.from(fn(_) { open_external(url) }))
-      None -> (model, effect.none())
-    }
     ToastDone(id) -> case id == model.toasts {
       True -> (Model(model | toast: ""), effect.none())
       False -> (model, effect.none())
@@ -4144,7 +4634,21 @@ def key_in_editor(
     }
     _, _ if moves -> {
       page = int.max(height(model, model.focus) / row(model) - 2, 1)
-      change_each(Model(model | completion: None), fn(d, l, _) { doc.editor_key(d, l, key, ctrl, shift, page) })
+      group_id = model.focus
+      by = case key {
+        "ArrowUp" -> -1
+        "ArrowDown" -> 1
+        "PageUp" -> 0 - page
+        "PageDown" -> page
+        _ -> 0
+      }
+      change_each(Model(model | completion: None), fn(d, l, _) {
+        case by {
+          0 -> doc.editor_key(d, l, key, ctrl, shift, page)
+          // Up and down go by the rows on show: over folds, and through a wrapped line.
+          _ -> doc.vertical_by(d, shift, fn(line, col, goal) { visual_step(group_id, line, col, goal, by) })
+        }
+      })
     }
     _, _ -> (model, effect.none())
   }

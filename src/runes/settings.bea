@@ -9,6 +9,7 @@ import gleam/int
 import gleam/json
 import gleam/list
 import gleam/result
+import gleam/string
 
 /// One slice of the pie menu. A slice with `items` opens them as a pie of its own, and its
 /// command is not used.
@@ -27,9 +28,22 @@ pub type Settings {
   side_right: Bool,
   animations: Bool,
   pie: List(Slice),
-  check_updates: Bool,
   blame: Bool,
   shell: String,
+  /// How wide a tab is, and how many spaces a step of indentation is when spaces are used.
+  tab_size: Int,
+  /// Indent with spaces; otherwise with tabs.
+  insert_spaces: Bool,
+  /// Go by how a file is indented already, when it says.
+  detect_indentation: Bool,
+  /// Per language ("[python]": { "editor.tabSize": 4 }): the tab size and whether spaces are used.
+  language_indent: List((String, (Int, Bool))),
+  word_wrap: Bool,
+  /// Lines that show how deep each line is indented.
+  guides: Bool,
+  folding: Bool,
+  /// Mark the bracket that pairs with the one at the cursor.
+  match_brackets: Bool,
 }
 
 pub const default_pie = [
@@ -49,7 +63,6 @@ pub const default_pie = [
     Slice("Changes", "workbench.view.scm", []),
     Slice("Graph", "runes.gitGraph", []),
     Slice("Compare", "runes.compare", []),
-    Slice("Branch", "git.checkout", []),
   ]),
 ]
 
@@ -62,9 +75,16 @@ pub const defaults = Settings(
   side_right: False,
   animations: True,
   pie: default_pie,
-  check_updates: True,
   blame: True,
   shell: "",
+  tab_size: 4,
+  insert_spaces: True,
+  detect_indentation: True,
+  language_indent: language_defaults,
+  word_wrap: False,
+  guides: True,
+  folding: True,
+  match_brackets: True,
 )
 
 /// The file a new user starts with.
@@ -239,8 +259,62 @@ pub def parse(text: String) -> Settings {
       [] -> d.pie
       items -> items
     },
-    check_updates: get(all, "runes.update.check", decode.bool, d.check_updates),
     blame: get(all, "git.blame.statusBarItem.enabled", decode.bool, d.blame),
     shell: get(all, "terminal.shell", decode.string, d.shell),
+    tab_size: get(all, "editor.tabSize", number(), int.to_float(d.tab_size)) |> float.round |> int.clamp(1, 16),
+    insert_spaces: get(all, "editor.insertSpaces", decode.bool, d.insert_spaces),
+    detect_indentation: get(all, "editor.detectIndentation", decode.bool, d.detect_indentation),
+    language_indent: language_indents(all),
+    // VS Code's "editor.wordWrap" is a word ("off", "on", …); a plain true or false is taken too.
+    word_wrap: case get(all, "editor.wordWrap", decode.string, "") {
+      "" -> get(all, "editor.wordWrap", decode.bool, d.word_wrap)
+      "off" -> False
+      _ -> True
+    },
+    guides: get(all, "editor.guides.indentation", decode.bool, d.guides),
+    folding: get(all, "editor.folding", decode.bool, d.folding),
+    match_brackets: case get(all, "editor.matchBrackets", decode.string, "") {
+      "" -> get(all, "editor.matchBrackets", decode.bool, d.match_brackets)
+      "never" -> False
+      _ -> True
+    },
   )
+}
+
+/// Built in, before anyone's settings: languages whose own convention is not four spaces.
+const language_defaults = [
+  ("bea", (2, True)), ("gleam", (2, True)), ("yaml", (2, True)), ("json", (2, True)), ("jsonc", (2, True)),
+  ("ruby", (2, True)), ("go", (4, False)), ("makefile", (4, False)), ("html", (2, True)), ("css", (2, True)),
+  ("javascript", (2, True)), ("typescript", (2, True)), ("javascriptreact", (2, True)), ("typescriptreact", (2, True)),
+  ("markdown", (2, True)), ("lua", (2, True)), ("dart", (2, True)), ("nix", (2, True)),
+]
+
+/// "[python]": { "editor.tabSize": 4, "editor.insertSpaces": true }, for every language named so.
+def language_indents(all: dict.Dict(String, Dynamic)) -> List((String, (Int, Bool))) {
+  found = indents_by_language(all)
+  // What ships keeps its order; languages only the person has named come after, by name.
+  known = list.map(language_defaults, fn(entry) { (entry.0, dict.get(found, entry.0) |> result.unwrap(entry.1)) })
+  more = dict.to_list(found)
+    |> list.filter(fn(entry) { not list.any(language_defaults, fn(d) { d.0 == entry.0 }) })
+    |> list.sort(fn(a, b) { string.compare(a.0, b.0) })
+  list.append(known, more)
+}
+
+def indents_by_language(all: dict.Dict(String, Dynamic)) -> dict.Dict(String, (Int, Bool)) {
+  dict.fold(all, dict.from_list(language_defaults), fn(found, key, value) {
+    case string.starts_with(key, "[") and string.ends_with(key, "]") {
+      False -> found
+      True -> {
+        inner = decode.run(value, decode.dict(decode.string, decode.dynamic)) |> result.unwrap(dict.new())
+        name = string.drop_start(key, 1) |> string.drop_end(1)
+        was = dict.get(found, name) |> result.unwrap((0, True))
+        size = get(inner, "editor.tabSize", number(), int.to_float(was.0)) |> float.round |> int.clamp(0, 16)
+        spaces = get(inner, "editor.insertSpaces", decode.bool, was.1)
+        case dict.has_key(inner, "editor.tabSize") or dict.has_key(inner, "editor.insertSpaces") {
+          True -> dict.insert(found, name, (size, spaces))
+          False -> found
+        }
+      }
+    }
+  })
 }

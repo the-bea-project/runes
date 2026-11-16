@@ -2,7 +2,7 @@
   "name": "runes-themes",
   "displayName": "Runes Themes",
   "description": "Void (dark) and Glacier (light): the themes Runes ships with",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "publisher": "runes",
   "license": "Apache-2.0",
   "engines": {

@@ -39,15 +39,54 @@ fs.appendFileSync(path.join(project, "README.md"), "\nmain line\n"); git("commit
 git("merge", "-q", "--no-ff", "feature/notes", "-m", "Merge the notes"); git("tag", "v0.1.0");
 
 let passed = 0, failed = 0, page = null;
+// With RUNES_DIAG, a line to the page's debugger is opened at the start: a page that has
+// stopped answering cannot be reached to open one later.
+let diagSession = null, diagApp = null;
 const results = [];
 // RUNES_ONLY=<pattern> runs just the checks whose names match, for working on one of them.
 const only = process.env.RUNES_ONLY ? new RegExp(process.env.RUNES_ONLY, "i") : null;
+// RUNES_UPTO=<pattern> runs everything up to and including the first check whose name matches.
+const upto = process.env.RUNES_UPTO ? new RegExp(process.env.RUNES_UPTO, "i") : null;
+let reached = false;
 async function check(name, run) {
   if (only && !only.test(name)) return;
+  if (reached) return;
+  if (upto?.test(name)) reached = true;
   try { await run(); passed++; results.push("ok    " + name); console.log("ok    " + name); }
   catch (e) {
     // RUNES_DIAG=1: what the machine was busy with when a check failed, for telling a slow machine from a stuck app.
-    if (process.env.RUNES_DIAG && page) { try { console.log("page: " + JSON.stringify(await Promise.race([page.evaluate(() => new Promise((done) => { const facts = { hidden: document.hidden, focus: document.hasFocus(), frames: 0 }; const tick = () => { facts.frames++; requestAnimationFrame(tick); }; requestAnimationFrame(tick); setTimeout(() => done(facts), 500); })), new Promise((r) => setTimeout(() => r("no answer in 5s"), 5000))]))); } catch (e) { console.log("page: " + e.message); } }
+    let frozen = false;
+    if (process.env.RUNES_DIAG && page) { try { const said = JSON.stringify(await Promise.race([page.evaluate(() => new Promise((done) => { const facts = { hidden: document.hidden, focus: document.hasFocus(), frames: 0 }; const tick = () => { facts.frames++; requestAnimationFrame(tick); }; requestAnimationFrame(tick); setTimeout(() => done(facts), 500); })), new Promise((r) => setTimeout(() => r("no answer in 5s"), 5000))])); frozen = said.includes("no answer"); console.log("page: " + said); } catch (e) { console.log("page: " + e.message); } }
+    // A page that does not answer is stopped where it stands, and says where that is. Only
+    // then: asking a page that is idle to stop would stop it at the next thing it does.
+    if (process.env.RUNES_DIAG && page && frozen) {
+      try {
+        // Where the page's process is, in its own code: the page may be busy somewhere its debugger cannot stop it.
+        try {
+          const run = (c) => require("node:child_process").execSync(c, { timeout: 90000 }).toString();
+          const pid = run("pgrep -n -f 'type=renderer'").trim();
+          console.log("the page's process, by thread:\n" + run(`top -H -b -n 1 -p ${pid} | sed -n 7,11p | cut -c1-120`));
+          console.log(run(`gdb -p ${pid} -batch -ex 'bt 40' 2>&1 | grep '^#' | cut -c1-230 | head -44`));
+        } catch (e) { console.log("no native stack: " + String(e.message).slice(0, 200)); }
+        const cdp = diagSession ?? await Promise.race([page.context().newCDPSession(page), new Promise((_, no) => setTimeout(() => no(new Error("no session")), 4000))]);
+        const paused = new Promise((done) => cdp.once("Debugger.paused", done));
+        if (!diagSession) await cdp.send("Debugger.enable");
+        cdp.send("Debugger.setSkipAllPauses", { skip: false }).catch(() => {});
+        cdp.send("Debugger.pause").catch(() => {});
+        const where = await Promise.race([paused, new Promise((r) => setTimeout(() => r(null), 4000))]);
+        if (where) console.log("stuck in: " + where.callFrames.slice(0, 14).map((f) => `${f.functionName || "(anonymous)"} ${String(f.url).split("/").pop()}:${f.location.lineNumber + 1}:${f.location.columnNumber}`).join("\n          "));
+        else console.log("stuck in: nothing of the page's own was running when it was stopped");
+        // Nothing may be left waiting to stop the page later.
+        cdp.send("Debugger.setSkipAllPauses", { skip: true }).catch(() => {});
+        cdp.send("Debugger.resume").catch(() => {});
+        if (!diagSession) cdp.detach().catch(() => {});
+      } catch (e) { console.log("stuck in: " + e.message); }
+    }
+    if (process.env.RUNES_DIAG && diagApp) {
+      const answer = await Promise.race([diagApp.evaluate(() => "the shell answers").catch((e) => "the shell: " + e.message), new Promise((r) => setTimeout(() => r("the shell does not answer in 4s"), 4000))]);
+      console.log(answer);
+      try { console.log(require("node:child_process").execSync("top -b -n 1 -w 200 | sed -n 7,14p | cut -c1-160").toString()); } catch {}
+    }
     if (process.env.RUNES_DIAG) { try { console.log(require("node:child_process").execSync("ps -eo pcpu,etimes,args --sort=-pcpu | head -6 | cut -c1-150").toString()); } catch {} }
     failed++; if (shots && page) await page.screenshot({ path: path.join(shots, "fail-" + failed + ".png") }).catch(() => {}); results.push("FAIL  " + name); console.log("FAIL  " + name + "\n      " + String(e.message).split("\n").slice(0, 6).join("\n      "));
   }
@@ -177,7 +216,8 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     env: { ...process.env, RUNES_MARKETPLACE: `http://127.0.0.1:${registry.address().port}`, ...gitEnv },
   });
   const p = await app.firstWindow();
-  page = p;
+  page = p; diagApp = app;
+  if (process.env.RUNES_DIAG) { try { diagSession = await p.context().newCDPSession(p); await diagSession.send("Debugger.enable"); } catch {} }
   const errors = [];
   p.on("pageerror", (e) => errors.push(e.message));
   if (process.env.RUNES_CONSOLE) p.on("console", (m) => console.log("PAGE " + m.text().slice(0, 400)));
@@ -314,6 +354,27 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     expect((await status()).includes("Ln 8"), "click did not land on line 8");
     await K("F12");
     await until("the cursor to move to the definition", async () => (await status()).includes("Ln 3"), 20000);
+  });
+  await check("Ctrl and a click goes to the definition, and into a library's own file", async () => {
+    await line(1).click({ position: { x: 4, y: 8 } });
+    expect((await status()).includes("Ln 1"), "the cursor did not leave the definition");
+    await line(8).click({ position: { x: 150, y: 8 }, modifiers: ["Control"] });
+    await until("the cursor at the definition", async () => (await status()).includes("Ln 3"), 20000);
+    await p.keyboard.down("Control");
+    const held = await p.evaluate(() => document.body.classList.contains("ctrl-held"));
+    await p.keyboard.up("Control");
+    expect(held && !(await p.evaluate(() => document.body.classList.contains("ctrl-held"))), "holding Ctrl does not show that a click will follow a name");
+    // A name that comes from a library: its file is outside the folder, and opens all the same.
+    const row = await p.evaluate(() => [...document.querySelectorAll(".group.focused .row .code")].findIndex((c) => /^import gleam\//.test(c.textContent)) + 1);
+    if (row > 0) {
+      const text = await line(row).textContent();
+      const w = (await line(row).evaluate((el) => { const r = document.createRange(); r.selectNodeContents(el); return r.getBoundingClientRect().width; })) / text.length;
+      await line(row).click({ position: { x: w * (text.length - 1.5), y: 8 }, modifiers: ["Control"] });
+      await until("a file of the library to open", async () => { const tab = await p.locator(".group.focused .tab.on").textContent(); return /\.gleam/.test(tab); }, 20000);
+      expect((await lines()).length > 3, "the library's file is empty");
+      await K("Control+w");
+      await open("shop.bea");
+    }
   });
 
   await check("language server: completion fits what is typed, takes types and modules, and brings the import", async () => {
@@ -556,9 +617,9 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
 
   await check("settings view: the pie menu is edited there, as a tree", async () => {
     const rows = await p.locator(".pie-row").count();
-    expect(rows === 16, "eight slices and the eight items inside two of them should be listed, got " + rows);
+    expect(rows === 15, "eight slices and the seven items inside two of them should be listed, got " + rows);
     await p.locator(".settings-page .button", { hasText: "Add a slice" }).click();
-    await until("a ninth slice", async () => (await p.locator(".pie-row").count()) === 17, 3000);
+    await until("a ninth slice", async () => (await p.locator(".pie-row").count()) === 16, 3000);
     await p.locator('.pie-row input[aria-label="Label of slice 9"]').fill("Graph");
     await p.locator('.pie-row input[aria-label="Label of slice 9"]').blur();
     await p.locator('.pie-row select[aria-label="Command of slice 9"]').selectOption("runes.gitGraph");
@@ -588,14 +649,14 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     await p.waitForSelector(".pie-hub");
     expect((await p.locator(".slice.more").count()) === 2, "View and Git should be marked as holding more");
     await p.locator(".slice", { hasText: "Git" }).click();
-    await until("the Git items", async () => (await p.locator(".slice").allTextContents()).join() === "Changes,Graph,Compare,Branch", 3000);
+    await until("the Git items", async () => (await p.locator(".slice").allTextContents()).join() === "Changes,Graph,Compare", 3000);
     expect((await p.locator(".pie-hub").textContent()).includes("Git"), "the hub does not say which submenu this is");
     expect((await p.locator(".pie-trail polyline").count()) === 1, "no line shows the way back");
     await shot("pie-submenu");
     await p.locator(".pie-hub").click();
     await until("the top level again", async () => (await p.locator(".slice").count()) === 9, 3000);
     await p.locator(".slice", { hasText: "Git" }).click();
-    await until("the Git items again", async () => (await p.locator(".slice").count()) === 4, 3000);
+    await until("the Git items again", async () => (await p.locator(".slice").count()) === 3, 3000);
     await p.locator(".slice", { hasText: "Changes" }).click();
     await until("Source Control", async () => (await p.locator('.side[data-side="git"]').count()) === 1 && (await p.locator(".pie").count()) === 0, 3000);
     await K("Control+Shift+e");
@@ -1055,7 +1116,7 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     } finally { await server.close(); }
   });
 
-  await check("source control: a change is staged and committed", async () => {
+  await check("source control: a change is staged; committing is left to the terminal", async () => {
     fs.writeFileSync(path.join(project, "CHANGES.md"), "# Changes\n");
     await K("Control+Shift+g");
     await p.waitForSelector(".branch-line");
@@ -1064,10 +1125,16 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     await until("the new file to be listed", async () => (await p.locator(".change").allTextContents()).some((t) => t.includes("CHANGES.md")), 5000);
     await p.locator('.mini[title="Stage CHANGES.md"]').click();
     await until("it to be staged", async () => (await p.locator('.mini[title="Unstage CHANGES.md"]').count()) === 1, 5000);
-    await p.locator("#runes-commit").fill("Add a change log");
+    expect(execFileSync("git", ["diff", "--cached", "--name-only"], { cwd: project }).toString().trim() === "CHANGES.md", "git does not have it staged");
     await shot("source-control");
-    await p.locator(".commit-form .button").click();
-    await until("the commit", async () => execFileSync("git", ["log", "-1", "--format=%s"], { cwd: project }).toString().trim() === "Add a change log", 8000);
+    // Committing is the terminal's business: Runes shows and stages, and offers no way to commit or switch branch.
+    expect((await p.locator("#runes-commit, .commit-form, .branch-switch").count()) === 0, "there is still a commit box or a branch switcher");
+    await commands(); await p.keyboard.type("Git:"); await p.waitForTimeout(150);
+    const offered = await p.locator(".result span:first-child").allTextContents();
+    expect(!offered.some((o) => /^Git: (Commit|Switch Branch|Checkout|Push|Pull)/i.test(o)), "the palette offers: " + offered.join());
+    await K("Escape");
+    execFileSync("git", ["commit", "-q", "-m", "Add a change log"], { cwd: project });
+    await p.locator('.side .mini[title="Refresh"]').click();
     await until("the change to leave the list", async () => !(await p.locator(".change").allTextContents()).some((t) => t.includes("CHANGES.md")), 5000);
   });
 
@@ -1202,31 +1269,6 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     await p.locator('.side .mini[title="Refresh"]').click();
   });
 
-  await check("branches: switching from the status bar reloads the open files", async () => {
-    await open("README.md");
-    await until("main's text", async () => (await lines()).includes("main line"), 4000);
-    await p.locator(".status .branch").click();
-    await typing();
-    const offered = await p.locator(".result span:first-child").allTextContents();
-    expect(offered.includes("main") && offered.includes("feature/notes") && !offered.includes("v0.1.0"), "branches offered: " + offered.join());
-    await p.keyboard.type("feature"); await K("Enter");
-    await until("the status bar to name the branch", async () => (await status()).includes("feature/notes"), 6000);
-    expect(execFileSync("git", ["branch", "--show-current"], { cwd: project }).toString().trim() === "feature/notes", "git is not on the branch");
-    await until("the open file to be the branch's version", async () => !(await lines()).includes("main line"), 5000);
-    // And back, from the graph's own switcher.
-    await commands(); await p.keyboard.type("Git: Open Graph"); await K("Enter");
-    await p.locator(".graph-page .branch-switch").click();
-    await typing();
-    await p.keyboard.type("main"); await K("Enter");
-    await until("main again", async () => (await status()).includes(" main") || (await p.locator(".status .branch").textContent()) === "main", 6000);
-    // Git's refusal is passed on rather than forced through.
-    fs.appendFileSync(path.join(project, "README.md"), "unsaved work\n");
-    await p.locator(".graph-page .branch-switch").click();
-    await typing();
-    await p.keyboard.type("feature"); await K("Enter");
-    await until("the refusal", async () => ((await p.locator(".toast").textContent().catch(() => "")) ?? "").includes("Could not switch"), 6000);
-    execFileSync("git", ["checkout", "--", "README.md"], { cwd: project });
-  });
 
   await check("the calendar steps out to months and years", async () => {
     const year = new Date().getFullYear(), month = new Date().toLocaleString("en", { month: "long" });
@@ -1418,7 +1460,8 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     await p.evaluate(() => window.dispatchEvent(new Event("focus")));
     const node = (name) => p.locator(".tree .node", { has: p.locator(".name", { hasText: new RegExp("^" + name.replace(".", "\\.") + "$") }) });
     await unfold("src");
-    await until("the modified file", async () => ((await node("notes.md").getAttribute("class").catch(() => "")) ?? "").includes("git-M"), 6000);
+    await until("the modified file", async () => ((await node("notes.md").getAttribute("class").catch(() => "")) ?? "").includes("git-M"), 6000)
+      .catch(async (e) => { throw new Error(e.message + ": " + (await node("notes.md").getAttribute("class").catch(() => "no such node")) + " | git says " + execFileSync("git", ["status", "--short"], { cwd: project }).toString().replace(/\n/g, "; ")); });
     await until("the new file", async () => ((await node("fresh.md").getAttribute("class").catch(() => "")) ?? "").includes("git-U"), 6000);
     expect((await node("src").getAttribute("class")).includes("git-in"), "the folder does not show that it holds changes");
     expect((await node("notes.md").locator(".git-mark").textContent()) === "M" && (await node("fresh.md").locator(".git-mark").textContent()) === "U", "the letters are missing");
@@ -1606,7 +1649,7 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     await node("src").click({ button: "right" });
     await p.waitForSelector(".node-menu");
     const items = await p.locator(".node-menu .result span:first-child").allTextContents();
-    expect(items.join() === "New File…,New Folder…,New Drawing…,Rename…,Delete,Copy Path,Copy Relative Path,Show in the File Manager", "menu: " + items.join());
+    expect(items.join() === "New File…,New Folder…,New Drawing…,Cut,Copy,Paste,Rename…,Delete,Copy Path,Copy Relative Path,Show in the File Manager", "menu: " + items.join());
     await shot("explorer-menu");
     await p.locator(".node-menu .result", { hasText: "New Folder" }).click();
     await p.locator("#runes-naming").fill("deep/inner"); await K("Enter");
@@ -1776,71 +1819,7 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     execFileSync("git", ["checkout", "--", "."], { cwd: project });
   });
 
-  await check("git settings: name, email and signing are read from git and written through it", async () => {
-    await commands(); await p.keyboard.type("Preferences: Open Settings"); await K("Enter");
-    const field = (key) => p.locator(`.settings-page [aria-label="${key}"]`);
-    await until("git's name for this repository", async () => (await field("user.name").inputValue().catch(() => "")) === "Ada", 5000);
-    const row = (key) => p.locator(".settings-page .setting", { has: p.locator(`[aria-label="${key}"]`) });
-    expect((await row("user.name").locator("small").textContent()).includes("Set for this repository"), "it does not say where the name comes from");
-    const read = (...args) => { try { return execFileSync("git", ["config", ...args], { cwd: project, env: { ...process.env, ...gitEnv } }).toString().trim(); } catch { return ""; } };
-    // For all repositories: written to the user's file, not the repository's.
-    await field("user.email").fill("ada@all.example"); await field("user.email").blur();
-    await until("the email for all repositories", async () => read("--global", "user.email") === "ada@all.example", 4000);
-    expect(read("--local", "user.email") === "ada@example.com", "the repository's own email was changed");
-    // For this repository only.
-    await p.locator('.settings-page [aria-label="Git settings scope"]').selectOption("local");
-    await field("user.name").fill("Ada at work"); await field("user.name").blur();
-    await until("the name for this repository", async () => read("--local", "user.name") === "Ada at work", 4000);
-    await field("gpg.format").selectOption("ssh");
-    await until("the format", async () => read("--local", "gpg.format") === "ssh", 4000);
-    await until("the hint to speak of a public key", async () => (await field("user.signingkey").getAttribute("placeholder")) === "~/.ssh/id_ed25519.pub", 3000);
-    await field("gpg.format").selectOption("openpgp");
-    await shot("git-settings");
-    // Emptying a field takes the setting away.
-    await field("user.name").fill(""); await field("user.name").blur();
-    await until("the setting to be gone", async () => read("--local", "user.name") === "", 4000);
-    await until("the field to show that", async () => (await field("user.name").inputValue()) === "", 4000);
-    await p.waitForTimeout(300);
-    await field("user.name").fill("Ada"); await field("user.name").blur();
-    await until("the name back", async () => read("--local", "user.name") === "Ada", 4000);
-    // The window cannot set what names a program.
-    const refused = await p.evaluate(async () => { try { await window.runesHost.gitConfigSet("gpg.program", "/tmp/evil", "local"); return "allowed"; } catch (e) { return e.message; } });
-    expect(/Bad request/.test(refused) && read("--local", "gpg.program") === "", "the page could name a program for git to run: " + refused);
-    await K("Control+w");
-  });
 
-  if (signing) await check("a signed commit: the key's passphrase is asked for in the window, and the commit is signed", async () => {
-    const config = (...args) => execFileSync("git", ["config", ...args], { cwd: project, env: { ...process.env, ...gitEnv } });
-    config("commit.gpgsign", "true"); config("user.signingkey", "ada@example.com"); config("gpg.format", "openpgp");
-    try {
-      fs.writeFileSync(path.join(project, "SIGNED.md"), "# Signed\n");
-      await K("Control+Shift+g");
-      await until("the new file", async () => (await p.locator(".change").allTextContents()).some((t) => t.includes("SIGNED.md")), 6000);
-      await p.locator('.mini[title="Stage SIGNED.md"]').click();
-      await until("it to be staged", async () => (await p.locator('.mini[title="Unstage SIGNED.md"]').count()) === 1, 5000);
-      const head = () => execFileSync("git", ["log", "-1", "--format=%G?|%s"], { cwd: project, env: { ...process.env, ...gitEnv } }).toString().trim();
-      // Giving up makes no commit, and says why.
-      await p.locator("#runes-commit").fill("A signed commit");
-      await p.locator(".commit-form .button").click();
-      await until("the passphrase to be asked for", async () => ((await p.locator(".prompt b").textContent().catch(() => "")) ?? "").startsWith("Passphrase for the signing key"), 10000);
-      expect((await p.locator("#runes-prompt").getAttribute("type")) === "password", "the passphrase is not hidden");
-      await shot("signing");
-      await p.locator(".prompt .button", { hasText: "Cancel" }).click();
-      await until("being told it was not signed", async () => ((await p.locator(".toast").textContent().catch(() => "")) ?? "").includes("could not be signed"), 8000);
-      expect(!head().includes("A signed commit"), "a commit was made without its signature");
-      // The passphrase signs it.
-      await p.locator(".commit-form .button").click();
-      await until("the question again", async () => (await p.locator("#runes-prompt").count()) === 1, 10000);
-      await p.locator("#runes-prompt").fill("open sesame"); await K("Enter");
-      await until("a commit with a good signature", async () => head() === "G|A signed commit", 12000);
-      const page = await p.evaluate(() => document.documentElement.innerHTML);
-      expect(!page.includes("open sesame"), "the passphrase is still in the page");
-    } finally {
-      config("--unset", "commit.gpgsign"); config("--unset", "user.signingkey");
-      try { execFileSync("gpgconf", ["--kill", "gpg-agent"], { stdio: "pipe", env: { ...process.env, GNUPGHOME: gnupg } }); } catch {}
-    }
-    await K("Control+Shift+e");
-  });
 
   await check("there is no AI in 1.0: no chat, no key, nothing sent anywhere", async () => {
     expect((await p.locator(".activity button").evaluateAll((all) => all.map((b) => b.title))).every((t) => !/chat|ai\b/i.test(t)), "a chat button is still in the activity bar");
@@ -2042,6 +2021,573 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     for (const name of ["evil.rux", "broken.rux"]) fs.rmSync(path.join(project, name));
   });
 
+  // --- 1.2: indentation, wide characters, folding, wrapping, brackets ---
+  const onDisk = (name) => fs.readFileSync(path.join(project, name), "utf8");
+  const save = async () => { await K("Control+s"); await until("the file saved", async () => !(await p.locator(".group.focused .tab.on").evaluate((t) => t.classList.contains("dirty")).catch(() => true)), 4000); };
+  const treeNode = (name) => p.locator(".tree.files .node", { has: p.locator(".name", { hasText: new RegExp("^" + name.replace(/\./g, "\\.") + "$") }) });
+  const explorer = async () => { if (!(await p.locator(".tree.files").count())) await K("Control+Shift+e"); await p.waitForSelector(".tree.files"); };
+
+  await check("indentation: Enter follows the language's rules, in the file's own steps", async () => {
+    fs.writeFileSync(path.join(project, "indent.py"), "def f():\n    return 1\n");
+    fs.writeFileSync(path.join(project, "tabs.js"), "function f() {\n\treturn 1;\n}\n");
+    fs.writeFileSync(path.join(project, "fresh.py"), "");
+    await open("indent.py");
+    await until("four spaces to be read from the file", async () => (await status()).includes("Spaces: 4"), 4000);
+    await K("Control+End");
+    await p.keyboard.type("def g(x):"); await K("Enter");
+    await p.keyboard.type("if x:"); await K("Enter");
+    await p.keyboard.type("y = [");
+    await K("Enter"); await p.keyboard.type("1,");
+    await save();
+    expect(onDisk("indent.py") === "def f():\n    return 1\ndef g(x):\n    if x:\n        y = [\n            1,\n        ]", "Python was indented as:\n" + onDisk("indent.py"));
+    // Shift+Tab takes a step back; Tab goes to the next step, however far along the line.
+    await K("Control+End"); await K("Enter"); await K("Shift+Tab"); await p.keyboard.type("ab"); await K("Tab"); await p.keyboard.type("c");
+    await save();
+    expect(onDisk("indent.py").endsWith("\n    ab  c"), "Tab and Shift+Tab: " + JSON.stringify(onDisk("indent.py").split("\n").at(-1)));
+    // A file indented with tabs goes on being indented with tabs.
+    await open("tabs.js");
+    await until("tabs to be read from the file", async () => (await status()).includes("Tabs: 4"), 4000);
+    await line(2).click({ position: { x: 4, y: 8 } });
+    await K("End"); await K("Enter"); await p.keyboard.type("if (x) {"); await K("Enter"); await p.keyboard.type("y();");
+    await save();
+    expect(onDisk("tabs.js") === "function f() {\n\treturn 1;\n\tif (x) {\n\t\ty();\n\t}\n}\n", "tabs: " + JSON.stringify(onDisk("tabs.js")));
+    // An empty file goes by the settings; the status bar says how, and changes it for the file.
+    await open("fresh.py");
+    expect((await status()).includes("Spaces: 4"), "an empty Python file should use four spaces: " + (await status()));
+    await p.locator(".status .indent").click();
+    await typing();
+    await p.keyboard.type("2 spaces"); await K("Enter");
+    await until("two spaces", async () => (await status()).includes("Spaces: 2"), 3000);
+    await p.keyboard.type("if a:"); await K("Enter"); await p.keyboard.type("b");
+    await save();
+    expect(onDisk("fresh.py") === "if a:\n  b", "picked indentation: " + JSON.stringify(onDisk("fresh.py")));
+    // The settings page has the tab size, and a tab is drawn that wide.
+    await K("Control+,");
+    await p.locator('.settings-page input[aria-label="editor.tabSize"]').fill("8");
+    await p.locator('.settings-page input[aria-label="editor.tabSize"]').blur();
+    await until("the tab size saved", async () => saved()["editor.tabSize"] === 8, 4000);
+    await open("tabs.js");
+    await until("tabs eight wide", async () => (await status()).includes("Tabs: 8") && (await css("--tab")) === "8", 3000);
+    await K("Control+,");
+    await p.locator('.settings-page input[aria-label="editor.tabSize"]').fill("4");
+    await p.locator('.settings-page input[aria-label="editor.tabSize"]').blur();
+    await until("the tab size back", async () => saved()["editor.tabSize"] === 4, 4000);
+    for (const name of ["indent.py", "tabs.js", "fresh.py"]) fs.rmSync(path.join(project, name));
+  });
+
+  await check("wide characters and emoji: the caret stands where the text is, and steps over whole characters", async () => {
+    fs.writeFileSync(path.join(project, "wide.txt"), "plain\n日本語 text 😀 end\n\ta\tb\n👨‍👩‍👧 family\n");
+    await open("wide.txt");
+    const caretAt = async () => (await p.locator(".group.focused .caret").first().boundingBox()).x;
+    const textEnd = (n) => line(n).evaluate((el) => { const r = document.createRange(); r.selectNodeContents(el); return r.getBoundingClientRect().right; });
+    for (const n of [2, 3, 4]) {
+      await line(n).click({ position: { x: 2, y: 8 } });
+      await K("End");
+      await p.waitForTimeout(250);
+      const [caret, end] = [await caretAt(), await textEnd(n)];
+      expect(Math.abs(caret - end) <= 2.5, `line ${n}: the caret is at ${caret.toFixed(1)}, the text ends at ${end.toFixed(1)}`);
+    }
+    // One press of the arrow passes the whole family, and Backspace takes it whole.
+    await line(4).click({ position: { x: 2, y: 8 } });
+    await K("Home"); await K("ArrowRight");
+    expect((await status()).includes("Col 3"), "after one character two cells wide the column should be 3: " + (await status()));
+    await K("Backspace");
+    await save();
+    expect(onDisk("wide.txt").split("\n")[3] === " family", "Backspace left part of the character: " + JSON.stringify(onDisk("wide.txt").split("\n")[3]));
+    // A click in the middle of the wide text lands between characters, where it was aimed.
+    const box = await line(2).boundingBox();
+    const w = (await textEnd(1) - (await line(1).boundingBox()).x) / 5;
+    await p.mouse.click(box.x + w * 4.1, box.y + 8);
+    await p.keyboard.type("|");
+    await save();
+    expect(onDisk("wide.txt").split("\n")[1].startsWith("日本|語"), "a click two characters in landed at: " + onDisk("wide.txt").split("\n")[1]);
+    await shot("wide-characters");
+    fs.rmSync(path.join(project, "wide.txt"));
+  });
+
+  await check("folding: a block folds away under its first line, the cursor steps over it, and edits keep it", async () => {
+    fs.writeFileSync(path.join(project, "fold.py"), "import os\n\ndef a():\n    x = 1\n    if x:\n        y = 2\n\ndef b():\n    pass\n\nlast = 1\n");
+    await open("fold.py");
+    await p.locator(".group.focused .fold").first().waitFor();
+    expect((await p.locator(".group.focused .fold").count()) === 3, "three blocks can be folded, found " + (await p.locator(".group.focused .fold").count()));
+    await p.locator(".group.focused .row", { has: p.locator(".ln", { hasText: /^3$/ }) }).locator(".fold").dispatchEvent("mousedown");
+    await until("the block to fold", async () => (await p.locator(".group.focused .ln").allTextContents()).join() === "1,2,3,7,8,9,10,11,12", 3000);
+    expect((await line(3).textContent()).includes("⋯"), "the folded line has no mark");
+    // Down from the folded line goes past what is hidden; typing above moves the fold with its block.
+    await line(3).click({ position: { x: 30, y: 8 } });
+    await K("ArrowDown");
+    expect((await status()).includes("Ln 7"), "the cursor went into the fold: " + (await status()));
+    await K("Control+Home"); await K("Enter");
+    await until("the fold to move down a line", async () => (await p.locator(".group.focused .ln").allTextContents()).join() === "1,2,3,4,8,9,10,11,12,13", 3000);
+    // Going to a line inside the fold opens it.
+    await K("Control+g"); await typing(); await p.keyboard.type("6"); await K("Enter");
+    await until("the fold to open", async () => (await p.locator(".group.focused .ln").count()) === 13, 3000);
+    // By key, and all at once.
+    await K("Control+Shift+[");
+    await until("the innermost block to fold", async () => (await p.locator(".group.focused .ln").allTextContents()).join() === "1,2,3,4,5,6,8,9,10,11,12,13", 3000);
+    await K("Control+Shift+]");
+    await until("it to unfold", async () => (await p.locator(".group.focused .ln").count()) === 13, 3000);
+    await commands(); await p.keyboard.type("Fold All"); await p.waitForTimeout(150);
+    await p.locator(".result", { has: p.locator("span:first-child", { hasText: /^Fold All$/ }) }).click();
+    await until("every block folded", async () => (await p.locator(".group.focused .ln").allTextContents()).join() === "1,2,3,4,8,9,11,12,13", 3000);
+    await shot("folding");
+    await commands(); await p.keyboard.type("Unfold All"); await p.waitForTimeout(150);
+    await p.locator(".result", { has: p.locator("span:first-child", { hasText: /^Unfold All$/ }) }).click();
+    await until("every block open", async () => (await p.locator(".group.focused .ln").count()) === 13, 3000);
+    // Indent guides run down through the blocks.
+    expect((await p.locator(".group.focused .row .guide").count()) >= 5, "there are no indent guides");
+    await K("Control+z");
+    fs.rmSync(path.join(project, "fold.py"));
+  });
+
+  await check("word wrap: long lines take several rows, and the cursor walks them", async () => {
+    const long = "word ".repeat(120).trim();
+    fs.writeFileSync(path.join(project, "wrap.txt"), "first\n" + long + "\nlast\n");
+    await open("wrap.txt");
+    expect((await p.locator(".group.focused .row").count()) === 4, "before wrapping, a row for each line");
+    await K("Alt+z");
+    await until("the long line to wrap", async () => (await p.locator(".group.focused .row").count()) > 5, 4000);
+    expect((await p.locator(".group.focused .ln").count()) === 4, "a wrapped line keeps one number");
+    expect(saved()["editor.wordWrap"] === "on", "the setting was not written: " + JSON.stringify(saved()["editor.wordWrap"]));
+    const scroller = p.locator(".group.focused .scroller");
+    expect(await scroller.evaluate((el) => el.scrollWidth <= el.clientWidth + 1), "the editor still scrolls sideways");
+    // Down stays in the long line, a row at a time; End, then Down again, reaches the last line.
+    await line(1).click({ position: { x: 20, y: 8 } });
+    await K("ArrowDown"); await K("ArrowDown");
+    expect((await status()).includes("Ln 2"), "two rows down should still be line 2: " + (await status()));
+    const rows = (await p.locator(".group.focused .row").count()) - 3;
+    for (let i = 0; i < rows - 1; i++) await K("ArrowDown");
+    expect((await status()).includes("Ln 3"), "past the last row of the long line is line 3: " + (await status()));
+    // A click on a later row lands in the text of that row.
+    const second = p.locator(".group.focused .row.wrapped .code").first();
+    const box = await second.boundingBox();
+    await p.mouse.click(box.x + 3, box.y + 8);
+    await p.keyboard.type("#");
+    await save();
+    const at = onDisk("wrap.txt").split("\n")[1].indexOf("#");
+    expect(at > 40 && onDisk("wrap.txt").split("\n")[1][at - 1] === " ", "the click on the second row typed at " + at);
+    // The selection across the wrap is drawn on each row.
+    await line(2).click({ position: { x: 4, y: 8 } });
+    await K("Home"); await K("Shift+End");
+    await until("a band on every row of the line", async () => (await p.locator(".group.focused .sel").count()) === rows, 3000);
+    await shot("word-wrap");
+    await K("Alt+z");
+    await until("one row to a line again", async () => (await p.locator(".group.focused .row").count()) === 4, 4000);
+    fs.rmSync(path.join(project, "wrap.txt"));
+  });
+
+  await check("brackets: the pair of the one at the cursor is marked, and Ctrl+Shift+\\ goes to it", async () => {
+    fs.writeFileSync(path.join(project, "pairs.js"), "function f(a, [b, c]) {\n  return { a: (b) };\n}\n");
+    await open("pairs.js");
+    await line(1).click({ position: { x: 2, y: 8 } });
+    await K("End");
+    await until("both brackets marked", async () => (await p.locator(".group.focused .bracket").count()) === 2, 3000);
+    const tops = await p.locator(".group.focused .bracket").evaluateAll((all) => all.map((b) => Math.round(b.getBoundingClientRect().top)));
+    expect(tops[1] - tops[0] > 30, "the pair of the brace on line 1 is on line 3: " + tops.join());
+    await K("Control+Shift+\\");
+    await until("the cursor at the closing brace", async () => (await status()).includes("Ln 3, Col 1"), 3000);
+    await K("Control+Shift+\\");
+    await until("and back at the opening one", async () => (await status()).includes("Ln 1"), 3000);
+    await K("Home");
+    await until("no bracket marked with the cursor on none", async () => (await p.locator(".group.focused .bracket").count()) === 0, 3000);
+    fs.rmSync(path.join(project, "pairs.js"));
+  });
+
+  // --- 1.2: the explorer ---
+  await check("explorer: several files are chosen, copied, cut, pasted, dragged and deleted together", async () => {
+    for (const dir of ["pk", "dest", "dest2"]) fs.mkdirSync(path.join(project, dir), { recursive: true });
+    for (const name of ["a.txt", "b.txt", "c.txt", "d.txt"]) fs.writeFileSync(path.join(project, "pk", name), name + "\n");
+    fs.mkdirSync(path.join(project, "pk", "inner")); fs.writeFileSync(path.join(project, "pk", "inner", "deep.txt"), "deep\n");
+    await explorer();
+    await p.locator('.side .mini[title="Refresh the explorer"]').click();
+    await unfold("pk");
+    await treeNode("a.txt").waitFor();
+    // Ctrl adds one; Shift takes the run between.
+    await treeNode("a.txt").click({ modifiers: ["Control"] });
+    await treeNode("c.txt").click({ modifiers: ["Control"] });
+    const chosen = async () => (await p.locator(".tree.files .node.picked .name").allTextContents()).join();
+    await until("the two chosen with Ctrl", async () => (await chosen()) === "a.txt,c.txt", 3000);
+    expect((await p.locator(".group.focused .tab.on").textContent()).includes("a.txt") === false, "choosing with Ctrl opened the file");
+    await treeNode("a.txt").click({ modifiers: ["Control"] }); await treeNode("c.txt").click({ modifiers: ["Control"] });
+    await until("none chosen", async () => (await chosen()) === "", 3000);
+    await treeNode("a.txt").click({ modifiers: ["Control"] });
+    await treeNode("c.txt").click({ modifiers: ["Shift"] });
+    await until("the run chosen with Shift", async () => (await chosen()) === "a.txt,b.txt,c.txt", 3000);
+    // Copy the three, paste them into another folder.
+    await K("Control+c");
+    await treeNode("dest").click();
+    await K("Control+v");
+    await until("the copies", async () => ["a.txt", "b.txt", "c.txt"].every((n) => fs.existsSync(path.join(project, "dest", n))), 5000);
+    expect(fs.existsSync(path.join(project, "pk", "a.txt")), "copying took the original away");
+    // Pasting where the name is taken keeps both.
+    await K("Control+v");
+    await until("a second copy beside the first", async () => fs.existsSync(path.join(project, "dest", "a copy.txt")), 5000);
+    // Cut and paste moves, a folder with what is in it.
+    await treeNode("inner").click({ modifiers: ["Control"] });
+    await K("Control+x");
+    await until("what is cut to be shown as cut", async () => (await treeNode("inner").evaluate((n) => n.classList.contains("cut"))), 3000);
+    await treeNode("dest2").click({ modifiers: ["Control"] });
+    await K("Control+v");
+    await until("the folder moved", async () => fs.existsSync(path.join(project, "dest2", "inner", "deep.txt")) && !fs.existsSync(path.join(project, "pk", "inner")), 5000);
+    // Dragging a file onto a folder moves it; an open file's tab follows it.
+    await treeNode("d.txt").click();
+    await until("d.txt open", async () => (await p.locator(".group.focused .tab.on").textContent()).includes("d.txt"), 3000);
+    await treeNode("d.txt").dragTo(treeNode("dest2"));
+    await until("d.txt moved by dragging", async () => fs.existsSync(path.join(project, "dest2", "d.txt")) && !fs.existsSync(path.join(project, "pk", "d.txt")), 5000);
+    await p.locator(".group.focused .content").click({ position: { x: 300, y: 200 } });
+    await K("Control+Home");
+    await p.keyboard.type("moved ");
+    await save();
+    expect(fs.readFileSync(path.join(project, "dest2", "d.txt"), "utf8").startsWith("moved "), "the open tab did not follow the file: " + (await p.locator(".group.focused .tab.on").textContent()));
+    // A folder cannot be dropped into itself.
+    await p.evaluate(() => {
+      const at = (name) => [...document.querySelectorAll(".tree.files .node")].find((n) => n.querySelector(".name")?.textContent === name);
+      const data = new DataTransfer();
+      const fire = (el, kind) => el.dispatchEvent(new DragEvent(kind, { bubbles: true, cancelable: true, dataTransfer: data }));
+      fire(at("dest2"), "dragstart"); fire(at("inner"), "dragover"); fire(at("inner"), "drop"); fire(at("dest2"), "dragend");
+    });
+    await p.waitForTimeout(500);
+    expect(fs.existsSync(path.join(project, "dest2", "inner", "deep.txt")) && !fs.existsSync(path.join(project, "dest2", "inner", "dest2")), "a folder went into itself");
+    // Files copied in the system's file manager are pasted in.
+    const outside = path.join(work, "from-outside.txt");
+    fs.writeFileSync(outside, "from outside\n");
+    await app.evaluate(({ clipboard, ClipboardItem }, file) => clipboard.write([new ClipboardItem({ "text/uri-list": "file://" + file + "\r\n" })]), outside);
+    await treeNode("dest").click();
+    await K("Control+v");   // what was cut has been pasted, so Runes' own clipboard is empty
+    await until("the outside file brought in", async () => fs.existsSync(path.join(project, "dest", "from-outside.txt")), 5000);
+    expect(fs.existsSync(outside), "bringing a file in took it from where it was");
+    // Several are deleted with one question.
+    await unfold("dest");
+    await treeNode("b.txt").first().waitFor();
+    const inDest = p.locator('.tree.files .node[data-path$="/dest/b.txt"], .tree.files .node[data-path$="/dest/c.txt"]');
+    await K("Escape");   // nothing chosen
+    await until("nothing chosen", async () => (await chosen()) === "", 3000).catch(() => {});
+    await inDest.first().click({ modifiers: ["Control"] }); await inDest.nth(1).click({ modifiers: ["Control"] });
+    await until("the two to delete chosen", async () => (await chosen()) === "b.txt,c.txt", 3000);
+    await K("Delete");
+    await p.waitForSelector(".prompt");
+    expect((await p.locator(".prompt b").textContent()).includes("2 items"), "one question for both: " + (await p.locator(".prompt b").textContent()));
+    await p.locator("#runes-prompt").click();
+    await until("both gone", async () => !fs.existsSync(path.join(project, "dest", "b.txt")) && !fs.existsSync(path.join(project, "dest", "c.txt")), 5000);
+    expect(fs.existsSync(path.join(project, "dest", "a.txt")), "a file that was not chosen was deleted");
+    await shot("explorer-several");
+    // The shell holds the line: nothing outside the folder is copied from, moved, or written to.
+    const refused = await p.evaluate(async ([root, outside]) => {
+      const tries = [
+        () => window.runesHost.filePlace(["/etc/hostname"], root + "/dest", false),
+        () => window.runesHost.filePlace([root + "/pk/a.txt"], "/tmp", true),
+        () => window.runesHost.filePlace([root + "/pk"], root + "/pk/x", true),
+        () => window.runesHost.fileImport([outside], "/tmp"),
+        () => window.runesHost.fileImport(["relative.txt"], root + "/dest"),
+        () => window.runesHost.filesRemove(["/etc/hostname"]),
+        () => window.runesHost.filesRemove([root]),
+      ];
+      const out = [];
+      for (const t of tries) out.push(await t().then(() => "done", (e) => "refused"));
+      return out;
+    }, [project, outside]);
+    expect(refused.every((r) => r === "refused"), "the shell did something outside the folder: " + refused.join());
+    for (const dir of ["pk", "dest", "dest2"]) fs.rmSync(path.join(project, dir), { recursive: true, force: true });
+    await p.locator('.side .mini[title="Refresh the explorer"]').click();
+  });
+
+  // --- 1.2: extensions ---
+  await check("running extensions: each one's state and everything it has said, on a page of its own", async () => {
+    await open("shop.bea");
+    await commands(); await p.keyboard.type("Show Running Extensions"); await p.waitForTimeout(150); await K("Enter");
+    await p.waitForSelector(".running-page");
+    await until("the Bea toolkit to be listed as started", async () => (await p.locator(".running-item").allInnerTexts()).some((t) => t.includes("Bea") && /started in \d+ ms/.test(t)), 15000);
+    await p.locator(".running-item", { hasText: "Extension host" }).click();
+    await until("the host to say what it activated", async () => (await p.locator(".running-log").innerText()).includes("activated"), 8000);
+    await shot("running-extensions");
+    // Starting the host afresh: the language server comes back, and so do its findings.
+    await p.locator(".running-head .button", { hasText: "Restart" }).click();
+    await until("the toolkit started again", async () => (await p.locator(".running-item").allInnerTexts()).some((t) => t.includes("Bea") && /started in \d+ ms/.test(t)), 20000);
+    expect((await p.locator(".side header .button", { hasText: "Running" }).count()) <= 1, "the Extensions view has no way here");
+  });
+
+  await check("an extension that fails to start says why, in the list of running extensions", async () => {
+    const zip = require("fflate");
+    const manifest = { name: "broken", displayName: "Broken On Purpose", publisher: "runes-test", version: "0.0.1", engines: { vscode: "*" }, main: "./main.js", activationEvents: ["*"] };
+    const source = 'const vscode = require("vscode");\nexports.activate = () => {\n  const out = vscode.window.createOutputChannel("Broken");\n  out.appendLine("about to fail");\n  console.log("printed to the console");\n  throw vscode.FileSystemError.FileNotFound("no such thing");\n};\n';
+    const vsix = zip.zipSync({ "extension/package.json": zip.strToU8(JSON.stringify(manifest)), "extension/main.js": zip.strToU8(source) });
+    const file = path.join(work, "broken.vsix");
+    fs.writeFileSync(file, vsix);
+    await app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 0 }); });
+    await K("Control+Shift+x");
+    const [chooser] = await Promise.all([p.waitForEvent("filechooser"), p.locator(".side header .button", { hasText: "Install" }).click()]);
+    await chooser.setFiles(file);
+    await until("the toast that says where to look", async () => ((await p.locator(".toast").textContent().catch(() => "")) ?? "").includes("failed to start"), 10000);
+    await commands(); await p.keyboard.type("Show Running Extensions"); await p.waitForTimeout(150); await K("Enter");
+    const broken = p.locator(".running-item", { hasText: "Broken On Purpose" });
+    await until("it to be listed as failed", async () => (await broken.innerText().catch(() => "")).includes("failed to start"), 8000);
+    await broken.click();
+    await until("the reason", async () => (await p.locator(".running-error").innerText().catch(() => "")).includes("no such thing"), 4000);
+    const said = await p.locator(".running-log").innerText();
+    expect(said.includes("about to fail") && said.includes("printed to the console"), "its output channel and console are not shown: " + said.slice(0, 300));
+    expect((await p.locator(".running-error").innerText()).includes("FileNotFound"), "the error does not name what it was");
+    await shot("extension-failed");
+  });
+
+  await check("extensions are switched off and on: off, nothing of theirs is used or run", async () => {
+    await K("Control+Shift+x");
+    await p.locator(".ext-tab", { hasText: "Installed" }).click();
+    await p.locator(".ext", { hasText: "Broken On Purpose" }).click();
+    await p.locator('.ext-actions .button[aria-label="Disable Broken On Purpose"]').click();
+    await until("it to be listed as disabled", async () => (await p.locator(".ext-list.off .ext b").allTextContents()).includes("Broken On Purpose"), 5000);
+    await until("the list kept by the shell", async () => { try { return JSON.parse(fs.readFileSync(path.join(profile, "extensions-disabled.json"), "utf8")).includes("runes-test.broken"); } catch { return false; } }, 5000);
+    await commands(); await p.keyboard.type("Show Running Extensions"); await p.waitForTimeout(150); await K("Enter");
+    await until("it to be gone from what runs", async () => !(await p.locator(".running-item").allInnerTexts()).some((t) => t.includes("Broken On Purpose")) && (await p.locator(".running-item").count()) > 0, 8000);
+    // A language extension switched off: its language is not known, and its server does not run.
+    await K("Control+Shift+x");
+    await p.locator(".ext", { hasText: "Bea Programming Toolkit" }).first().click();
+    await p.locator('.ext-actions .button[aria-label^="Disable"]').click();
+    const runs = async () => { await commands(); await p.keyboard.type("Show Running Extensions"); await p.waitForTimeout(150); await K("Enter"); await p.waitForSelector(".running-page"); return p.locator(".running-item"); };
+    await until("its language server to be gone from what runs", async () => !(await (await runs()).allInnerTexts()).some((t) => t.includes("Bea")), 10000);
+    await commands(); await p.keyboard.type("Bea:"); await p.waitForTimeout(150);
+    expect(!(await p.locator(".result small").allTextContents()).some((t) => t.includes("Bea Programming Toolkit")), "a disabled extension's commands are still offered");
+    await K("Escape");
+    await K("Control+Shift+x");
+    await p.locator(".ext-list.off .ext", { hasText: "Bea Programming Toolkit" }).click();
+    await p.locator('.ext-actions .button[aria-label^="Enable"]').click();
+    await open("shop.bea");
+    await until("its language server to run again", async () => (await (await runs()).allInnerTexts()).some((t) => t.includes("Bea") && /started in \d+ ms/.test(t)), 30000);
+    // Uninstalling a disabled extension forgets it.
+    await K("Control+Shift+x");
+    await p.locator(".ext-list.off .ext", { hasText: "Broken On Purpose" }).click();
+    await p.locator('.ext-actions .button[aria-label="Uninstall Broken On Purpose"]').click();
+    await until("it to be gone", async () => !(await p.locator(".ext b").allTextContents()).includes("Broken On Purpose"), 5000);
+    const badId = await p.evaluate(() => window.runesHost.extensionEnable("../../etc/passwd", false).then(() => "done", () => "refused"));
+    expect(badId === "refused", "an id that is not one was taken");
+    await K("Control+Shift+e");
+  });
+
+  // --- 1.2: git is for seeing and staging; merge conflicts are settled in the editor ---
+  await check("merge conflicts: listed in Source Control, settled in the editor, staged as resolved", async () => {
+    const git = (...args) => execFileSync("git", args, { cwd: project, stdio: ["ignore", "pipe", "pipe"] }).toString();
+    git("stash", "-u", "-q");   // whatever the checks before this one left lying about
+    const base = git("rev-parse", "HEAD").trim(), was = git("branch", "--show-current").trim();
+    const between = "a\nb\nc\nd\ne\nf\ng\nh\n";
+    fs.writeFileSync(path.join(project, "clash.txt"), "top\nmiddle\n" + between + "last\n"); git("add", "clash.txt"); git("commit", "-qm", "clash: base");
+    git("checkout", "-qb", "clash-side");
+    fs.writeFileSync(path.join(project, "clash.txt"), "top\ntheirs one\n" + between + "theirs two\n"); git("commit", "-qam", "clash: theirs");
+    git("checkout", "-q", was);
+    fs.writeFileSync(path.join(project, "clash.txt"), "top\nours one\n" + between + "ours two\n"); git("commit", "-qam", "clash: ours");
+    try { git("merge", "clash-side"); } catch {}
+    expect(onDisk("clash.txt").includes("<<<<<<<"), "git did not leave a conflict to settle");
+    await K("Control+Shift+g");
+    await p.locator('.side .mini[title="Refresh"]').click();
+    await until("the conflicted file under its own heading", async () => (await p.locator(".conflicted .change").allTextContents()).some((t) => t.includes("clash.txt")), 6000);
+    await p.locator(".conflicted .change-name").click();
+    await until("the ways to settle each conflict", async () => (await p.locator(".group.focused .conflict-bar").count()) === 2, 5000);
+    expect((await status()).includes("2 conflicts"), "the status bar does not count them: " + (await status()));
+    expect((await p.locator(".group.focused .row.c-ours").count()) === 2 && (await p.locator(".group.focused .row.c-theirs").count()) === 2, "the two sides are not told apart: " + (await p.locator(".group.focused .row.c-ours").count()) + " ours, " + (await p.locator(".group.focused .row.c-theirs").count()) + " theirs");
+    await shot("merge-conflict");
+    // The first: what is being merged in. The second: both.
+    await p.locator(".group.focused .conflict-bar").first().locator(".conflict-take.theirs").dispatchEvent("mousedown");
+    await until("one conflict left", async () => (await status()).includes("1 conflict") && !(await status()).includes("conflicts"), 4000);
+    await p.locator(".status .conflicts").click();
+    await p.locator(".group.focused .conflict-bar").first().locator(".conflict-take.both").dispatchEvent("mousedown");
+    await until("none left", async () => !(await status()).includes("conflict"), 4000);
+    expect(((await p.locator(".toast").textContent().catch(() => "")) ?? "").includes("No conflicts are left"), "nothing says what to do next");
+    await save();
+    expect(onDisk("clash.txt") === "top\ntheirs one\n" + between + "ours two\ntheirs two\n", "settled as: " + JSON.stringify(onDisk("clash.txt")));
+    // It can be undone like any edit.
+    await K("Control+z");
+    await until("the second conflict back", async () => (await p.locator(".group.focused .conflict-bar").count()) === 1, 3000);
+    await K("Control+Shift+z");
+    await save();
+    // Staging it tells git it is resolved; the merge is finished in the terminal.
+    await p.locator('.conflicted .mini[title^="Stage clash.txt"]').click();
+    await until("git to have it resolved", async () => git("diff", "--name-only", "--diff-filter=U").trim() === "", 6000);
+    await until("it to leave the conflicts", async () => (await p.locator(".conflicted").count()) === 0, 6000);
+    git("commit", "-q", "--no-edit");
+    git("reset", "-q", "--hard", base); git("branch", "-q", "-D", "clash-side");
+    try { git("stash", "pop", "-q"); } catch {}
+    await p.locator('.side .mini[title="Refresh"]').click();
+    await K("Control+Shift+e");
+  });
+
+  // --- 1.2: the terminal's clipboard, reloading, bending lines ---
+  await check("terminal: Ctrl+Shift+C copies what is selected, and Ctrl+Shift+V pastes", async () => {
+    await K("Control+`");
+    await p.waitForSelector("runes-terminal.shown .xterm-screen");
+    const term = p.locator("runes-terminal.shown .xterm-rows");
+    await p.waitForTimeout(900);
+    await p.locator("runes-terminal.shown .xterm-helper-textarea").focus();
+    await app.evaluate(({ clipboard }) => clipboard.writeText("echo pasted-$((20+3))"));
+    await K("Control+Shift+v");
+    await until("the pasted text on the line", async () => ((await term.textContent()) ?? "").includes("echo pasted-"), 5000);
+    await K("Enter");
+    await until("what was pasted to have run", async () => ((await term.textContent()) ?? "").includes("pasted-23"), 8000)
+      .catch(async (e) => { throw new Error(e.message + ": the terminal shows " + JSON.stringify(((await term.textContent()) ?? "").trim().slice(-200)) + ", the keyboard is in " + (await p.evaluate(() => document.activeElement?.className))); });
+    await app.evaluate(({ clipboard }) => clipboard.writeText("echo with-ctrl-v"));
+    await K("Control+v");
+    await until("the text pasted with Ctrl+V on the line", async () => ((await term.textContent()) ?? "").includes("echo with-ctrl-v"), 5000);
+    await K("Enter");
+    await until("Ctrl+V to paste as well", async () => (((await term.textContent()) ?? "").match(/with-ctrl-v/g) ?? []).length >= 2, 8000);
+    // Select a word by double click, copy it.
+    await p.keyboard.type("echo copy-me-please"); await K("Enter");
+    await until("the line to be printed", async () => (((await term.textContent()) ?? "").match(/copy-me-please/g) ?? []).length >= 2, 8000);
+    const spot = await term.evaluate((el) => {
+      const rows = [...el.querySelectorAll(":scope > div")];
+      const row = rows.filter((r) => r.textContent.trim() === "copy-me-please").pop();
+      const box = row.getBoundingClientRect();
+      return { x: box.left + 30, y: box.top + box.height / 2 };
+    });
+    await app.evaluate(({ clipboard }) => clipboard.writeText(""));
+    await p.mouse.dblclick(spot.x, spot.y);
+    await K("Control+Shift+c");
+    await until("the selection on the clipboard", async () => (await app.evaluate(({ clipboard }) => clipboard.readText())).includes("copy-me-please"), 4000);
+    // With something selected Ctrl+C copies too, and does not stop what is running.
+    await app.evaluate(({ clipboard }) => clipboard.writeText(""));
+    await p.mouse.dblclick(spot.x, spot.y);
+    await K("Control+c");
+    await until("Ctrl+C to copy a selection", async () => (await app.evaluate(({ clipboard }) => clipboard.readText())).includes("copy-me-please"), 4000);
+    await K("Control+`");
+  });
+
+  await check("canvas: a line bends where its middle is pulled, again between two points, and a bend is taken out", async () => {
+    const bent = path.join(project, "bent.rux");
+    fs.writeFileSync(bent, JSON.stringify({ rune: "canvas", version: 1, elements: [{ id: "ln", type: "arrow", x: 0, y: 0, w: 300, h: 0, sketch: false }] }));
+    await open("bent.rux");
+    await p.waitForSelector(".group.focused runes-canvas .rc-el");
+    const read = () => JSON.parse(fs.readFileSync(bent, "utf8")).elements[0];
+    const store = async () => { await K("Control+s"); await until("the drawing saved", async () => !(await p.locator(".group.focused .tab.on").evaluate((t) => t.classList.contains("dirty")).catch(() => true)), 4000); };
+    const centre = async (locator) => { const b = await locator.boundingBox(); return { x: b.x + b.width / 2, y: b.y + b.height / 2 }; };
+    const pull = async (locator, dx, dy) => { const c = await centre(locator); await p.mouse.move(c.x, c.y); await p.mouse.down(); await p.mouse.move(c.x + dx / 2, c.y + dy / 2, { steps: 4 }); await p.mouse.move(c.x + dx, c.y + dy, { steps: 4 }); await p.mouse.up(); await settle(); };
+    // Select the arrow: one faint handle in its middle.
+    const line = await centre(p.locator(".group.focused runes-canvas .rc-el"));
+    await p.mouse.click(line.x - 40, line.y);
+    await until("the middle handle", async () => (await p.locator(".group.focused .rc-handle.mid").count()) === 1, 3000);
+    await pull(p.locator(".group.focused .rc-handle.mid"), 0, 90);
+    await until("a bend, and a middle each side of it", async () => (await p.locator(".group.focused .rc-handle.bend").count()) === 1 && (await p.locator(".group.focused .rc-handle.mid").count()) === 2, 3000);
+    await store();
+    expect(read().bends?.length === 1 && read().bends[0][1] > 30, "the bend in the file: " + JSON.stringify(read()));
+    expect((await p.locator(".group.focused runes-canvas .rc-el path").first().getAttribute("d")).includes("C"), "the line is not drawn as a curve");
+    // Between the bend and the end, another.
+    await pull(p.locator(".group.focused .rc-handle.mid").last(), 0, -120);
+    await until("two bends", async () => (await p.locator(".group.focused .rc-handle.bend").count()) === 2 && (await p.locator(".group.focused .rc-handle.mid").count()) === 3, 3000);
+    await store();
+    const two = read().bends;
+    expect(two.length === 2 && two[0][0] < two[1][0] && two[1][1] < two[0][1], "the second bend comes after the first: " + JSON.stringify(two));
+    await shot("canvas-bends");
+    // A bend is moved; undone; taken out with a double click; and one pulled straight is no bend.
+    await pull(p.locator(".group.focused .rc-handle.bend").first(), -30, 20);
+    await store();
+    expect(read().bends[0][0] < two[0][0], "the bend did not move");
+    await K("Control+z");
+    await store();
+    expect(JSON.stringify(read().bends) === JSON.stringify(two), "undo did not put the bend back");
+    const second = await centre(p.locator(".group.focused .rc-handle.bend").last());
+    await p.mouse.dblclick(second.x, second.y);
+    await until("one bend left", async () => (await p.locator(".group.focused .rc-handle.bend").count()) === 1, 3000);
+    const left = await centre(p.locator(".group.focused .rc-handle.bend"));
+    await p.mouse.move(left.x, left.y); await p.mouse.down(); await p.mouse.move(left.x, line.y + 20, { steps: 4 }); await p.mouse.move(left.x, line.y, { steps: 4 }); await p.mouse.up(); await settle();
+    await until("the bend to go when the line is straight again", async () => (await p.locator(".group.focused .rc-handle.bend").count()) === 0, 3000);
+    await store();
+    expect(!("bends" in read()), "a straight line still has bends in the file: " + JSON.stringify(read()));
+    fs.rmSync(bent);
+  });
+
+  // The Python extension is 7 MB and not kept in this repository. Download it from Open VSX
+  // (open-vsx.org/extension/ms-python/python) and name the file in RUNES_PYTHON_VSIX to run this.
+  const pythonVsix = process.env.RUNES_PYTHON_VSIX;
+  if (pythonVsix && fs.existsSync(pythonVsix)) await check("the Python extension: it starts, and its language server completes, explains and finds definitions", async () => {
+    fs.writeFileSync(path.join(project, "tool.py"), 'import os\n\n\ndef greet(name: str) -> str:\n    """Say hello to someone."""\n    return "hello " + name\n\n\nprint(greet("x"))\n');
+    await app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 0 }); });
+    await K("Control+Shift+x");
+    const [chooser] = await Promise.all([p.waitForEvent("filechooser"), p.locator(".side header .button", { hasText: "Install" }).click()]);
+    await chooser.setFiles(pythonVsix);
+    await until("the install", async () => (await p.locator(".ext b").allTextContents()).includes("Python"), 30000);
+    if (process.env.RUNES_STEPS) console.log("  .. step 1");
+    await open("tool.py");
+    await commands(); await p.keyboard.type("Show Running Extensions"); await p.waitForTimeout(150); await K("Enter");
+    const python = p.locator(".running-item", { hasText: "ms-python.python" });
+    await until("the Python extension to have started", async () => /started in \d+ ms/.test(await python.innerText().catch(() => "")), 120000);
+    if (process.env.RUNES_STEPS) console.log("  .. step 2");
+    await python.click();
+    await until("its language server to be starting", async () => (await p.locator(".running-log").innerText()).includes("Jedi"), 120000);
+    if (process.env.RUNES_STEPS) console.log("  .. step 3");
+    expect(!(await p.locator(".running-error").count()), "it reports an error: " + (await p.locator(".running-error").innerText().catch(() => "")));
+    await shot("python-running");
+    await open("tool.py");
+    await K("Control+End");
+    await p.keyboard.type("os.pa");
+    await until("completion from Jedi", async () => (await p.locator(".suggest .option b").allTextContents()).includes("path"), 120000, async () => { await K("Escape"); await K("Backspace"); await p.keyboard.type("a"); });
+    if (process.env.RUNES_STEPS) console.log("  .. step 4");
+    await shot("python-completion");
+    await K("Escape");
+    for (let i = 0; i < 5; i++) await K("Backspace");
+    const call = await line(9).boundingBox();
+    await p.mouse.move(call.x + 60, call.y + 8);
+    await until("a hover from Jedi", async () => (await p.locator(".hover").innerText().catch(() => "")).includes("Say hello to someone"), 90000, async () => { await p.mouse.move(call.x + 20, call.y + 30); await p.mouse.move(call.x + 60, call.y + 8); });
+    if (process.env.RUNES_STEPS) console.log("  .. step 5");
+    // Ctrl and a click on the call goes to the function; on the import, into Python's own library.
+    await line(9).click({ position: { x: 60, y: 8 }, modifiers: ["Control"] });
+    await until("the definition in this file", async () => (await status()).includes("Ln 4"), 60000);
+    if (process.env.RUNES_STEPS) console.log("  .. step 6");
+    await line(1).click({ position: { x: 62, y: 8 }, modifiers: ["Control"] });
+    await until("the library's own file", async () => (await p.locator(".group.focused .tab.on").textContent()).includes("os.py"), 60000);
+    if (process.env.RUNES_STEPS) console.log("  .. step 7");
+    expect(!(await p.locator(".group.focused .tab.on").evaluate((t) => t.classList.contains("dirty"))), "a library file that was only opened counts as changed");
+    await K("Control+w");
+    // Enter, by the rules the extension gives as it runs: deeper after a colon, back after pass.
+    await open("tool.py");
+    await K("Control+End");
+    await p.keyboard.type("def f(x):"); await K("Enter"); await p.keyboard.type("pass"); await K("Enter"); await p.keyboard.type("z = 1");
+    await K("Control+s");
+    await until("the file saved", async () => fs.readFileSync(path.join(project, "tool.py"), "utf8").endsWith("def f(x):\n    pass\nz = 1"), 5000);
+    if (process.env.RUNES_STEPS) console.log("  .. step 8");
+    // Uninstall, so that what follows starts as before.
+    await K("Control+Shift+x");
+    await p.locator(".ext", { hasText: "ms-python" }).first().click();
+    await p.locator('.ext-actions .button[aria-label^="Uninstall"]').click();
+    fs.rmSync(path.join(project, "tool.py"));
+    await K("Control+Shift+e");
+  });
+
+  await check("reload: Runes starts afresh in the same window, with the same files open", async () => {
+    await open("shop.bea");
+    await open("README.md");
+    // Unsaved work is not thrown away by a reload: it says so, and stays.
+    await p.keyboard.type("x");
+    await K("Control+Alt+r");
+    await until("the refusal", async () => ((await p.locator(".toast").textContent().catch(() => "")) ?? "").includes("not saved"), 4000);
+    await K("Control+z");
+    await save();
+    // Whatever the checks before this one left unsaved is saved too.
+    for (let left = await p.locator(".tab.dirty").count(); left > 0; left--) {
+      await p.locator(".tab.dirty").first().click();
+      await K("Control+s");
+      await p.waitForTimeout(300);
+    }
+    await open("README.md");
+    await p.evaluate(() => { window.__before_reload = true; });
+    await K("Control+Alt+r");
+    await until("a fresh page", async () => p.evaluate(() => !window.__before_reload && !!document.querySelector(".runes.ready")).catch(() => false), 20000);
+    await until("the files open again", async () => { const tabs = (await p.locator(".group.focused .tab").allTextContents()).join(); return tabs.includes("shop.bea") && tabs.includes("README.md"); }, 10000);
+    expect((await p.locator(".tree.files .node").count()) > 0, "the folder is not open after the reload");
+    // The extension host started afresh too, and still answers.
+    await open("shop.bea");
+    await line(8).click({ position: { x: 150, y: 8 } });
+    await K("F12");
+    await until("the language server to answer after the reload", async () => (await status()).includes("Ln 3"), 30000, async () => { await line(8).click({ position: { x: 150, y: 8 } }); await K("F12"); });
+  });
+
+  await check("security: Markdown that no rule can place is shown as it is, and never stalls the window", async () => {
+    // A list item with a line separator in it once sent the renderer round and round for ever.
+    fs.writeFileSync(path.join(project, "odd.md"), "# Odd\n\n- one\n- two\u2028still two\n\n1. first\u2028more\n\n#\u2028x\n\nafter\n");
+    await open("odd.md");
+    await K("Control+Shift+v");
+    await p.waitForSelector(".markdown-page .markdown h1", { timeout: 8000 });
+    const shown = await Promise.race([p.locator(".markdown-page .markdown").innerText(), new Promise((r) => setTimeout(() => r(null), 6000))]);
+    expect(shown !== null, "the window stopped answering");
+    expect(shown.includes("after") && shown.includes("still two"), "the text was lost: " + JSON.stringify(shown));
+    await K("Control+w");
+    fs.rmSync(path.join(project, "odd.md"));
+  });
+
   await check("security: the page has no Node, cannot navigate, open windows or eval", async () => {
     const facts = await p.evaluate(async () => {
       // Scripts the page did not ship with must not run: try an inline one.
@@ -2061,8 +2607,9 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     await p.evaluate(() => { location.href = "https://example.com"; }).catch(() => {});
     await p.waitForTimeout(400);
     expect(p.url().startsWith("runes://app/"), "the window navigated away: " + p.url());
-    const refused = await p.evaluate(() => window.runesHost.openExternal("https://evil.example/releases/x").then(() => "ok", () => "threw"));
-    expect(refused === "ok", "openExternal should ignore, not throw");
+    // What was taken out is gone from the bridge too: no update check, no opening of addresses unasked, no committing.
+    const left = await p.evaluate(() => ["openExternal", "checkUpdate", "gitCommit", "gitSwitch", "gitConfigSet"].filter((name) => name in window.runesHost));
+    expect(left.length === 0, "still on the bridge: " + left.join());
   });
 
   await check("no errors were thrown in the page", async () => {

@@ -12,6 +12,11 @@ pub def len(text: String) -> Int
 @external(javascript, "../runes_ffi.mjs", "cut")
 pub def cut(text: String, from: Int, to: Int) -> String
 
+/// The next place left or right of a column where a cursor can stand. An emoji, or a letter
+/// with its accents, is several units and one character: the cursor never stops inside one.
+@external(javascript, "../runes_ffi.mjs", "char_step")
+pub def step(text: String, col: Int, forward: Bool) -> Int
+
 @external(javascript, "../runes_ffi.mjs", "word_edge")
 def word_edge(line: String, col: Int, forward: Bool) -> Int
 
@@ -100,7 +105,7 @@ pub def slice(lines: List(String), from: Pos, to: Pos) -> String {
 
 pub def left(lines: List(String), pos: Pos) -> Pos {
   cond {
-    pos.col > 0 -> Pos(pos.line, pos.col - 1)
+    pos.col > 0 -> Pos(pos.line, step(line(lines, pos.line), pos.col, False))
     pos.line > 0 -> Pos(pos.line - 1, len(line(lines, pos.line - 1)))
     _ -> pos
   }
@@ -108,7 +113,7 @@ pub def left(lines: List(String), pos: Pos) -> Pos {
 
 pub def right(lines: List(String), pos: Pos) -> Pos {
   cond {
-    pos.col < len(line(lines, pos.line)) -> Pos(pos.line, pos.col + 1)
+    pos.col < len(line(lines, pos.line)) -> Pos(pos.line, step(line(lines, pos.line), pos.col, True))
     pos.line < list.length(lines) - 1 -> Pos(pos.line + 1, 0)
     _ -> pos
   }

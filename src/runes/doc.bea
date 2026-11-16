@@ -30,9 +30,36 @@ pub def words(lines: List(String), prefix: String, around: Int) -> List(String)
 @external(javascript, "../runes_ffi.mjs", "expand_snippet")
 pub def expand_snippet(body: String, indent: String) -> (String, Int, Int)
 
+@external(javascript, "../runes_ffi.mjs", "enter_rule")
+def enter_rule(rules: String, before: String, after: String, above: String) -> (Int, String, Int)
+
+@external(javascript, "../runes_ffi.mjs", "outdents")
+def outdents(rules: String, line: String) -> Bool
+
 pub const line_height = 22
 
-const indent_unit = "  "
+/// One step of indentation in a file of this language: what Tab puts in.
+pub def unit(lang: Lang) -> String {
+  case lang.config.unit {
+    "" -> "    "
+    found -> found
+  }
+}
+
+/// A line's indentation with one step taken off its end.
+def back_one(indent: String, step: String) -> String {
+  n = buffer.len(indent)
+  size = buffer.len(step)
+  // Spaces that are not a whole number of steps go back to the step before.
+  over = n % int.max(size, 1)
+  cond {
+    n == 0 -> ""
+    string.ends_with(indent, "\t") -> buffer.cut(indent, 0, n - 1)
+    step == "\t" -> buffer.cut(indent, 0, n - 1)
+    over != 0 -> buffer.cut(indent, 0, n - over)
+    _ -> buffer.cut(indent, 0, int.max(n - size, 0))
+  }
+}
 
 /// What undo goes back to.
 pub type Snap {
@@ -346,6 +373,15 @@ pub def vertical(doc: Doc, by: Int, extend: Bool) -> Doc {
   Doc(moved | goal:)
 }
 
+/// Up or down as the editor shows the text: `step` is given the cursor's line and column and
+/// the column it is trying to keep (-1 for none yet), and says where that leads. Folded lines
+/// are stepped over and a wrapped line is walked row by row.
+pub def vertical_by(doc: Doc, extend: Bool, step: fn(Int, Int, Int) -> (Int, Int, Int)) -> Doc {
+  (line, col, goal) = step(doc.cursor.line, doc.cursor.col, doc.goal)
+  moved = move(doc, Pos(line, col), extend)
+  Doc(moved | goal:)
+}
+
 /// Replaces the selection (or nothing) with text.
 pub def put(doc: Doc, text: String, typing: Bool) -> Doc {
   (from, to) = selection(doc)
@@ -392,7 +428,38 @@ pub def typed(doc: Doc, lang: Lang, text: String) -> Doc {
       at = buffer.left(both.lines, both.cursor)
       Doc(both | cursor: at, anchor: at)
     }
-    _ -> put(doc, text, True)
+    _ -> drawn_back(put(doc, text, True), lang, line)
+  }
+}
+
+/// After typing: a line that has just become one that closes a block (`}`, `else:`) is
+/// drawn back a step, if it still stands as deep as the block it closes.
+def drawn_back(doc: Doc, lang: Lang, was: String) -> Doc {
+  at = doc.cursor
+  now = buffer.line(doc.lines, at.line)
+  rules = lang.config.rules
+  case doc.more == [] and string.trim(buffer.cut(now, at.col, buffer.len(now))) == "" and outdents(rules, now) and not outdents(rules, was) {
+    False -> doc
+    True -> {
+      indent = buffer.indent(now)
+      above = list.take(doc.lines, at.line) |> list.reverse |> list.find(fn(l) { string.trim(l) != "" }) |> result.unwrap("")
+      (how, _, _) = enter_rule(rules, above, "", "")
+      // Where a line that closes the block above would stand.
+      wanted = case how {
+        1 | 2 -> buffer.indent(above)
+        _ -> back_one(buffer.indent(above), unit(lang))
+      }
+      case buffer.len(indent) > buffer.len(wanted) and at.line > 0 {
+        False -> doc
+        True -> {
+          by = buffer.len(indent) - buffer.len(wanted)
+          lines = buffer.delete(doc.lines, Pos(at.line, 0), Pos(at.line, buffer.len(indent)))
+          (lines, _) = buffer.insert(lines, Pos(at.line, 0), wanted)
+          to = Pos(at.line, at.col - by)
+          Doc(doc | lines:, cursor: to, anchor: to)
+        }
+      }
+    }
   }
 }
 
@@ -412,27 +479,45 @@ pub def backspace(doc: Doc, lang: Lang, word: Bool) -> Doc {
     before != "" and closer(lang, before) != "" and closer(lang, before) == buffer.cut(line, col, col + 1) ->
       remove(doc, Pos(doc.cursor.line, col - 1), Pos(doc.cursor.line, col + 1))
     // In the indentation: back one indent step.
-    col >= 2 and string.trim(buffer.cut(line, 0, col)) == "" and buffer.cut(line, col - 2, col) == indent_unit ->
-      remove(doc, Pos(doc.cursor.line, col - 2), doc.cursor)
+    col >= 2 and string.trim(buffer.cut(line, 0, col)) == "" and string.ends_with(buffer.cut(line, 0, col), " ") ->
+      remove(doc, Pos(doc.cursor.line, buffer.len(back_one(buffer.cut(line, 0, col), unit(lang)))), doc.cursor)
     _ -> remove(doc, buffer.left(doc.lines, doc.cursor), doc.cursor)
   }
 }
 
-pub def enter(doc: Doc) -> Doc {
+pub def enter(doc: Doc, lang: Lang) -> Doc {
   (from, _) = selection(doc)
   line = buffer.line(doc.lines, from.line)
-  indent = buffer.indent(buffer.cut(line, 0, from.col))
-  before = buffer.cut(line, from.col - 1, from.col)
-  after = buffer.cut(line, doc.cursor.col, doc.cursor.col + 1)
-  opens = list.contains(["{", "[", "("], before)
-  case opens, doc.cursor == doc.anchor and list.contains(["}", "]", ")"], after) {
-    True, True -> {
-      spread = put(doc, "\n" <> indent <> indent_unit <> "\n" <> indent, False)
-      at = Pos(from.line + 1, buffer.len(indent) + 2)
+  before = buffer.cut(line, 0, from.col)
+  after = buffer.cut(line, doc.cursor.col, buffer.len(line))
+  above = buffer.line(doc.lines, from.line - 1)
+  indent = buffer.indent(before)
+  step = unit(lang)
+  // What the language says Enter does here: its own rules first, then its brackets.
+  (how, append, remove) = enter_rule(lang.config.rules, before, after, case from.line {
+    0 -> ""
+    _ -> above
+  })
+  kept = buffer.cut(indent, 0, int.max(buffer.len(indent) - remove, 0))
+  // A tab in what a rule adds stands for one step, whatever this file's steps are.
+  added = string.replace(append, "\t", step)
+  // "Indent and outdent" with text of its own means that text is the indentation (JavaScript
+  // says "a tab" this way); without, it is one step.
+  inner = case added {
+    "" -> step
+    _ -> added
+  }
+  case how, doc.cursor == doc.anchor {
+    // Between a pair: the cursor goes a step deeper, and what closes the pair goes below.
+    2, True -> {
+      spread = put(doc, "\n" <> kept <> inner <> "\n" <> kept, False)
+      at = Pos(from.line + 1, buffer.len(kept <> inner))
       Doc(spread | cursor: at, anchor: at)
     }
-    True, False -> put(doc, "\n" <> indent <> indent_unit, False)
-    False, _ -> put(doc, "\n" <> indent, False)
+    2, _ -> put(doc, "\n" <> kept <> inner, False)
+    1, _ -> put(doc, "\n" <> kept <> step <> added, False)
+    3, _ -> put(doc, "\n" <> back_one(kept, step) <> added, False)
+    _, _ -> put(doc, "\n" <> kept <> added, False)
   }
 }
 
@@ -479,11 +564,15 @@ pub def comment(doc: Doc, lang: Lang) -> Doc {
   }
 }
 
-pub def outdent(doc: Doc) -> Doc {
+pub def outdent(doc: Doc, lang: Lang) -> Doc {
+  step = unit(lang)
   rewrite(doc, list.map(_, fn(l) {
+    indent = buffer.indent(l)
     cond {
-      string.starts_with(l, indent_unit) -> string.drop_start(l, 2)
-      string.starts_with(l, "\t") or string.starts_with(l, " ") -> string.drop_start(l, 1)
+      string.starts_with(l, step) -> buffer.cut(l, buffer.len(step), buffer.len(l))
+      string.starts_with(l, "\t") -> buffer.cut(l, 1, buffer.len(l))
+      // Fewer spaces than a step: all of them go.
+      indent != "" -> buffer.cut(l, int.min(buffer.len(indent), buffer.len(step)), buffer.len(l))
       _ -> l
     }
   }))
@@ -499,11 +588,18 @@ pub def tab(doc: Doc, lang: Lang) -> Doc {
     True, _ -> rewrite(doc, list.map(_, fn(l) {
       case l {
         "" -> l
-        _ -> indent_unit <> l
+        _ -> unit(lang) <> l
       }
     }))
     False, Ok(s) if from == to -> expand(doc, start, s.body)
-    False, _ -> put(doc, indent_unit, False)
+    // With spaces, Tab goes to the next step, however far along the line it is.
+    False, _ -> case unit(lang) {
+      "\t" -> put(doc, "\t", False)
+      step -> {
+        size = buffer.len(step)
+        put(doc, string.repeat(" ", size - vcol(line, from.col) % size), False)
+      }
+    }
   }
 }
 
@@ -710,9 +806,9 @@ pub def editor_key(doc: Doc, lang: Lang, key: String, ctrl: Bool, shift: Bool, p
       ctrl -> remove(doc, at, buffer.word_right(lines, at))
       _ -> remove(doc, at, buffer.right(lines, at))
     }
-    "Enter", _ -> enter(doc)
+    "Enter", _ -> enter(doc, lang)
     "Tab", _ -> case shift {
-      True -> outdent(doc)
+      True -> outdent(doc, lang)
       False -> tab(doc, lang)
     }
     _, _ -> doc

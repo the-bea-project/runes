@@ -1,5 +1,5 @@
 name = "runes"
-version = "1.1.0"
+version = "1.2.0"
 description = "Runes: an elegant, minimal code editor, extended by VS Code extensions"
 licences = ["Apache-2.0"]
 target = "javascript"

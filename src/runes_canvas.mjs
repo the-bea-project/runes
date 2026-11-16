@@ -72,6 +72,9 @@ export function cleanElement(raw, taken = new Set()) {
     el.head = oneOf(raw.head, HEADS, el.type === "arrow" ? "end" : "none");
     el.from = typeof raw.from === "string" && /^[\w-]{1,40}$/.test(raw.from) ? raw.from : "";
     el.to = typeof raw.to === "string" && /^[\w-]{1,40}$/.test(raw.to) ? raw.to : "";
+    // Where the line bends on its way: points it passes through, in order, on the board.
+    el.bends = (Array.isArray(raw.bends) ? raw.bends : []).slice(0, MOST_BENDS)
+      .filter((p) => Array.isArray(p) && p.length >= 2).map((p) => [round(number(p[0], 0)), round(number(p[1], 0))]);
   }
   if (el.type === "draw") {
     el.points = (Array.isArray(raw.points) ? raw.points : []).slice(0, 4000)
@@ -108,7 +111,7 @@ export function parse(text) {
 
 // What is written for each kind, in this order; a field at its usual value is left out.
 const USUAL = { stroke: "ink", fill: "none", width: 2, dash: "solid", round: true, sketch: true, text: "", size: 20, link: "", from: "", to: "" };
-const ORDER = ["id", "type", "x", "y", "w", "h", "points", "text", "size", "align", "stroke", "fill", "width", "dash", "round", "sketch", "head", "from", "to", "link", "seed"];
+const ORDER = ["id", "type", "x", "y", "w", "h", "bends", "points", "text", "size", "align", "stroke", "fill", "width", "dash", "round", "sketch", "head", "from", "to", "link", "seed"];
 
 /** The drawing as the text of its file: one element to a line, fields in a fixed order, so a change shows as a small diff. */
 export function serialize(elements) {
@@ -119,6 +122,7 @@ export function serialize(elements) {
       if (key in USUAL && el[key] === USUAL[key]) continue;
       if (key === "align" && el.align === (el.type === "text" ? "left" : "center")) continue;
       if (key === "head" && el.head === (el.type === "arrow" ? "end" : "none")) continue;
+      if (key === "bends" && !el.bends?.length) continue;
       if ((key === "size" || key === "align") && !el.text) continue;
       if (key === "round" && !SHAPES.includes(el.type)) continue;
       if (key === "fill" && !SHAPES.includes(el.type)) continue;
@@ -140,7 +144,120 @@ export function box(el, measure) {
     for (const [px, py] of el.points) { x0 = Math.min(x0, px); y0 = Math.min(y0, py); x1 = Math.max(x1, px); y1 = Math.max(y1, py); }
     return { x: el.x + x0, y: el.y + y0, w: x1 - x0, h: y1 - y0 };
   }
+  if (el.bends?.length) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const [px, py] of traced(el)) { x0 = Math.min(x0, px); y0 = Math.min(y0, py); x1 = Math.max(x1, px); y1 = Math.max(y1, py); }
+    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  }
   return { x: Math.min(el.x, el.x + el.w), y: Math.min(el.y, el.y + el.h), w: Math.abs(el.w), h: Math.abs(el.h) };
+}
+
+// --- Lines that bend ---------------------------------------------------------------------------------
+// A line or arrow runs from (x, y) to (x + w, y + h). With `bends`, it passes through each of
+// those points on the way, as one smooth curve.
+
+export const MOST_BENDS = 24;
+const isLine = (el) => el.type === "line" || el.type === "arrow";
+
+/** The points a line passes through: its start, its bends, its end. */
+export const nodes = (el) => [[el.x, el.y], ...(el.bends ?? []), [el.x + el.w, el.y + el.h]];
+
+/** The control points of the smooth curve through `p`, piece by piece: [from, c1, c2, to]. */
+function pieces(p) {
+  const out = [];
+  for (let i = 0; i < p.length - 1; i++) {
+    const p0 = p[i - 1] ?? p[i], p1 = p[i], p2 = p[i + 1], p3 = p[i + 2] ?? p[i + 1];
+    out.push([p1, [p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6], [p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6], p2]);
+  }
+  return out;
+}
+const along = ([a, b, c, d], t) => {
+  const u = 1 - t;
+  return [u * u * u * a[0] + 3 * u * u * t * b[0] + 3 * u * t * t * c[0] + t * t * t * d[0], u * u * u * a[1] + 3 * u * u * t * b[1] + 3 * u * t * t * c[1] + t * t * t * d[1]];
+};
+
+/** A line as many short straight pieces: for telling what is under a point, and how much room it takes. */
+export function traced(el, steps = 10) {
+  const p = nodes(el);
+  if (p.length === 2) return p;
+  const out = [p[0]];
+  for (const piece of pieces(p)) for (let i = 1; i <= steps; i++) out.push(along(piece, i / steps));
+  return out;
+}
+
+/** The middle of each stretch between two of a line's points: where a new bend can be pulled out. */
+export function middles(el) {
+  const p = nodes(el);
+  if (p.length === 2) return [[el.x + el.w / 2, el.y + el.h / 2]];
+  return pieces(p).map((piece) => along(piece, 0.5));
+}
+
+/** The middle of the whole line, for its label. */
+export function middle(el) {
+  const p = traced(el, 12);
+  if (p.length === 2) return [el.x + el.w / 2, el.y + el.h / 2];
+  let total = 0;
+  const lengths = [];
+  for (let i = 1; i < p.length; i++) { const d = Math.hypot(p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1]); lengths.push(d); total += d; }
+  let half = total / 2;
+  for (let i = 0; i < lengths.length; i++) {
+    if (half <= lengths[i]) { const t = lengths[i] ? half / lengths[i] : 0; return [p[i][0] + (p[i + 1][0] - p[i][0]) * t, p[i][1] + (p[i + 1][1] - p[i][1]) * t]; }
+    half -= lengths[i];
+  }
+  return p[p.length - 1];
+}
+
+/** The line with a new bend at a point, in the stretch after its `after`-th point (0 is the start). */
+export function bendAdded(el, after, x, y) {
+  const bends = [...(el.bends ?? [])];
+  if (bends.length >= MOST_BENDS) return el;
+  bends.splice(Math.max(0, Math.min(after, bends.length)), 0, [round(x), round(y)]);
+  return { ...el, bends };
+}
+export function bendMoved(el, index, x, y) {
+  if (!el.bends || index < 0 || index >= el.bends.length) return el;
+  return { ...el, bends: el.bends.map((b, i) => (i === index ? [round(x), round(y)] : b)) };
+}
+export function bendRemoved(el, index) {
+  if (!el.bends || index < 0 || index >= el.bends.length) return el;
+  return { ...el, bends: el.bends.filter((_, i) => i !== index) };
+}
+/** Whether a bend adds nothing: it lies on the straight way between its neighbours. */
+export function bendIsStraight(el, index, slack = 5) {
+  const p = nodes(el);
+  const a = p[index], b = p[index + 1], c = p[index + 2];
+  return !!(a && b && c) && toSegment(b[0], b[1], a[0], a[1], c[0], c[1]) <= slack;
+}
+
+/** An element moved by (dx, dy): a line takes its bends with it. */
+export function shifted(el, dx, dy) {
+  const next = { ...el, x: el.x + dx, y: el.y + dy };
+  if (el.bends?.length) next.bends = el.bends.map(([bx, by]) => [bx + dx, by + dy]);
+  return next;
+}
+
+/**
+ * A line as a path: through its bends in one smooth curve. Drawn by hand it is gone over
+ * twice, not quite in the same place; `sketch` off gives the curve exactly.
+ */
+export function strokeCurve(el, random, sketch) {
+  const p = nodes(el);
+  if (p.length === 2) return strokeLine(p[0][0], p[0][1], p[1][0], p[1][1], random, sketch);
+  let d = "";
+  for (let pass = 0; pass < (sketch ? 2 : 1); pass++) {
+    const j = sketch ? () => (random() - 0.5) * 2.4 : () => 0;
+    const moved = p.map(([px, py], i) => (i === 0 || i === p.length - 1 ? [px + j() * 0.6, py + j() * 0.6] : [px + j(), py + j()]));
+    const parts = pieces(moved);
+    d += `M${f(parts[0][0][0])} ${f(parts[0][0][1])}`;
+    for (const [, c1, c2, to] of parts) d += `C${f(c1[0])} ${f(c1[1])} ${f(c2[0])} ${f(c2[1])} ${f(to[0])} ${f(to[1])}`;
+  }
+  return d;
+}
+
+/** Where a line is coming from as it arrives at its end (or sets out from its start): for the arrowhead. */
+export function approach(el, atEnd) {
+  const p = traced(el, 10);
+  return atEnd ? p[p.length - 2] : p[1];
 }
 
 /** The box around several elements, or null for none. */
@@ -166,7 +283,11 @@ export function hits(el, px, py, near = 6, measure) {
   const reach = near + (el.width ?? 2) / 2;
   if (px < b.x - reach || py < b.y - reach || px > b.x + b.w + reach || py > b.y + b.h + reach) return false;
   if (el.type === "text") return true;
-  if (el.type === "line" || el.type === "arrow") return toSegment(px, py, el.x, el.y, el.x + el.w, el.y + el.h) <= reach;
+  if (el.type === "line" || el.type === "arrow") {
+    const p = traced(el);
+    for (let i = 1; i < p.length; i++) if (toSegment(px, py, p[i - 1][0], p[i - 1][1], p[i][0], p[i][1]) <= reach) return true;
+    return false;
+  }
   if (el.type === "draw") {
     for (let i = 1; i < el.points.length; i++) {
       if (toSegment(px, py, el.x + el.points[i - 1][0], el.y + el.points[i - 1][1], el.x + el.points[i][0], el.y + el.points[i][1]) <= reach) return true;
@@ -220,9 +341,11 @@ export function retie(elements, measure) {
     if ((el.type !== "arrow" && el.type !== "line") || (!el.from && !el.to)) return el;
     const a = byId.get(el.from), b = byId.get(el.to);
     if (!a && !b) return el.from || el.to ? { ...el, from: "", to: "" } : el;
-    const middle = (s) => { const k = box(s, measure); return [k.x + k.w / 2, k.y + k.h / 2]; };
+    const centre = (s) => { const k = box(s, measure); return [k.x + k.w / 2, k.y + k.h / 2]; };
     let start = [el.x, el.y], end = [el.x + el.w, el.y + el.h];
-    const aim = a ? middle(a) : start, target = b ? middle(b) : end;
+    // Each tied end leaves its shape towards the other end, or towards the first bend on the way.
+    const bends = el.bends ?? [];
+    const aim = bends.length ? bends[bends.length - 1] : a ? centre(a) : start, target = bends.length ? bends[0] : b ? centre(b) : end;
     if (a) start = edgeToward(a, target[0], target[1], 6, measure);
     if (b) end = edgeToward(b, aim[0], aim[1], 6, measure);
     const next = { ...el, x: round(start[0]), y: round(start[1]), w: round(end[0] - start[0]), h: round(end[1] - start[1]), from: a ? el.from : "", to: b ? el.to : "" };
@@ -254,6 +377,7 @@ export function fit(el, from, to) {
   const next = { ...el, x: round(to.x + (el.x - from.x) * sx), y: round(to.y + (el.y - from.y) * sy) };
   if (el.type === "draw") next.points = el.points.map(([px, py]) => [round(px * sx), round(py * sy)]);
   else if (el.type !== "text") { next.w = round(el.w * sx); next.h = round(el.h * sy); }
+  if (el.bends?.length) next.bends = el.bends.map(([bx, by]) => [round(to.x + (bx - from.x) * sx), round(to.y + (by - from.y) * sy)]);
   return next;
 }
 

@@ -8,7 +8,8 @@
 import {
   COLOURS, WIDTHS, DASHES, SIZES, HEADS, SHAPES, PALETTE,
   parse, serialize, cleanElement, cleanLink, freshId, box, around, hits, elementAt, retie, simplify, fit,
-  rng, strokeLine, outline, cleanOutline, strokePath, arrowHead, wrap,
+  rng, outline, cleanOutline, strokePath, arrowHead, wrap,
+  nodes, middles, middle, bendAdded, bendMoved, bendRemoved, bendIsStraight, shifted, strokeCurve, approach,
 } from "./runes_canvas.mjs";
 
 const NS = "http://www.w3.org/2000/svg";
@@ -21,6 +22,7 @@ const svg = (name, attrs = {}, children = []) => {
   for (const child of children) if (child) node.append(child);
   return node;
 };
+const title = (text) => { const t = document.createElementNS(NS, "title"); t.textContent = text; return t; };
 const el = (name, attrs = {}, children = []) => {
   const node = document.createElement(name);
   for (const [key, value] of Object.entries(attrs)) {
@@ -66,7 +68,7 @@ const TOOLS = [
   ["text", "Text", "t", "8"], ["eraser", "Eraser", "e", "0"],
 ];
 const KEYS = [
-  ["1 – 8, or the letter on a tool", "pick a tool"], ["Double click", "write: on the board, in a shape, on an arrow"], ["Drag an arrow onto a shape", "ties it there; it follows when the shape moves"],
+  ["1 – 8, or the letter on a tool", "pick a tool"], ["Double click", "write: on the board, in a shape, on an arrow"], ["Pull the middle of a line or arrow", "bends it there; pull again between two points for another bend. Double click a bend to take it out"], ["Drag an arrow onto a shape", "ties it there; it follows when the shape moves"],
   ["Space + drag, or the wheel", "move the board"], ["Ctrl + wheel", "zoom"], ["Shift while drawing", "squares, circles, straight angles"],
   ["Ctrl + click on a linked element", "open the file it points to"], ["Ctrl+D", "duplicate"], ["Ctrl+Z, Ctrl+Shift+Z", "undo, redo"],
   ["Ctrl+] and Ctrl+[", "bring forward, send back"], ["Arrow keys", "nudge (Shift: further)"], ["Shift+1", "fit the drawing to the window"], ["Delete", "delete"],
@@ -228,7 +230,7 @@ class RuneCanvas extends Base {
   copies(items, dx, dy) {
     const taken = new Set(this.elements.map((e) => e.id)), names = new Map();
     for (const item of items) { const id = freshId(taken); taken.add(id); names.set(item.id, id); }
-    return items.map((item) => ({ ...item, id: names.get(item.id), x: item.x + dx, y: item.y + dy, seed: Math.floor(Math.random() * 2 ** 31),
+    return items.map((item) => ({ ...shifted(item, dx, dy), id: names.get(item.id), seed: Math.floor(Math.random() * 2 ** 31),
       ...(item.from !== undefined ? { from: names.get(item.from) ?? "", to: names.get(item.to) ?? "" } : {}) }));
   }
   duplicate() {
@@ -272,7 +274,7 @@ class RuneCanvas extends Base {
   }
   nudge(dx, dy) {
     if (!this.selected.size) return;
-    this.act((all) => all.map((e) => (this.selected.has(e.id) ? { ...e, x: e.x + dx, y: e.y + dy } : e)));
+    this.act((all) => all.map((e) => (this.selected.has(e.id) ? shifted(e, dx, dy) : e)));
   }
 
   // --- Where things are ---
@@ -320,7 +322,15 @@ class RuneCanvas extends Base {
       const handle = e.target.closest?.("[data-handle]")?.dataset.handle;
       if (handle) {
         const items = this.chosen();
-        this.drag = handle === "start" || handle === "end" ? { kind: "end", which: handle, before: this.elements, item: items[0] }
+        const [what, at] = handle.split(":");
+        if (what === "bend") this.drag = { kind: "bend", index: Number(at), before: this.elements, item: items[0] };
+        else if (what === "mid") {
+          // Pulling the middle of a stretch makes a bend there, which is then the thing being dragged.
+          const bent = bendAdded(items[0], Number(at), x, y);
+          if (bent === items[0]) return this.tell("A line can bend " + (items[0].bends?.length ?? 0) + " times and no more.");
+          this.drag = { kind: "bend", index: Number(at), before: this.elements, item: bent, fresh: true };
+        }
+        else this.drag = handle === "start" || handle === "end" ? { kind: "end", which: handle, before: this.elements, item: items[0] }
           : { kind: "resize", handle, before: this.elements, from: around(items, this.measure) };
         return;
       }
@@ -386,9 +396,9 @@ class RuneCanvas extends Base {
         if (!moving.has(k.id)) return k;
         if ((k.type === "arrow" || k.type === "line") && (k.from || k.to)) {
           const both = (!k.from || moving.has(k.from)) && (!k.to || moving.has(k.to));
-          return both ? { ...k, x: k.x + dx, y: k.y + dy } : (moving.size === 1 ? { ...k, x: k.x + dx, y: k.y + dy, from: "", to: "" } : k);
+          return both ? shifted(k, dx, dy) : (moving.size === 1 ? { ...shifted(k, dx, dy), from: "", to: "" } : k);
         }
-        return { ...k, x: k.x + dx, y: k.y + dy };
+        return shifted(k, dx, dy);
       }), this.measure);
       return this.paint();
     }
@@ -413,6 +423,14 @@ class RuneCanvas extends Base {
       }
       const to = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
       this.elements = retie(d.before.map((k) => (this.selected.has(k.id) ? fit(k, from, to) : k)), this.measure);
+      return this.paint();
+    }
+    if (d.kind === "bend") {
+      if (!d.moved && !d.fresh && Math.hypot(x - d.item.bends[d.index][0], y - d.item.bends[d.index][1]) * this.view.k < 2) return;
+      d.moved = true;
+      const next = bendMoved(d.item, d.index, this.snap(x, e), this.snap(y, e));
+      d.now = next;
+      this.elements = retie(d.before.map((k) => (k.id === next.id ? next : k)), this.measure);
       return this.paint();
     }
     if (d.kind === "end") {
@@ -468,6 +486,12 @@ class RuneCanvas extends Base {
       return;
     }
     if (d.kind === "end") return commit(this.elements);
+    if (d.kind === "bend") {
+      if (!d.moved) { this.elements = d.before; return this.paint(); }
+      // A bend left on the straight way between its neighbours is no bend: it is taken out.
+      const straight = d.now && bendIsStraight(d.now, d.index, 4 / this.view.k);
+      return commit(straight ? retie(this.elements.map((k) => (k.id === d.now.id ? bendRemoved(k, d.index) : k)), this.measure) : this.elements);
+    }
     if (d.kind === "create") {
       let item = d.item;
       if (item.type === "draw") {
@@ -492,7 +516,16 @@ class RuneCanvas extends Base {
   }
   twice(e) {
     if (this.locked || this.tool !== "select") return;
+    // Twice on a bend takes the bend out.
+    // (Found by where the pointer is: the handles are drawn afresh between the two clicks.)
     const [x, y] = this.at(e);
+    const lone = this.chosen().length === 1 ? this.chosen()[0] : null;
+    if (lone && (lone.type === "line" || lone.type === "arrow")) {
+      const reach = 9 / this.view.k;
+      const index = (lone.bends ?? []).findIndex(([bx, by]) => Math.hypot(bx - x, by - y) <= reach);
+      if (index >= 0) return this.act((all) => retie(all.map((k) => (k.id === lone.id ? bendRemoved(k, index) : k)), this.measure));
+      if (middles(lone).some(([mx, my]) => Math.hypot(mx - x, my - y) <= reach)) return;
+    }
     // Anywhere inside a shape writes in that shape, whether it is filled or not.
     const inside = [...this.elements].reverse().find((k) => SHAPES.includes(k.type) && x >= k.x && x <= k.x + k.w && y >= k.y && y <= k.y + k.h);
     const hit = elementAt(this.elements, x, y, 6 / this.view.k, this.measure) ?? inside;
@@ -541,7 +574,7 @@ class RuneCanvas extends Base {
     let left, top;
     if (item.type === "text") { left = item.x * k + this.view.x; top = item.y * k + this.view.y; }
     else {
-      const b = item.type === "arrow" || item.type === "line" ? { x: item.x + item.w / 2, y: item.y + item.h / 2, w: 0, h: 0 } : box(item, this.measure);
+      const b = item.type === "arrow" || item.type === "line" ? { x: middle(item)[0], y: middle(item)[1], w: 0, h: 0 } : box(item, this.measure);
       left = (b.x + b.w / 2) * k + this.view.x - wide / 2; top = (b.y + b.h / 2) * k + this.view.y - tall / 2;
     }
     Object.assign(w.style, { left: left + "px", top: top + "px", width: wide + "px", height: tall + "px", lineHeight: item.size * 1.25 * k + "px" });
@@ -634,13 +667,15 @@ class RuneCanvas extends Base {
     } else if (item.type === "line" || item.type === "arrow") {
       const x2 = item.x + item.w, y2 = item.y + item.h;
       const size = 8 + item.width * 3;
-      g.append(svg("path", { d: strokeLine(item.x, item.y, x2, y2, random, item.sketch), ...line }));
-      // The heads are always whole, however the line itself is dashed.
+      // Straight from end to end, or in one curve through its bends.
+      g.append(svg("path", { d: strokeCurve(item, random, item.sketch), ...line, fill: "none" }));
+      // The heads are always whole, however the line itself is dashed, and point the way the line arrives.
       let heads = "";
-      if (item.head === "end" || item.head === "both") heads += arrowHead(x2, y2, item.x, item.y, size, random, item.sketch);
-      if (item.head === "both") heads += arrowHead(item.x, item.y, x2, y2, size, random, item.sketch);
+      const [ex, ey] = approach(item, true), [sx, sy] = approach(item, false);
+      if (item.head === "end" || item.head === "both") heads += arrowHead(x2, y2, ex, ey, size, random, item.sketch);
+      if (item.head === "both") heads += arrowHead(item.x, item.y, sx, sy, size, random, item.sketch);
       if (heads) g.append(svg("path", { d: heads, ...line, "stroke-dasharray": null }));
-      if (item.text && this.writing?.id !== item.id) g.append(this.label(item, item.x + item.w / 2, item.y + item.h / 2, 240, true));
+      if (item.text && this.writing?.id !== item.id) { const [mx, my] = middle(item); g.append(this.label(item, mx, my, 240, true)); }
     } else if (item.type === "draw") {
       g.append(svg("path", { d: strokePath(item), ...line }));
     } else if (this.writing?.id !== item.id) {
@@ -654,7 +689,7 @@ class RuneCanvas extends Base {
         svg("circle", { r: 8, fill: this.ground(), stroke: this.colour("blue"), "stroke-width": 1.2 }),
         svg("path", { d: "M-3 3L3-3M-1-3h4v4", fill: "none", stroke: this.colour("blue"), "stroke-width": 1.4, "stroke-linecap": "round", "stroke-linejoin": "round" }),
       ]));
-      const title = svg("title"); title.textContent = "Linked to " + item.link + " (Ctrl+click to open)"; g.append(title);
+      g.append(title("Linked to " + item.link + " (Ctrl+click to open)"));
     }
     return g;
   }
@@ -710,6 +745,9 @@ class RuneCanvas extends Base {
     if (!items.length || this.tool !== "select") return;
     const one = items.length === 1 ? items[0] : null;
     if (one && (one.type === "line" || one.type === "arrow")) {
+      // Between every two of its points, a faint handle: pulled, it becomes a bend.
+      if (!this.locked && this.drag?.kind !== "bend") middles(one).forEach(([px, py], i) => over.append(svg("circle", { class: "rc-handle mid", "data-handle": "mid:" + i, cx: px * k + x, cy: py * k + y, r: 4.5 }, [title("Pull to bend the line here")])));
+      (one.bends ?? []).forEach(([px, py], i) => over.append(svg("circle", { class: "rc-handle bend", "data-handle": "bend:" + i, cx: px * k + x, cy: py * k + y, r: 5 }, [title("Drag to move this bend. Double click to take it out")])));
       for (const [name, px, py] of [["start", one.x, one.y], ["end", one.x + one.w, one.y + one.h]]) {
         over.append(svg("circle", { class: "rc-handle" + ((name === "start" ? one.from : one.to) ? " tied" : ""), "data-handle": name, cx: px * k + x, cy: py * k + y, r: 5.5 }));
       }

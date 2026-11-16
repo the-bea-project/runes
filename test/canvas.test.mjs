@@ -2,6 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parse, serialize, cleanElement, cleanLink, freshId, box, around, hits, elementAt, edgeToward, retie, simplify, fit, rng, outline, strokeLine, wrap, VERSION, COLOURS } from "../src/runes_canvas.mjs";
+import { nodes, traced, middles, middle, bendAdded, bendMoved, bendRemoved, bendIsStraight, shifted, strokeCurve, approach, MOST_BENDS } from "../src/runes_canvas.mjs";
 
 const file = (elements, more = {}) => JSON.stringify({ rune: "canvas", version: 1, elements, ...more });
 const rect = (more = {}) => ({ id: "a", type: "rect", x: 0, y: 0, w: 100, h: 60, ...more });
@@ -158,4 +159,91 @@ test("labels wrap to the width they have", () => {
 test("new ids do not collide with ones in use", () => {
   const taken = new Set();
   for (let i = 0; i < 2000; i++) { const id = freshId(taken); assert.ok(!taken.has(id)); taken.add(id); }
+});
+
+// --- Lines that bend ---
+
+const arrow = (more = {}) => cleanElement({ id: "ar", type: "arrow", x: 0, y: 0, w: 200, h: 0, ...more });
+
+test("a line bends where a point is pulled out of it, and passes through every bend", () => {
+  const straight = arrow();
+  assert.deepEqual(middles(straight), [[100, 0]]);
+  const bent = bendAdded(straight, 0, 100, 80);
+  assert.deepEqual(bent.bends, [[100, 80]]);
+  assert.deepEqual(nodes(bent), [[0, 0], [100, 80], [200, 0]]);
+  const path = traced(bent);
+  assert.ok(path.some(([x, y]) => Math.abs(x - 100) < 0.01 && Math.abs(y - 80) < 0.01), "the curve goes through the bend");
+  assert.deepEqual(path[0], [0, 0]);
+  assert.deepEqual(path.at(-1), [200, 0]);
+  // Two new middles, one each side of the bend: pulling one adds a bend in the right place.
+  const mids = middles(bent);
+  assert.equal(mids.length, 2);
+  assert.ok(mids[0][0] < 100 && mids[1][0] > 100);
+  const twice = bendAdded(bent, 1, 160, -40);
+  assert.deepEqual(twice.bends, [[100, 80], [160, -40]]);
+  const first = bendAdded(bent, 0, 40, 10);
+  assert.deepEqual(first.bends, [[40, 10], [100, 80]]);
+  assert.deepEqual(bendMoved(twice, 1, 150, -60).bends, [[100, 80], [150, -60]]);
+  assert.deepEqual(bendRemoved(twice, 0).bends, [[160, -40]]);
+  assert.equal(bendRemoved(twice, 9), twice);
+  assert.equal(straight.bends.length, 0, "the line it was made from is not changed");
+});
+
+test("a bend on the straight way between its neighbours is no bend", () => {
+  assert.ok(bendIsStraight(arrow({ bends: [[100, 2]] }), 0));
+  assert.ok(!bendIsStraight(arrow({ bends: [[100, 40]] }), 0));
+  assert.ok(bendIsStraight(arrow({ bends: [[50, 50], [100, 51], [150, 50]] }), 1));
+});
+
+test("a bent line is touched along its curve, takes the room of its curve, and is labelled at its middle", () => {
+  const bent = arrow({ bends: [[100, 80]] });
+  assert.ok(hits(bent, 100, 80), "on the bend");
+  assert.ok(!hits(bent, 100, 0), "the straight way it no longer takes");
+  assert.ok(hits(bent, 0, 0) && hits(bent, 200, 0));
+  const b = box(bent);
+  assert.ok(b.y <= 0.5 && b.h >= 79 && b.w >= 199, JSON.stringify(b));
+  const [mx, my] = middle(bent);
+  assert.ok(Math.abs(mx - 100) < 2 && my > 70, "the label sits at the bend of a line bent in the middle");
+  assert.deepEqual(middle(arrow()), [100, 0]);
+});
+
+test("bends are kept in the file, and nothing odd in them is believed", () => {
+  const made = parse(file([{ id: "a", type: "arrow", x: 0, y: 0, w: 200, h: 0, bends: [[100, 80], ["x", null], [1e999, 5], "no", [7]] }, { id: "r", type: "rect", x: 0, y: 0, w: 5, h: 5, bends: [[1, 2]] }])).elements;
+  assert.equal(made[0].bends.length, 3);
+  assert.ok(made[0].bends.every((p) => p.length === 2 && p.every(Number.isFinite)));
+  assert.equal(made[1].bends, undefined, "only lines bend");
+  const text = serialize(made);
+  assert.match(text, /"bends":\[\[100,80\]/);
+  assert.deepEqual(parse(text).elements, made);
+  assert.ok(!serialize([arrow()]).includes("bends"), "a straight line says nothing about bends");
+  const many = parse(file([{ id: "a", type: "line", x: 0, y: 0, w: 9, h: 9, bends: Array.from({ length: 500 }, (_, i) => [i, i]) }])).elements[0];
+  assert.equal(many.bends.length, MOST_BENDS);
+  assert.equal(bendAdded(many, 0, 1, 1), many, "no more than that are added by hand either");
+});
+
+test("a bent line moves and scales with its bends, and its tied ends leave towards the nearest bend", () => {
+  const bent = arrow({ bends: [[100, 80]] });
+  assert.deepEqual(shifted(bent, 10, -5).bends, [[110, 75]]);
+  assert.deepEqual([shifted(bent, 10, -5).x, shifted(bent, 10, -5).y], [10, -5]);
+  assert.equal(shifted(cleanElement(rect()), 3, 4).bends, undefined);
+  const scaled = fit(bent, { x: 0, y: 0, w: 200, h: 80 }, { x: 0, y: 0, w: 400, h: 160 });
+  assert.deepEqual(scaled.bends, [[200, 160]]);
+  // Two boxes side by side, the arrow between them bent far below: each end leaves its box downwards.
+  const a = cleanElement(rect()), b = cleanElement({ id: "b", type: "rect", x: 300, y: 0, w: 100, h: 60 });
+  const tied = retie([a, b, cleanElement({ id: "c", type: "arrow", x: 0, y: 0, w: 10, h: 10, from: "a", to: "b", bends: [[200, 400]] })])[2];
+  assert.ok(tied.y > 60 && tied.y + tied.h > 60, "both ends are on the lower edges: " + JSON.stringify(tied));
+  assert.deepEqual(tied.bends, [[200, 400]], "tying moves the ends, never the bends");
+});
+
+test("a bent line is drawn as one curve, the same every time, and its arrowhead follows the curve in", () => {
+  const bent = arrow({ bends: [[100, 80]], seed: 3 });
+  const clean = strokeCurve(bent, rng(3), false);
+  assert.match(clean, /^M0 0C/);
+  assert.equal((clean.match(/C/g) ?? []).length, 2, "one piece for each stretch");
+  assert.equal(strokeCurve(bent, rng(3), true), strokeCurve(bent, rng(3), true));
+  assert.ok(!/NaN|Infinity/.test(strokeCurve(arrow({ w: 0, h: 0, bends: [[0, 0]] }), rng(1), true)));
+  assert.equal(strokeCurve(arrow(), rng(3), false), strokeLine(0, 0, 200, 0, rng(3), false), "a line without bends is the straight line it always was");
+  const [fx, fy] = approach(bent, true);
+  assert.ok(fx < 200 && fy > 0, "it arrives from below and to the left");
+  assert.deepEqual(approach(arrow(), true), [0, 0]);
 });

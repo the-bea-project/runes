@@ -72,6 +72,11 @@ pub const defaults = [
   Binding("shift+f8", "editor.action.marker.prev"),
   Binding("ctrl+shift+space", "runes.pie"),
   Binding("ctrl+alt+m", "runes.toggleMaximizeGroup"),
+  Binding("ctrl+shift+[", "editor.fold"),
+  Binding("ctrl+shift+]", "editor.unfold"),
+  Binding("alt+z", "editor.action.toggleWordWrap"),
+  Binding("ctrl+shift+\\", "editor.action.jumpToBracket"),
+  Binding("ctrl+alt+r", "runes.reload"),
 ]
 
 /// Reads a keybindings.json: a list of `{ "key": …, "command": … }`. A command that
