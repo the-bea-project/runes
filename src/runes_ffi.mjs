@@ -3,7 +3,9 @@
 // (the desktop shell, or an in-browser stand-in).
 import { toList } from "../prelude.mjs";
 import "./runes_canvas_view.mjs";
+import "./runes_viewers.mjs";
 import * as Layout from "./runes_layout.mjs";
+import { nameFor, printed, wasShown } from "./runes_secrets.mjs";
 
 // The npm packages are loaded when the editor boots, not when this file is read,
 // so that `bea run` in plain Node can still say how Ink is meant to be started.
@@ -184,7 +186,7 @@ let bound = new Set();
 /** Chords that still reach the workbench while a terminal has the keyboard. */
 const THROUGH_TERMINAL = /^(ctrl\+(`|j|b|p|shift\+p|shift\+`|shift\+e|shift\+f|shift\+x|shift\+m|,|\\|1|2|3|shift\+space|alt\+m))$|^f1$/;
 
-const CANVAS_KEYS = /^ctrl\+(z|y|a|d|c|x|v|\]|\[|0|=|\+|-|shift\+z|enter|arrow\w+|shift\+arrow\w+|backspace|delete|home|end)$/;
+const CANVAS_KEYS = /^ctrl\+(z|y|a|d|g|c|x|v|\]|\[|0|=|\+|-|shift\+z|shift\+g|enter|arrow\w+|shift\+arrow\w+|backspace|delete|home|end)$/;
 const FIELD_KEYS = /^(ctrl\+(a|z|y|c|x|v|d|\/|space|shift\+z|backspace|delete|home|end|arrow\w+|shift\+arrow\w+)|alt\+arrow\w+|shift\+alt\+f|f2|f8|shift\+f8|f12)$/;
 
 export function set_chords(chords) {
@@ -204,6 +206,9 @@ export function listen(on_key, on_text, on_paste, on_resize, on_drop, on_zoom, o
   window.addEventListener("keydown", (e) => {
     if (e.isComposing || ["Control", "Shift", "Alt", "Meta"].includes(e.key)) return;
     const chord = chordOf(e);
+    // The explorer has keys of its own (see tree_listen): there, Ctrl+Z undoes a deletion and
+    // F2 renames what is pointed at, and neither is also the editor's.
+    if (TREE_KEYS.has(chord) && e.target.closest?.(".tree.files") && !e.target.matches?.("input")) return;
     const inTerminal = !!e.target.closest?.("runes-terminal");
     if (inTerminal && !THROUGH_TERMINAL.test(chord)) return;
     // A drawing has keys of its own (tools, undo, the clipboard); the rest of the editor's
@@ -1288,9 +1293,17 @@ class TerminalView extends Element {
     };
     size();
     if (fresh) {
-      host.term.onData(id, (data) => term.write(data));
+      // What the terminal has printed since the line being typed began: a line that was
+      // typed and never shown (a password) is told from a command by it.
+      host.term.onData(id, (data) => { term.write(data); if ((session.seen ?? "").length < 20000) session.seen = (session.seen ?? "") + data; });
       await host.term.create(id, this.getAttribute("shell") || "", this.getAttribute("cwd") || "", term.cols, term.rows);
-      term.onData((data) => { host.term.write(id, data); typed(session, id, data); });
+      term.onData((data) => {
+        // Asked before the keys are sent on, so the answer is about the moment before Enter:
+        // whether the shell itself was waiting, or a program it runs (git asking for a password, say).
+        const waiting = data.includes("\r") && (session.line ?? "").trim() ? Promise.resolve(host.term.atPrompt?.(id)).catch(() => null) : null;
+        host.term.write(id, data);
+        typed(session, id, data, waiting);
+      });
     }
     this.resizer?.disconnect();
     this.resizer = new ResizeObserver(size);
@@ -1310,17 +1323,29 @@ let onCommand = () => {};
  * sees keys, not the shell: a command recalled from history or finished by Tab is missed,
  * and the name then stays what it was.
  */
-function typed(session, id, data) {
+function typed(session, id, data, waiting) {
   if (data.length > 1 && data[0] === "\x1b") { session.recalled = true; return; }
   for (const ch of data) {
     if (ch === "\r") {
-      const line = (session.line ?? "").trim();
-      if (line && !session.recalled) onCommand(id, line);
-      session.line = ""; session.recalled = false;
+      const line = (session.line ?? "").trim(), shown = printed(session.seen ?? "");
+      const recalled = session.recalled;
+      session.line = ""; session.recalled = false; session.seen = "";
+      if (!line || recalled) continue;
+      // Never a name: anything that reads as a secret; what was typed and not shown (a
+      // password); and what was typed while a program the shell started had the terminal
+      // (git asking who you are, say), which the shell knows where the system can tell it.
+      const name = nameFor(line);
+      if (!name || !wasShown(line, shown)) continue;
+      Promise.resolve(waiting).then((atPrompt) => { if (atPrompt !== false) onCommand(id, name); });
     } else if (ch === "\x7f") session.line = (session.line ?? "").slice(0, -1);
     else if (ch === "\x03" || ch === "\x15") { session.line = ""; session.recalled = false; }
     else if (ch === "\t") session.recalled = true;
-    else if (ch >= " ") session.line = (session.line ?? "") + ch;
+    else if (ch >= " ") {
+      // What counts as the line being shown is what is printed from its first character on:
+      // not the question before it, which may well hold the letters of a short password.
+      if (!(session.line ?? "")) session.seen = "";
+      session.line = (session.line ?? "") + ch;
+    }
   }
 }
 export function watch(on_command, on_focus, on_exit) {
@@ -1572,7 +1597,20 @@ export function files_remove(paths, done) {
   host.filesRemove(paths.toArray()).then((gone) => done(toList(gone), ""), (e) => done(toList([]), message(e)));
 }
 
-const TREE_KEYS = new Set(["ctrl+c", "ctrl+x", "ctrl+v", "delete", "f2", "ctrl+a", "escape"]);
+const TREE_KEYS = new Set(["ctrl+c", "ctrl+x", "ctrl+v", "delete", "f2", "ctrl+a", "escape", "ctrl+z"]);
+/** Puts back what the explorer last deleted: `done(paths put back, how many could not be, problem)`. */
+export function file_undo(done) {
+  if (!host.fileUndo) return done(toList([]), 0, "Undoing a deletion needs the desktop app.");
+  host.fileUndo().then((r) => done(toList(r.restored ?? []), (r.kept ?? []).length, ""), (e) => done(toList([]), 0, message(e)));
+}
+/** Gives the keyboard to the explorer itself: what had it there has just been deleted. */
+export function focus_tree() {
+  // A moment later: the question that was asked hands the keyboard back to the editor as it closes.
+  setTimeout(() => {
+    if (document.activeElement?.matches?.("input:not([type=checkbox]), textarea:not(#runes-input), select") || document.activeElement?.closest?.("runes-terminal, runes-canvas")) return;
+    document.querySelector(".tree.files")?.focus({ preventScroll: true });
+  }, 90);
+}
 /**
  * The explorer's own keys and its dragging. `on_key(chord)` for a key pressed while a file or
  * folder of the tree has the keyboard; `on_move(sources, folder, copy)` when files of the tree
@@ -1591,7 +1629,7 @@ export function tree_listen(on_key, on_move, on_import) {
   };
   const unmark = () => { for (const el of document.querySelectorAll(".drop-into")) el.classList.remove("drop-into"); };
   document.addEventListener("keydown", (e) => {
-    if (!e.target.closest?.(".tree.files .node") || e.target.matches("input")) return;
+    if (!e.target.closest?.(".tree.files") || e.target.matches("input")) return;
     const chord = chordOf(e);
     if (!TREE_KEYS.has(chord)) return;
     e.preventDefault();
@@ -1692,7 +1730,9 @@ function ask(kind, path, line, col, done, more = {}) {
   if (kind !== "command" && kind !== "applyAction") flush(path);
   const id = ++requests;
   waiting.set(id, done);
-  setTimeout(() => waiting.delete(id), 8000);
+  // A server's first answers can take a while (it is still reading the project): they are
+  // waited for. An answer about a place the cursor has since left is dropped where it lands.
+  setTimeout(() => waiting.delete(id), 45000);
   host.ext.send({ type: "request", id, kind, path, line, col, ...more });
 }
 
@@ -1797,12 +1837,86 @@ export function rank_items(items, line, col) {
 }
 /** Keeps the chosen suggestion in sight as the choice moves down a long list. */
 export function suggest_reveal() {
-  requestAnimationFrame(() => document.querySelector(".suggest .option.on")?.scrollIntoView({ block: "nearest" }));
+  // Only the list itself is moved. Asking the browser to bring the option into view would
+  // scroll the editor too, sideways as well: the line numbers went out of sight with it.
+  requestAnimationFrame(() => {
+    const on = document.querySelector(".suggest .option.on"), list = on?.closest(".suggest");
+    if (!list) return;
+    const a = on.getBoundingClientRect(), b = list.getBoundingClientRect();
+    if (a.top < b.top + 4) list.scrollTop -= b.top + 4 - a.top;
+    else if (a.bottom > b.bottom - 4) list.scrollTop += a.bottom - (b.bottom - 4);
+  });
 }
+
+/**
+ * Something that floats over the text at a place in it: the suggestions, a hover, the help
+ * for a call. It is placed against the window, not inside the text, so that however wide or
+ * tall it is, it adds nothing to what the editor can be scrolled to: before this, a wide
+ * list of suggestions gave the editor a sideways scroll bar and broke the wrapping of lines.
+ * `x` is in characters and `y` in pixels, both from the top left of the text; `h` is the
+ * height of a line; `side="above"` puts it over its line and not under.
+ */
+class Float extends (globalThis.HTMLElement ?? class {}) {
+  static observedAttributes = ["x", "y", "h", "side"];
+  connectedCallback() {
+    this.scroller = this.closest(".scroller");
+    this.again = () => this.place();
+    this.scroller?.addEventListener("scroll", this.again, { passive: true });
+    window.addEventListener("resize", this.again);
+    this.sizes = new ResizeObserver(this.again);
+    this.sizes.observe(this);
+    if (this.scroller) this.sizes.observe(this.scroller);
+    this.place();
+  }
+  disconnectedCallback() {
+    this.scroller?.removeEventListener("scroll", this.again);
+    window.removeEventListener("resize", this.again);
+    this.sizes?.disconnect();
+  }
+  attributeChangedCallback() { if (this.isConnected) this.place(); }
+  place() {
+    const scroller = this.scroller;
+    if (!scroller) return;
+    const box = scroller.getBoundingClientRect();
+    const num = (name) => Number(this.getAttribute(name)) || 0;
+    const width = this.offsetWidth, height = this.offsetHeight, row = num("h");
+    const line = box.top + num("y") - scroller.scrollTop;
+    // Kept within the window: against its right edge when it would run past it.
+    const left = Math.max(box.left + 4, Math.min(box.left + num("x") * (charWidth || measure()) - scroller.scrollLeft, window.innerWidth - 8 - width));
+    const below = line + row + 4, above = line - 4 - height;
+    const over = this.getAttribute("side") === "above" ? above >= 4 || below + height > window.innerHeight - 4 : below + height > window.innerHeight - 8 && above >= 4;
+    this.style.left = Math.round(left) + "px";
+    this.style.top = Math.round(over ? Math.max(4, above) : below) + "px";
+    this.classList.toggle("over", over);
+    // Its line has been scrolled out of the editor: it goes with it.
+    this.style.visibility = line + row < box.top || line > box.bottom ? "hidden" : "";
+  }
+}
+if (inPage) customElements.define("runes-float", Float);
 /** A hover, as Markdown. */
 export function lsp_hover(path, line, col, done) {
   ask("hover", path, line, col, (text) => text && done(String(text).slice(0, 12000)));
 }
+/** What the call at a place expects: `done(found, label, from, to, about, doc, index, count)`. */
+export function lsp_signature(path, line, col, ch, open, done) {
+  if (!host.ext) return;
+  ask("signature", path, line, col, (s) => (s ? done(true, s.label, s.from, s.to, s.about, s.doc, s.index, s.count) : done(false, "", 0, 0, "", "", 0, 0)), { ch, open });
+}
+/**
+ * The named things of a file, from a language server: `done(known, [[name, kind, line, last line, depth]])`.
+ * Asked once the text has rested; an answer overtaken by a newer question is dropped.
+ */
+let symbolTimer = 0, symbolTurn = 0;
+export function lsp_symbols_soon(path, done) {
+  clearTimeout(symbolTimer);
+  const turn = ++symbolTurn;
+  if (!host.ext) return;
+  symbolTimer = setTimeout(() => {
+    ask("symbols", path, 0, 0, (found) => { if (turn === symbolTurn) done(!!found, toList((found ?? []).map((s) => [s.name, s.kind, s.line, s.endLine, s.depth]))); });
+  }, 400);
+}
+/** What a line is inside, going by indentation alone: a list of [name, line]. See scopes_at in the layout. */
+export const scopes_at = (key, version, lines, line) => toList(Layout.scopes_at(key, version, lines, line));
 export function lsp_definition(path, line, col, done) {
   ask("definition", path, line, col, (at) => at && done(at.path, at.line, at.col));
 }

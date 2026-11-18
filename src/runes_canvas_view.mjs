@@ -10,6 +10,7 @@ import {
   parse, serialize, cleanElement, cleanLink, freshId, box, around, hits, elementAt, retie, simplify, fit,
   rng, outline, cleanOutline, strokePath, arrowHead, wrap,
   nodes, middles, middle, bendAdded, bendMoved, bendRemoved, bendIsStraight, shifted, strokeCurve, approach,
+  cleanSize, SMALLEST, LARGEST, withGroups, isGroup, grouped, ungrouped, regrouped,
 } from "./runes_canvas.mjs";
 
 const NS = "http://www.w3.org/2000/svg";
@@ -52,6 +53,9 @@ const SIGNS = {
   minus: "<path d='M5 12h14'/>", plus: "<path d='M12 5v14M5 12h14'/>",
   fit: "<path d='M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5'/>",
   grid: "<path d='M4 4h16v16H4zM4 9.300h16M4 14.700h16M9.300 4v16M14.700 4v16'/>",
+  magnet: "<path d='M6 4v8a6 6 0 0 0 12 0V4h-4v8a2 2 0 0 1-4 0V4zM6 8h4M14 8h4'/>",
+  group: "<rect x='7' y='7' width='10' height='10' rx='1.500'/><path d='M4 7V4h3M17 4h3v3M20 17v3h-3M7 20H4v-3'/>",
+  ungroup: "<rect x='4' y='4' width='9' height='9' rx='1.500'/><rect x='11' y='11' width='9' height='9' rx='1.500'/>",
   front: "<path d='M12 19V5M6 11l6-6 6 6'/>", back: "<path d='M12 5v14M6 13l6 6 6-6'/>",
   copy: "<rect x='8' y='8' width='12' height='12' rx='2'/><path d='M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3'/>",
   trash: "<path d='M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13'/>",
@@ -71,9 +75,16 @@ const KEYS = [
   ["1 – 8, or the letter on a tool", "pick a tool"], ["Double click", "write: on the board, in a shape, on an arrow"], ["Pull the middle of a line or arrow", "bends it there; pull again between two points for another bend. Double click a bend to take it out"], ["Drag an arrow onto a shape", "ties it there; it follows when the shape moves"],
   ["Space + drag, or the wheel", "move the board"], ["Ctrl + wheel", "zoom"], ["Shift while drawing", "squares, circles, straight angles"],
   ["Ctrl + click on a linked element", "open the file it points to"], ["Ctrl+D", "duplicate"], ["Ctrl+Z, Ctrl+Shift+Z", "undo, redo"],
+  ["Ctrl+G, Ctrl+Shift+G", "group what is chosen into one thing; take a group apart again"], ["Alt + click", "choose one thing inside a group"],
+  ["M", "lines and arrows stick to shapes, or do not. Alt while dragging: not this once"], ["Pull the corner of writing", "makes it larger or smaller"],
   ["Ctrl+] and Ctrl+[", "bring forward, send back"], ["Arrow keys", "nudge (Shift: further)"], ["Shift+1", "fit the drawing to the window"], ["Delete", "delete"],
 ];
 const GRID = 20;
+// What a person has chosen for every board, kept between sessions: whether lines and arrows
+// stick to the shapes they touch. (Nothing about a drawing: that is all in its file.)
+const prefs = { sticks: true };
+try { Object.assign(prefs, JSON.parse(globalThis.localStorage?.getItem("runes-canvas") ?? "{}")); } catch {}
+const keep = () => { try { globalThis.localStorage?.setItem("runes-canvas", JSON.stringify(prefs)); } catch {} };
 const views = new Map();
 
 // Outside a page (the unit tests load this file under Node) there is nothing to extend, and nothing is defined.
@@ -213,7 +224,29 @@ class RuneCanvas extends Base {
     this.changed();
   }
   chosen() { return this.elements.filter((e) => this.selected.has(e.id)); }
-  select(ids) { this.selected = new Set(ids); this.chrome(); this.paint(); }
+  /** Chooses elements. What is grouped is chosen whole, unless `inside` asks for the very things named. */
+  select(ids, inside = false) { this.selected = inside ? new Set(ids) : withGroups(this.elements, ids); this.chrome(); this.paint(); }
+  /** Makes what is chosen one group, to be chosen, moved and resized as one thing. */
+  group() {
+    if (this.locked || this.selected.size < 2 || isGroup(this.elements, this.selected)) return;
+    const taken = new Set(this.elements.flatMap((e) => [e.id, ...(e.groups ?? [])]));
+    const ids = this.selected;
+    this.act((all) => grouped(all, ids, freshId(taken)));
+  }
+  /** Takes the chosen group apart: its parts are separate things again, all still chosen. */
+  ungroup() {
+    if (this.locked || !this.chosen().some((e) => e.groups?.length)) return;
+    const ids = this.selected;
+    this.act((all) => ungrouped(all, ids));
+  }
+  /** Makes the chosen writing larger or smaller; with nothing chosen, the writing that comes next. */
+  scaleText(factor) {
+    const step = (size) => { const next = cleanSize(size * factor); return next === size ? cleanSize(size + Math.sign(factor - 1)) : next; };
+    if (!this.selected.size) { this.style_.size = step(this.style_.size); return this.chrome(); }
+    this.act((all) => all.map((e) => (this.selected.has(e.id) && (e.type === "text" || e.text) ? { ...e, size: step(e.size) } : e)));
+  }
+  /** A shape a line's end would stick to at a point: none when sticking is off, or Alt is held. */
+  tie(x, y, except, e) { return prefs.sticks && !e?.altKey ? this.shapeAt(x, y, except) : null; }
   /** Sets something about how the chosen elements look; with nothing chosen, about what is drawn next. */
   setStyle(key, value) {
     this.style_[key] = value;
@@ -230,8 +263,9 @@ class RuneCanvas extends Base {
   copies(items, dx, dy) {
     const taken = new Set(this.elements.map((e) => e.id)), names = new Map();
     for (const item of items) { const id = freshId(taken); taken.add(id); names.set(item.id, id); }
-    return items.map((item) => ({ ...shifted(item, dx, dy), id: names.get(item.id), seed: Math.floor(Math.random() * 2 ** 31),
-      ...(item.from !== undefined ? { from: names.get(item.from) ?? "", to: names.get(item.to) ?? "" } : {}) }));
+    for (const item of this.elements) for (const g of item.groups ?? []) taken.add(g);
+    return regrouped(items.map((item) => ({ ...shifted(item, dx, dy), id: names.get(item.id), seed: Math.floor(Math.random() * 2 ** 31),
+      ...(item.from !== undefined ? { from: names.get(item.from) ?? "", to: names.get(item.to) ?? "" } : {}) })), taken);
   }
   duplicate() {
     const made = this.copies(this.chosen(), GRID, GRID);
@@ -337,8 +371,11 @@ class RuneCanvas extends Base {
       const hit = elementAt(this.elements, x, y, near, this.measure);
       if (hit && (e.ctrlKey || e.metaKey) && hit.link) return this.follow(hit.link);
       if (hit) {
-        if (e.shiftKey) { const next = new Set(this.selected); if (next.has(hit.id)) next.delete(hit.id); else next.add(hit.id); this.select(next); }
-        else if (!this.selected.has(hit.id)) this.select([hit.id]);
+        // A click on something grouped chooses the whole group; with Alt, that one thing inside it.
+        const whole = e.altKey ? new Set([hit.id]) : withGroups(this.elements, [hit.id]);
+        if (e.shiftKey) { const next = new Set(this.selected); const had = next.has(hit.id); for (const id of whole) { if (had) next.delete(id); else next.add(id); } this.select(next, true); }
+        else if (e.altKey) this.select(whole, true);
+        else if (!this.selected.has(hit.id)) this.select(whole);
         this.drag = { kind: "move", x, y, before: this.elements, moved: false };
       } else {
         if (!e.shiftKey) this.select([]);
@@ -354,7 +391,7 @@ class RuneCanvas extends Base {
     if (this.tool === "arrow" || this.tool === "line") {
       base.head = this.tool === "arrow" ? this.style_.head : "none";
       base.to = "";
-      const under = this.shapeAt(x, y);
+      const under = this.tie(x, y, undefined, e);
       base.from = under?.id ?? "";
     }
     const made = cleanElement({ ...base, ...(this.tool === "draw" ? { points: [[0, 0], [0.1, 0.1]] } : {}) });
@@ -416,7 +453,9 @@ class RuneCanvas extends Base {
       const px = this.snap(x, e), py = this.snap(y, e);
       if (h.includes("w")) x0 = Math.min(px, x1 - 4); if (h.includes("e")) x1 = Math.max(px, x0 + 4);
       if (h.includes("n")) y0 = Math.min(py, y1 - 4); if (h.includes("s")) y1 = Math.max(py, y0 + 4);
-      if (e.shiftKey && from.w && from.h && h.length === 2) {
+      // Writing keeps its shape: it only ever grows or shrinks, whichever way its corner is pulled.
+      const lettering = d.before.filter((k) => this.selected.has(k.id)).every((k) => k.type === "text");
+      if ((e.shiftKey || lettering) && from.w && from.h && h.length === 2) {
         const k = Math.max((x1 - x0) / from.w, (y1 - y0) / from.h);
         if (h.includes("w")) x0 = x1 - from.w * k; else x1 = x0 + from.w * k;
         if (h.includes("n")) y0 = y1 - from.h * k; else y1 = y0 + from.h * k;
@@ -435,7 +474,7 @@ class RuneCanvas extends Base {
     }
     if (d.kind === "end") {
       const item = d.item;
-      const under = this.shapeAt(x, y, item.id);
+      const under = this.tie(x, y, item.id, e);
       const px = under ? x : this.snap(x, e), py = under ? y : this.snap(y, e);
       const next = d.which === "start" ? { ...item, x: px, y: py, w: item.x + item.w - px, h: item.y + item.h - py, from: under?.id ?? "" }
         : { ...item, w: px - item.x, h: py - item.y, to: under?.id ?? "" };
@@ -458,7 +497,7 @@ class RuneCanvas extends Base {
           } else { const side = Math.max(Math.abs(w), Math.abs(h)); w = Math.sign(w || 1) * side; h = Math.sign(h || 1) * side; }
         }
         item = { ...item, w, h };
-        if (item.type === "arrow" || item.type === "line") { const under = this.shapeAt(x, y, item.id); d.under = under && under.id !== item.from ? under.id : ""; }
+        if (item.type === "arrow" || item.type === "line") { const under = this.tie(x, y, item.id, e); d.under = under && under.id !== item.from ? under.id : ""; }
       }
       d.item = item;
       this.replace(item);
@@ -477,7 +516,7 @@ class RuneCanvas extends Base {
     if (!d) return;
     const commit = (next) => { this.elements = d.before; this.act(() => next); };
     if (d.kind === "pan") { if (this.path) views.set(this.path, { ...this.view }); return; }
-    if (d.kind === "marquee") { this.chrome(); return this.paint(); }
+    if (d.kind === "marquee") { this.selected = withGroups(this.elements, this.selected); this.chrome(); return this.paint(); }
     if (d.kind === "move") { if (d.moved) commit(this.elements); return; }
     if (d.kind === "resize") return commit(this.elements);
     if (d.kind === "erase") {
@@ -609,6 +648,7 @@ class RuneCanvas extends Base {
       if (key === "y") { this.redo(); return done(); }
       if (key === "a") { this.pick("select"); this.select(this.elements.map((k) => k.id)); return done(); }
       if (key === "d") { this.duplicate(); return done(); }
+      if (key === "g") { e.shiftKey ? this.ungroup() : this.group(); return done(); }
       if (key === "c" && this.selected.size) { this.copy(false); return done(); }
       if (key === "x" && this.selected.size) { this.copy(true); return done(); }
       if (key === "v") { this.paste(); return done(); }
@@ -627,6 +667,7 @@ class RuneCanvas extends Base {
     if (key === "Escape") { if (this.drag) { if (this.drag.before) this.elements = this.drag.before; this.drag = null; } this.help = false; this.pick("select"); this.select([]); return done(); }
     if (key === "Enter") { const one = this.chosen(); if (one.length === 1 && one[0].type !== "draw") this.writeIn(one[0]); return done(); }
     if (key === "g") { this.grid = !this.grid; this.chrome(); this.paint(); return done(); }
+    if (key === "m") { this.stick(); return done(); }
     if (key === "?") { this.help = !this.help; this.chrome(); return done(); }
     if (key === "Tab") {
       // Tab goes from one element to the next, so the board can be gone through without a pointer.
@@ -641,6 +682,12 @@ class RuneCanvas extends Base {
       this.nudge(key === "ArrowLeft" ? -by : key === "ArrowRight" ? by : 0, key === "ArrowUp" ? -by : key === "ArrowDown" ? by : 0);
       return done();
     }
+  }
+  /** Turns on or off whether lines and arrows stick to the shapes they touch. */
+  stick() {
+    prefs.sticks = !prefs.sticks; keep();
+    this.tell(prefs.sticks ? "Lines and arrows stick to the shapes they touch." : "Lines and arrows go where they are put, and stick to nothing.");
+    this.chrome(); this.paint();
   }
   say(item) { this.note.textContent = (item.type === "text" ? "Text" : item.type[0].toUpperCase() + item.type.slice(1)) + (item.text ? ": " + item.text.slice(0, 80) : "") + (item.link ? ", linked to " + item.link : ""); }
 
@@ -756,10 +803,12 @@ class RuneCanvas extends Base {
     for (const item of items.length > 1 ? items : []) { const b = screen(box(item, this.measure)); over.append(svg("rect", { class: "rc-each", x: b.x - 2, y: b.y - 2, width: b.w + 4, height: b.h + 4 })); }
     const b = screen(around(items, this.measure));
     over.append(svg("rect", { class: "rc-frame", x: b.x - 5, y: b.y - 5, width: b.w + 10, height: b.h + 10, rx: 3 }));
-    if (this.locked || items.every((e) => e.type === "text")) return;
+    if (this.locked) return;
+    // Writing alone has corners only: pulling one makes the writing larger or smaller.
+    const lettering = items.every((e) => e.type === "text");
     const spots = { nw: [0, 0], n: [0.5, 0], ne: [1, 0], e: [1, 0.5], se: [1, 1], s: [0.5, 1], sw: [0, 1], w: [0, 0.5] };
     for (const [name, [fx, fy]] of Object.entries(spots)) {
-      if (name.length === 1 && (fx === 0.5 ? b.w : b.h) < 34) continue;
+      if (name.length === 1 && (lettering || (fx === 0.5 ? b.w : b.h) < 34)) continue;
       const node = svg("rect", { class: "rc-handle", "data-handle": name, x: b.x - 5 + (b.w + 10) * fx - 4.5, y: b.y - 5 + (b.h + 10) * fy - 4.5, width: 9, height: 9, rx: 2 });
       node.style.cursor = { nw: "nwse-resize", se: "nwse-resize", ne: "nesw-resize", sw: "nesw-resize", n: "ns-resize", s: "ns-resize", e: "ew-resize", w: "ew-resize" }[name];
       over.append(node);
@@ -802,7 +851,15 @@ class RuneCanvas extends Base {
       if (shape || any("line", "arrow")) rows.push(row("Hand", [choice("sketch", true, "Drawn by hand", "Sketch"), choice("sketch", false, "Exact", "Clean")]));
       if (any("rect")) rows.push(row("Corners", [choice("round", true, "Round corners", "Round"), choice("round", false, "Sharp corners", "Sharp")]));
       if (any("arrow", "line")) rows.push(row("Ends", HEADS.map((h, i) => choice("head", h, ["No arrowheads", "An arrowhead at the end", "Arrowheads at both ends"][i], ["─", "→", "↔"][i]))));
-      if (lettered) rows.push(row("Text", SIZES.map((s, i) => choice("size", s, ["Small", "Medium", "Large", "Extra large"][i] + " text", ["S", "M", "L", "XL"][i]))));
+      if (lettered) {
+        const size = of("size");
+        rows.push(row("Text", [
+          ...SIZES.map((s, i) => choice("size", s, ["Small", "Medium", "Large", "Extra large"][i] + " text", ["S", "M", "L", "XL"][i])),
+          this.button("minus", "Smaller text", () => { this.scaleText(1 / 1.15); this.focus(); }, { disabled: size !== null && size <= SMALLEST }),
+          el("span", { class: "rc-size", title: "The size of the writing", "aria-label": "Text size " + (size ?? "mixed"), text: size === null ? "–" : String(size) }),
+          this.button("plus", "Larger text", () => { this.scaleText(1.15); this.focus(); }, { disabled: size !== null && size >= LARGEST }),
+        ]));
+      }
       if (items.length === 1) {
         const field = el("input", { class: "rc-field", type: "text", value: items[0].link, placeholder: "src/file.bea:12", spellcheck: "false", "aria-label": "A file of the project this element points to" });
         const set = () => { const link = cleanLink(field.value); field.value = link; if (link !== items[0].link) this.act((all) => all.map((e) => (e.id === items[0].id ? { ...e, link } : e))); };
@@ -810,6 +867,14 @@ class RuneCanvas extends Base {
         field.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Enter") { set(); this.focus(); } if (e.key === "Escape") { field.value = items[0].link; this.focus(); } });
         rows.push(row("Link", [field, items[0].link ? this.button("link", "Open " + items[0].link, () => this.follow(items[0].link)) : null]));
       }
+      // Several things chosen can be made one; one group can be taken apart again. This is
+      // about what is chosen, so it lives here with the rest of what is, not among the tools.
+      const one = isGroup(this.elements, this.selected), parts = items.some((e) => e.groups?.length);
+      if (items.length > 1 || parts) rows.push(row("Group", [
+        this.button("group", one ? "These are one group already" : "Group: make these one thing", () => { this.group(); this.focus(); }, { key: "Ctrl+G", disabled: items.length < 2 || one }),
+        this.button("ungroup", "Ungroup: take the group apart", () => { this.ungroup(); this.focus(); }, { key: "Ctrl+Shift+G", disabled: !parts }),
+        one ? el("span", { class: "rc-size", text: items.length + " in the group" }) : null,
+      ]));
       if (items.length) rows.push(row("Layer", [
         this.button("front", "Bring to the front", () => { this.order(true); this.focus(); }, { key: "Ctrl+]" }), this.button("back", "Send to the back", () => { this.order(false); this.focus(); }, { key: "Ctrl+[" }),
         this.button("copy", "Duplicate", () => { this.duplicate(); this.focus(); }, { key: "Ctrl+D" }), this.button("trash", "Delete", () => { this.remove(); this.focus(); }, { key: "Delete" }),
@@ -823,7 +888,10 @@ class RuneCanvas extends Base {
       el("div", { class: "rc-group" }, [this.button("minus", "Zoom out", () => { this.zoomTo(this.view.k / 1.2); this.focus(); }, { key: "Ctrl+-" }), percent, this.button("plus", "Zoom in", () => { this.zoomTo(this.view.k * 1.2); this.focus(); }, { key: "Ctrl+=" }),
         this.button("fit", "Fit the drawing to the window", () => { this.zoomFit(); this.focus(); }, { key: "Shift+1" })]),
       locked ? null : el("div", { class: "rc-group" }, [this.button("undo", "Undo", () => { this.undo(); this.focus(); }, { key: "Ctrl+Z", disabled: !this.undos.length }), this.button("redo", "Redo", () => { this.redo(); this.focus(); }, { key: "Ctrl+Shift+Z", disabled: !this.redos.length })]),
-      el("div", { class: "rc-group" }, [this.button("grid", "Grid: things snap to it", () => { this.grid = !this.grid; this.chrome(); this.paint(); this.focus(); }, { on: this.grid, key: "G" })]),
+      el("div", { class: "rc-group" }, [
+        this.button("grid", "Grid: things snap to it", () => { this.grid = !this.grid; this.chrome(); this.paint(); this.focus(); }, { on: this.grid, key: "G" }),
+        locked ? null : this.button("magnet", prefs.sticks ? "Lines and arrows stick to shapes. Click to stop that" : "Lines and arrows stick to nothing. Click to have them stick to shapes", () => { this.stick(); this.focus(); }, { on: prefs.sticks, key: "M" }),
+      ]),
     ].filter(Boolean));
     this.foot.hidden = !!this.problem;
 

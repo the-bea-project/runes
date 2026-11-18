@@ -1,13 +1,13 @@
 {
   "name": "runes",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Runes: an elegant, minimal code editor, extended by VS Code extensions",
   "main": "shell/main.cjs",
   "scripts": {
     "build": "bea build && node scripts/build.mjs",
     "start": "electron .",
     "web": "node scripts/serve.mjs",
-    "test": "node scripts/bea-tests.mjs && node --test shell/shell.test.cjs shell/ssh.test.cjs test/canvas.test.mjs test/layout.test.mjs test/vscode-api.test.cjs && node e2e/exthost.test.mjs",
+    "test": "node scripts/bea-tests.mjs && node --test shell/shell.test.cjs shell/ssh.test.cjs test/canvas.test.mjs test/layout.test.mjs test/vscode-api.test.cjs test/shell-parts.test.cjs test/tables.test.mjs && node e2e/exthost.test.mjs",
     "test:app": "node e2e/app.test.cjs",
     "package": "node scripts/release.mjs --dir",
     "release": "node scripts/release.mjs"

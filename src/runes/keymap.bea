@@ -54,7 +54,12 @@ pub const defaults = [
   Binding("ctrl+shift+l", "editor.action.selectHighlights"),
   Binding("ctrl+alt+arrowup", "editor.action.insertCursorAbove"),
   Binding("ctrl+alt+arrowdown", "editor.action.insertCursorBelow"),
-  Binding("shift+alt+arrowdown", "editor.action.copyLinesDownAction"),
+  Binding("shift+alt+arrowup", "editor.action.insertCursorAbove"),
+  Binding("shift+alt+arrowdown", "editor.action.insertCursorBelow"),
+  Binding("ctrl+shift+alt+arrowdown", "editor.action.copyLinesDownAction"),
+  Binding("ctrl+]", "editor.action.indentLines"),
+  Binding("ctrl+[", "editor.action.outdentLines"),
+  Binding("ctrl+shift+k", "editor.action.deleteLines"),
   Binding("alt+arrowup", "editor.action.moveLinesUpAction"),
   Binding("alt+arrowdown", "editor.action.moveLinesDownAction"),
   Binding("ctrl+z", "undo"),
@@ -77,6 +82,7 @@ pub const defaults = [
   Binding("alt+z", "editor.action.toggleWordWrap"),
   Binding("ctrl+shift+\\", "editor.action.jumpToBracket"),
   Binding("ctrl+alt+r", "runes.reload"),
+  Binding("f2", "renameFile"),
 ]
 
 /// Reads a keybindings.json: a list of `{ "key": …, "command": … }`. A command that

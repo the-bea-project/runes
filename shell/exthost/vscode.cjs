@@ -502,7 +502,8 @@ function create(host, extension) {
   };
 
   const folders = () => (host.root ? [{ uri: URI.file(host.root), name: path.basename(host.root), index: 0 }] : undefined);
-  const watcher = () => ({
+  // Real when the host can follow the disk (see host.watch); otherwise a watcher that never fires.
+  const watcher = (pattern, ignoreCreate, ignoreChange, ignoreDelete) => host.watch?.(pattern, ignoreCreate, ignoreChange, ignoreDelete) ?? ({
     onDidCreate: event("fsCreate"), onDidChange: event("fsChange"), onDidDelete: event("fsDelete"),
     ignoreCreateEvents: false, ignoreChangeEvents: false, ignoreDeleteEvents: false, dispose() {},
   });
@@ -661,6 +662,8 @@ function create(host, extension) {
       registerHoverProvider: register("hover"),
       registerDefinitionProvider: register("definition"),
       registerDocumentFormattingEditProvider: register("format"),
+      registerSignatureHelpProvider: register("signature"),
+      registerDocumentSymbolProvider: register("symbols"),
     }, {
       // Every other register*Provider is accepted and kept, ready for when Runes asks for it.
       get: (t, k) => (k in t ? t[k] : typeof k === "string" && k.startsWith("register") ? (t[k] = register(k)) : hollow("languages")[k]),

@@ -880,7 +880,8 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     // Ctrl+D: the word, then the next occurrence, one press at a time.
     await line(1).click({ position: { x: 4, y: 8 } });
     await K("Control+d");
-    expect((await carets()) === 1 && (await p.locator(".group.focused .sel").count()) === 1, "the first Ctrl+D selects the word");
+    await until("the word selected", async () => (await p.locator(".group.focused .sel").count()) === 1, 3000).catch(() => {});
+    expect((await carets()) === 1 && (await p.locator(".group.focused .sel").count()) === 1, "the first Ctrl+D selects the word: " + (await carets()) + " cursors, " + (await p.locator(".group.focused .sel").count()) + " selections, " + JSON.stringify(await lines()) + " " + (await status()));
     await K("Control+d"); await K("Control+d");
     await until("three selections", async () => (await carets()) === 3, 3000);
     await K("Escape");
@@ -1553,7 +1554,8 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     // As a tab it tiles like any editor: drag it to the right edge.
     const groups = await p.locator(".group").count();
     const tab = p.locator(".group.focused .tab.on");
-    expect((await tab.textContent()).includes("echo $MARK"), "the tab is not named after the last command: " + (await tab.textContent()));
+    // (A name is given a moment after Enter: the shell is asked first whether it was the one being typed to.)
+    await until("the tab named after the last command", async () => ((await tab.textContent()) ?? "").includes("echo $MARK"), 5000).catch(async (e) => { throw new Error(e.message + ": " + (await tab.textContent())); });
     const from = await tab.boundingBox(), area = await p.locator(".group.focused").boundingBox();
     await p.mouse.move(from.x + 20, from.y + 10); await p.mouse.down();
     await p.mouse.move(area.x + area.width - 30, area.y + area.height / 2, { steps: 12 });
@@ -2447,9 +2449,21 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     await K("Control+`");
   });
 
+  // --- 1.3.0 ---------------------------------------------------------------------------------------
+  const tree = (name) => p.locator(".tree.files .node", { has: p.locator(".name", { hasText: new RegExp("^" + name.replace(/\./g, "\\.") + "$") }) });
+  const listed = async (name) => {
+    if (!(await p.locator(".tree.files").count())) { await K("Control+Shift+e"); await p.waitForSelector(".tree.files"); }
+    await until(name + " in the explorer", async () => (await tree(name).count()) > 0, 8000);
+  };
+  const inEditor = async (n = 1) => { await line(n).click({ position: { x: 4, y: 6 } }); await settle(); };
+
+
   await check("canvas: a line bends where its middle is pulled, again between two points, and a bend is taken out", async () => {
     const bent = path.join(project, "bent.rux");
     fs.writeFileSync(bent, JSON.stringify({ rune: "canvas", version: 1, elements: [{ id: "ln", type: "arrow", x: 0, y: 0, w: 300, h: 0, sketch: false }] }));
+    // A file made a moment ago can be opened by name once the explorer has seen it.
+    await listed("bent.rux");
+    await p.waitForTimeout(300);
     await open("bent.rux");
     await p.waitForSelector(".group.focused runes-canvas .rc-el");
     const read = () => JSON.parse(fs.readFileSync(bent, "utf8")).elements[0];
@@ -2488,6 +2502,757 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     await store();
     expect(!("bends" in read()), "a straight line still has bends in the file: " + JSON.stringify(read()));
     fs.rmSync(bent);
+  });
+
+  await check("lines: Ctrl+] and Ctrl+[ move them in and out, Ctrl+Shift+K deletes one, Alt+Shift+Down adds cursors", async () => {
+    await K("Control+Shift+e");
+    fs.writeFileSync(path.join(project, "keys.txt"), "one\ntwo\nthree\nfour\n");
+    await listed("keys.txt");
+    await open("keys.txt");
+    await inEditor(2);
+    await K("Control+]");
+    await until("the line a step in", async () => /^\s+two$/.test((await lines())[1]), 3000);
+    expect((await lines())[0] === "one" && (await lines())[2] === "three", "other lines moved: " + JSON.stringify(await lines()));
+    await K("Control+]"); await K("Control+["); await K("Control+[");
+    await until("the line back where it was", async () => (await lines())[1] === "two", 3000);
+    await K("Control+[");
+    expect((await lines())[1] === "two", "a line at the edge moved further out");
+    await K("Control+Shift+k");
+    await until("the line gone", async () => JSON.stringify((await lines()).slice(0, 3)) === JSON.stringify(["one", "three", "four"]), 3000);
+    expect((await status()).includes("Ln 2"), "the cursor is not on the line that took its place: " + await status());
+    await K("Control+z");
+    await until("undo to bring the line back", async () => (await lines())[1] === "two", 3000);
+    // A cursor on each of the next two lines, and what is typed goes to all three.
+    await K("Control+Home");
+    await K("Alt+Shift+ArrowDown"); await K("Alt+Shift+ArrowDown");
+    await until("three cursors", async () => (await p.locator(".group.focused .caret").count()) === 3, 3000);
+    await p.keyboard.type("> ");
+    await until("the text at every cursor", async () => JSON.stringify((await lines()).slice(0, 4)) === JSON.stringify(["> one", "> two", "> three", "four"]), 3000);
+    await K("Alt+Shift+ArrowUp");
+    expect((await p.locator(".group.focused .caret").count()) === 3, "a cursor was added above the first line");
+    await K("Escape");
+    await save();
+  });
+
+  await check("explorer: F2 renames the file in front, and the file that was clicked, not a folder opened before it", async () => {
+    await open("keys.txt");
+    await inEditor(1);
+    await K("F2");
+    await p.waitForSelector("#runes-naming");
+    expect((await p.locator("#runes-naming").inputValue()) === "keys.txt", "F2 in the editor is about " + await p.locator("#runes-naming").inputValue());
+    await p.locator("#runes-naming").fill("renamed.txt"); await K("Enter");
+    await until("the file renamed, on disk and in its tab", async () => fs.existsSync(path.join(project, "renamed.txt")) && !fs.existsSync(path.join(project, "keys.txt")) && ((await p.locator(".group.focused .tab.on").textContent()) ?? "").includes("renamed.txt"), 5000);
+    // A folder is opened, then a file is clicked: F2 in the explorer is about the file.
+    await unfold("src");
+    await tree("renamed.txt").click();
+    await tree("renamed.txt").focus();
+    await K("F2");
+    await p.waitForSelector("#runes-naming");
+    expect((await p.locator("#runes-naming").inputValue()) === "renamed.txt", "F2 in the explorer is about " + await p.locator("#runes-naming").inputValue());
+    await K("Escape");
+    expect(fs.existsSync(path.join(project, "renamed.txt")), "Escape renamed something");
+  });
+
+  await check("explorer: opening an empty folder leaves every row below it as it was", async () => {
+    fs.mkdirSync(path.join(project, "aaa-empty"));
+    await listed("aaa-empty");
+    // The rows below are remembered as the very elements they are.
+    await p.evaluate(() => { window.__rows = [...document.querySelectorAll(".tree.files .node")].map((n) => [n, n.querySelector(".name").textContent]); });
+    await tree("aaa-empty").click();
+    await until("the folder open", async () => tree("aaa-empty").evaluate((n) => n.classList.contains("open")), 3000);
+    await settle();
+    const moved = await p.evaluate(() => window.__rows.filter(([n, name]) => !n.isConnected || n.querySelector(".name")?.textContent !== name).map(([, name]) => name));
+    expect(moved.length === 0, "rows were drawn afresh: " + moved.join(", "));
+    const running = await p.evaluate(() => document.getAnimations().filter((a) => a.effect?.target?.classList?.contains("children") && a.playState === "running").map((a) => a.effect.target.previousElementSibling?.textContent + " (" + a.effect.target.children.length + " inside)"));
+    expect(running.length === 0, "folders being unfolded again: " + running.join(", "));
+    await tree("aaa-empty").click();
+    await settle();
+    const after = await p.evaluate(() => window.__rows.filter(([n, name]) => !n.isConnected || n.querySelector(".name")?.textContent !== name).length);
+    expect(after === 0, "closing it drew rows afresh");
+    await p.evaluate(() => { delete window.__rows; });
+    fs.rmdirSync(path.join(project, "aaa-empty"));
+  });
+
+  await check("explorer: Ctrl+Z brings back a deleted file and a deleted folder, exactly as they were", async () => {
+    const at = (name) => path.join(project, name);
+    fs.writeFileSync(at("gone.txt"), "do not lose me\n");
+    fs.mkdirSync(at("gonedir/deep"), { recursive: true });
+    fs.writeFileSync(at("gonedir/deep/in.bin"), Buffer.from([0, 1, 2, 250]));
+    await listed("gone.txt"); await listed("gonedir");
+    const agree = async () => { await p.locator(".prompt .button", { hasText: /Move to trash/ }).click(); };
+    const inTree = () => p.waitForFunction(() => document.activeElement?.closest?.(".tree.files"), null, { timeout: 4000 });
+    await tree("renamed.txt").click(); await p.waitForTimeout(450); await tree("renamed.txt").focus();
+    // Whatever earlier checks deleted is brought back first, one deletion to a press, and removed
+    // again by hand: then there is nothing to undo, it says so, and the file being edited is untouched.
+    const before = await lines();
+    const had = new Set(fs.readdirSync(project));
+    let said = "";
+    for (let i = 0; i < 30 && !/no deletion to undo/.test(said); i++) {
+      await p.evaluate(() => document.querySelector(".tree.files").focus());
+      await K("Control+z");
+      await until("an answer", async () => /no deletion to undo|Put back|could not be put back/.test((await p.locator(".toast").textContent().catch(() => "")) ?? ""), 5000).catch(async (e) => { throw new Error(e.message + ": it says " + JSON.stringify(await p.locator(".toast").textContent().catch(() => ""))); });
+      said = (await p.locator(".toast").textContent()) ?? "";
+      if (!/no deletion to undo/.test(said)) await until("that toast to go", async () => !/Put back|could not be put back/.test((await p.locator(".toast").textContent().catch(() => "")) ?? ""), 8000);
+    }
+    expect(/no deletion to undo/.test(said), "Ctrl+Z never ran out of deletions to undo: " + said);
+    for (const name of fs.readdirSync(project)) if (!had.has(name)) fs.rmSync(path.join(project, name), { recursive: true, force: true });
+    expect(JSON.stringify(await lines()) === JSON.stringify(before), "Ctrl+Z in the explorer changed the text of the file in front");
+    // A click on a file opens it, and the keyboard goes to the editor: it is brought back to the row.
+    const pick = async (name) => {
+      await p.evaluate((name) => document.querySelector(`.tree.files .node[data-path$="/${name}"]`).click(), name);
+      await p.waitForTimeout(450);
+      await p.evaluate((name) => document.querySelector(`.tree.files .node[data-path$="/${name}"]`).focus(), name);
+    };
+    await pick("gone.txt");
+    await K("Delete");
+    await p.waitForSelector(".prompt");
+    expect(((await p.locator(".prompt").innerText()) ?? "").includes("Ctrl+Z"), "the question does not say it can be undone");
+    await agree();
+    await until("the file gone", async () => !fs.existsSync(at("gone.txt")) && (await tree("gone.txt").count()) === 0, 5000);
+    await inTree();
+    await K("Control+z");
+    await until("the file back", async () => fs.existsSync(at("gone.txt")) && (await tree("gone.txt").count()) === 1, 5000);
+    expect(fs.readFileSync(at("gone.txt"), "utf8") === "do not lose me\n", "it came back changed");
+    expect(((await p.locator(".toast").textContent()) ?? "").includes("Put back gone.txt"), "it does not say what came back");
+    // A folder, with what is in it; and two deletions are taken back last first.
+    await pick("gonedir");
+    await K("Delete"); await p.waitForSelector(".prompt"); await agree();
+    await until("the folder gone", async () => !fs.existsSync(at("gonedir")), 5000);
+    await inTree();
+    await pick("gone.txt");
+    await K("Delete"); await p.waitForSelector(".prompt"); await agree();
+    await until("the file gone again", async () => !fs.existsSync(at("gone.txt")), 5000);
+    await inTree();
+    await K("Control+z");
+    await until("the file back first", async () => fs.existsSync(at("gone.txt")), 5000);
+    expect(!fs.existsSync(at("gonedir")), "the folder came back before the file deleted after it");
+    await inTree().catch(() => {});
+    await p.evaluate(() => document.querySelector(".tree.files").focus());
+    await K("Control+z");
+    await until("the folder back, with what was in it", async () => fs.existsSync(at("gonedir/deep/in.bin")), 5000);
+    expect([...fs.readFileSync(at("gonedir/deep/in.bin"))].join() === "0,1,2,250", "what was in the folder changed");
+    expect(fs.readdirSync(path.join(profile, "undo")).length === 0, "everything was put back, and something is still held: " + fs.readdirSync(path.join(profile, "undo")).join());
+    // A place that has been taken since: what was there is not overwritten, the deleted one goes
+    // to the trash, and it says so.
+    await pick("gone.txt");
+    await K("Delete"); await p.waitForSelector(".prompt"); await agree();
+    await until("the file gone once more", async () => !fs.existsSync(at("gone.txt")), 5000);
+    fs.writeFileSync(at("gone.txt"), "someone else's now\n");
+    await inTree().catch(() => {});
+    await p.evaluate(() => document.querySelector(".tree.files").focus());
+    await K("Control+z");
+    await until("it to say it could not be put back", async () => /could not be put back.*in the trash/.test((await p.locator(".toast").textContent().catch(() => "")) ?? ""), 5000);
+    expect(fs.readFileSync(at("gone.txt"), "utf8") === "someone else's now\n", "what took its place was overwritten");
+    // The window cannot name what comes back or where: there is nothing left to take back.
+    const more = await p.evaluate(() => window.runesHost.fileUndo("/etc/passwd").then(() => "allowed", (e) => String(e.message)));
+    expect(/no deletion to undo/.test(more), "asked to undo with nothing deleted: " + more);
+    fs.rmSync(at("gonedir"), { recursive: true }); fs.rmSync(at("gone.txt"));
+  });
+
+  // An extension that says what a real language server says: problems at every level, what a
+  // call expects, and the named things of a file.
+  await check("problems: a module that cannot be found is an error; hints are marked and not underlined or listed", async () => {
+    const zip = require("fflate");
+    const manifest = { name: "levels", displayName: "Demo Levels", publisher: "runes-test", version: "0.0.1", engines: { vscode: "*" }, main: "./main.js", activationEvents: ["*"] };
+    const source = `
+      const vscode = require("vscode");
+      exports.activate = (context) => {
+        const found = vscode.languages.createDiagnosticCollection("levels");
+        const look = (document) => {
+          if (!document.fileName.endsWith("levels.md")) return;
+          const at = (line, text, severity, tags) => { const d = new vscode.Diagnostic(new vscode.Range(line, 0, line, 6), text, severity); if (tags) d.tags = tags; return d; };
+          found.set(document.uri, [
+            at(0, 'Import "nowhere" could not be resolved', vscode.DiagnosticSeverity.Information),
+            at(1, "\`unused\` is not accessed", vscode.DiagnosticSeverity.Hint, [vscode.DiagnosticTag.Unnecessary]),
+            at(2, "old() is deprecated", vscode.DiagnosticSeverity.Hint, [vscode.DiagnosticTag.Deprecated]),
+            at(3, "consider a shorter name", vscode.DiagnosticSeverity.Hint),
+            at(4, "be careful here", vscode.DiagnosticSeverity.Warning),
+            at(5, "for your information", vscode.DiagnosticSeverity.Information),
+          ]);
+        };
+        context.subscriptions.push(vscode.workspace.onDidOpenTextDocument(look), vscode.workspace.onDidChangeTextDocument((e) => look(e.document)));
+        vscode.workspace.textDocuments.forEach(look);
+        context.subscriptions.push(vscode.languages.registerSignatureHelpProvider({ language: "markdown" }, {
+          provideSignatureHelp(document, position) {
+            const before = document.lineAt(position.line).text.slice(0, position.character);
+            const open = before.lastIndexOf("shout(");
+            if (open < 0 || before.slice(open).includes(")")) return null;
+            const help = new vscode.SignatureHelp();
+            const one = new vscode.SignatureInformation("shout(text: string, times: number) -> string", new vscode.MarkdownString("Says it **loudly**."));
+            one.parameters = [new vscode.ParameterInformation("text: string", "What to say."), new vscode.ParameterInformation([20, 33], "How many times.")];
+            help.signatures = [one, new vscode.SignatureInformation("shout() -> string")];
+            help.activeSignature = 0;
+            help.activeParameter = Math.min(1, before.slice(open).split(",").length - 1);
+            return help;
+          },
+        }, "(", ","));
+        context.subscriptions.push(vscode.languages.registerDocumentSymbolProvider({ language: "markdown" }, {
+          provideDocumentSymbols(document) {
+            const out = [];
+            for (let i = 0; i < document.lineCount; i++) {
+              const text = document.lineAt(i).text;
+              if (!text.startsWith("# ")) continue;
+              let end = i;
+              while (end + 1 < document.lineCount && !document.lineAt(end + 1).text.startsWith("# ")) end++;
+              const whole = new vscode.Range(i, 0, end, 0);
+              const section = new vscode.DocumentSymbol(text.slice(2), "", vscode.SymbolKind.Class, whole, whole);
+              for (let j = i + 1; j <= end; j++) if (document.lineAt(j).text.startsWith("## ")) section.children.push(new vscode.DocumentSymbol(document.lineAt(j).text.slice(3), "", vscode.SymbolKind.Method, new vscode.Range(j, 0, j + 1, 0), new vscode.Range(j, 0, j, 1)));
+              out.push(section);
+            }
+            return out;
+          },
+        }));
+      };`;
+    const file = path.join(work, "levels.vsix");
+    fs.writeFileSync(file, zip.zipSync({ "extension/package.json": zip.strToU8(JSON.stringify(manifest)), "extension/main.js": zip.strToU8(source) }));
+    fs.writeFileSync(path.join(project, "levels.md"), "import nowhere\nunused = 1\nold()\nlongname\ncareful\ninform\n\n# Shop\n\n## open\ntext\n\n## shut\nmore\n\n# Other\nlast\n");
+    await app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 0 }); });
+    await K("Control+Shift+x");
+    const [chooser] = await Promise.all([p.waitForEvent("filechooser"), p.locator(".side header .button", { hasText: "Install" }).click()]);
+    await chooser.setFiles(file);
+    await until("the install", async () => (await p.locator(".ext b").allTextContents()).includes("Demo Levels"), 20000);
+    await K("Control+Shift+e");
+    await listed("levels.md");
+    await open("levels.md");
+    const marks = () => p.evaluate(() => [...document.querySelectorAll(".group.focused .squiggle")].map((s) => [Math.round(parseFloat(s.style.top) / parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--row"))), [...s.classList].find((c) => c.startsWith("sev-"))]).sort((a, b) => a[0] - b[0]));
+    await until("the six problems", async () => (await marks()).length === 6, 15000);
+    expect(JSON.stringify(await marks()) === JSON.stringify([[0, "sev-1"], [1, "sev-5"], [2, "sev-6"], [3, "sev-4"], [4, "sev-2"], [5, "sev-3"]]), "how the problems are marked: " + JSON.stringify(await marks()));
+    const look = (n) => p.evaluate((n) => { const s = document.querySelector(".group.focused .squiggle.sev-" + n), c = getComputedStyle(s); return { mask: c.webkitMaskImage || c.maskImage, colour: c.backgroundColor, width: s.getBoundingClientRect().width }; }, n);
+    expect((await look(1)).colour === await p.evaluate(() => { const d = document.createElement("i"); d.style.color = getComputedStyle(document.documentElement).getPropertyValue("--error"); document.body.append(d); const c = getComputedStyle(d).color; d.remove(); return c; }), "a module that cannot be found is not in the colour of an error: " + JSON.stringify(await look(1)));
+    expect((await look(5)).mask === "none" && (await look(6)).mask === "none", "code that is not needed, or out of date, is underlined");
+    expect((await look(4)).width < 30, "a plain hint is drawn the whole length of what it is about: " + (await look(4)).width);
+    // Errors, warnings and notes are listed and counted; hints are neither.
+    await K("Control+Shift+m");
+    await until("the list of problems", async () => (await p.locator(".problem").count()) >= 3, 4000);
+    const said = (await p.locator(".problem").allInnerTexts()).join("\n");
+    expect(said.includes("could not be resolved") && said.includes("be careful here") && said.includes("for your information"), "problems listed: " + said);
+    expect(!said.includes("not accessed") && !said.includes("deprecated") && !said.includes("shorter name"), "hints are listed as problems: " + said);
+    expect((await p.locator(".problem.sev-1").count()) === 1, "the missing module is not listed as an error");
+    const counted = (await p.locator(".status .counts").innerText()).replace(/\D+/g, " ").trim();
+    expect(counted === "1 1", "one error and one warning are not what the status bar counts: " + counted);
+    await shot("problem-levels");
+    // F8 goes from problem to problem and passes the hints by.
+    await inEditor(1);
+    await K("F8"); expect((await status()).includes("Ln 5"), "F8 from the first problem went to " + await status());
+    await K("F8"); expect((await status()).includes("Ln 6"), "F8 again went to " + await status());
+    await K("Escape");
+    await K("Control+j");
+  });
+
+  await check("signature help: what the call being written expects, with the argument in hand marked", async () => {
+    await open("levels.md");
+    await inEditor(1);
+    await K("Control+End");
+    await p.keyboard.type("shout(");
+    await p.waitForSelector(".group.focused .signature", { timeout: 8000 }).catch(async (e) => { throw new Error(e.message.split("\n")[0] + ": lines " + JSON.stringify((await lines()).slice(-3)) + ", floats " + JSON.stringify(await p.evaluate(() => [...document.querySelectorAll("runes-float")].map((f) => f.className + " " + f.style.cssText))) + ", keyboard in " + (await p.evaluate(() => document.activeElement?.id + "." + document.activeElement?.className)) + ", status " + (await status())); });
+    const sig = p.locator(".group.focused .signature");
+    expect((await sig.locator(".signature-label").innerText()).includes("shout(text: string, times: number) -> string"), "the signature: " + await sig.innerText());
+    expect((await sig.locator(".signature-arg").innerText()) === "text: string", "the first argument is not the one marked: " + await sig.locator(".signature-arg").innerText());
+    expect((await sig.innerText()).includes("What to say.") && (await sig.innerText()).includes("loudly"), "what the server says of it is not shown: " + await sig.innerText());
+    expect((await sig.locator(".signature-count").innerText()) === "1 of 2", "it does not say there are two signatures");
+    // It stands over the line, inside the window, and adds nothing to what the editor scrolls to.
+    const where = await p.evaluate(() => { const s = document.querySelector(".group.focused .signature").getBoundingClientRect(), c = document.querySelector(".group.focused .caret").getBoundingClientRect(), sc = document.querySelector(".group.focused .scroller"); return { above: s.bottom <= c.top + 1, inside: s.left >= 0 && s.right <= innerWidth && s.top >= 0, wide: sc.scrollWidth - sc.clientWidth, fixed: getComputedStyle(document.querySelector(".group.focused .signature")).position }; });
+    expect(where.above && where.inside && where.fixed === "fixed" && where.wide <= 0, "where the help is: " + JSON.stringify(where));
+    await shot("signature-help");
+    await p.keyboard.type('"hello", ');
+    await until("the second argument to be the one marked", async () => (await sig.locator(".signature-arg").innerText().catch(() => "")) === "times: number", 6000);
+    expect((await sig.innerText()).includes("How many times."), "the second argument is not explained: " + await sig.innerText());
+    // Moving back along the line follows; leaving the call closes it; Escape closes it.
+    for (let i = 0; i < 9; i++) await K("ArrowLeft");
+    await until("the first argument again", async () => (await sig.locator(".signature-arg").innerText().catch(() => "")) === "text: string", 6000);
+    for (let i = 0; i < 9; i++) await K("ArrowRight");
+    await p.keyboard.type("3)");
+    await until("it to close when the call is closed", async () => (await sig.count()) === 0, 6000);
+    await K("Backspace");
+    await commands(); await p.keyboard.type("Trigger Parameter Hints"); await p.waitForTimeout(450); await K("Enter");
+    await p.waitForSelector(".group.focused .signature", { timeout: 6000 });
+    await K("Escape");
+    await until("Escape to close it", async () => (await sig.count()) === 0, 3000);
+    await K("Control+z"); await K("Control+z"); await K("Control+z"); await K("Control+z");
+  });
+
+  await check("breadcrumbs: where the file is and what the cursor is inside, from the server or from the indentation", async () => {
+    await open("levels.md");
+    const crumbs = async () => (await p.locator(".group.focused .crumbs").innerText()).replace(/\s*›\s*/g, " › ").replace(/\n/g, " ").replace(/\s+/g, " ").trim();
+    const names = () => p.locator(".group.focused .crumbs .crumb.symbol").evaluateAll((all) => all.map((c) => c.lastChild.textContent));
+    await inEditor(11);
+    await until("the section and the part of it the cursor is in", async () => JSON.stringify(await names()) === JSON.stringify(["Shop", "open"]), 10000).catch(async (e) => { throw new Error(e.message + ": " + await crumbs()); });
+    const file = async () => (await p.locator(".group.focused .crumbs .crumb.file").innerText()).trim().split(/\s+/).pop();
+    const folders = () => p.locator(".group.focused .crumbs .crumb.folder").allInnerTexts();
+    expect((await file()) === "levels.md" && (await folders()).length === 0, "the file is not named: " + await crumbs());
+    await inEditor(14);
+    await until("the next part", async () => JSON.stringify(await names()) === JSON.stringify(["Shop", "shut"]), 5000);
+    await inEditor(17);
+    await until("the other section", async () => JSON.stringify(await names()) === JSON.stringify(["Other"]), 5000);
+    await inEditor(2);
+    await until("nothing, outside every section", async () => (await names()).length === 0, 5000);
+    // A name that is clicked is gone to.
+    await inEditor(14);
+    await until("both names", async () => (await names()).length === 2, 5000);
+    await p.locator(".group.focused .crumbs .crumb.symbol", { hasText: "Shop" }).click();
+    await until("the cursor at the section", async () => (await status()).includes("Ln 8"), 4000);
+    // A file inside a folder says the folders; with no server, the names come from the indentation.
+    fs.writeFileSync(path.join(project, "src/crumbs.py"), "import os\n\n\nclass Shop:\n    def total(self, items):\n        for item in items:\n            yield item\n\n\ndef main():\n    pass\n");
+    await p.waitForTimeout(600);
+    await open("crumbs.py");
+    await inEditor(7);
+    await until("the class and the function", async () => JSON.stringify(await names()) === JSON.stringify(["Shop", "total"]), 5000).catch(async (e) => { throw new Error(e.message + ": " + await crumbs()); });
+    expect((await folders()).join() === "src" && (await file()) === "crumbs.py", "the path: " + await crumbs());
+    expect((await p.locator(".group.focused .crumbs").getAttribute("title")) === path.join(project, "src/crumbs.py"), "the whole path is not there to be read");
+    await inEditor(11);
+    await until("the function at the end", async () => JSON.stringify(await names()) === JSON.stringify(["main"]), 5000);
+    await shot("breadcrumbs");
+    // It is a setting.
+    const was = (await p.locator(".group.focused .scroller").boundingBox()).y;
+    await commands(); await p.keyboard.type("Toggle Breadcrumbs"); await p.waitForTimeout(450); await K("Enter");
+    await until("the line to go when it is turned off", async () => (await p.locator(".group.focused .crumbs").count()) === 0, 8000);
+    expect((await p.locator(".group.focused .scroller").boundingBox()).y < was, "the editor did not take the room");
+    expect(saved()["breadcrumbs.enabled"] === false, "the choice is not in the settings");
+    await commands(); await p.keyboard.type("Toggle Breadcrumbs"); await p.waitForTimeout(450); await K("Enter");
+    await until("the line back", async () => (await p.locator(".group.focused .crumbs").count()) === 1, 8000);
+    await K("Control+w");
+    fs.rmSync(path.join(project, "src/crumbs.py"));
+  });
+
+  await check("suggestions: the list stays through a slash, closes for good on Escape, and never scrolls the editor sideways", async () => {
+    await open("shop.bea");
+    await inEditor(1);
+    const wrapped = saved()["editor.wordWrap"] === "on";
+    if (!wrapped) await K("Alt+z");
+    await until("word wrap on", async () => saved()["editor.wordWrap"] === "on", 8000);
+    await K("Control+Home"); await K("Enter"); await K("ArrowUp");
+    const offered = () => p.locator(".group.focused .suggest .option b").allTextContents();
+    await p.keyboard.type("import gleam", { delay: 60 });
+    await until("the modules, from the server", async () => (await offered()).some((o) => o.startsWith("gleam/")), 30000, async () => { await K("Backspace"); await p.keyboard.type("m"); });
+    await p.keyboard.type("/");
+    await p.waitForTimeout(700);
+    expect((await offered()).some((o) => o.startsWith("gleam/")), "the list went when the slash was typed: " + JSON.stringify(await offered()));
+    await p.keyboard.type("li", { delay: 60 });
+    await until("the list narrowed to what fits", async () => { const now = await offered(); return now.length > 0 && now.every((o) => /l.*i/.test(o)) && now.includes("gleam/list"); }, 8000);
+    // Going down a list longer than it shows moves the list, and nothing else.
+    await K("Escape");
+    for (let i = 0; i < 3; i++) await K("Backspace");
+    await K("Control+Space");
+    await until("the whole list again", async () => (await offered()).length > 8, 15000, async () => { await K("Escape"); await K("Control+Space"); });
+    const facts = () => p.evaluate(() => { const s = document.querySelector(".group.focused .scroller"), n = document.querySelector(".group.focused .ln").getBoundingClientRect(), b = document.querySelector(".group.focused .suggest-box"), r = b.getBoundingClientRect(); return { left: s.scrollLeft, over: s.scrollWidth - s.clientWidth, numbers: n.left >= s.getBoundingClientRect().left - 1, fixed: getComputedStyle(b).position, inside: r.right <= innerWidth && r.left >= 0 }; });
+    for (let i = 0; i < 14; i++) await K("ArrowDown");
+    await p.waitForTimeout(300);
+    const f = await facts();
+    expect(f.left === 0 && f.over <= 0 && f.numbers && f.fixed === "fixed" && f.inside, "the editor with the list open: " + JSON.stringify(f));
+    const chosen = await p.evaluate(() => { const on = document.querySelector(".suggest .option.on").getBoundingClientRect(), list = document.querySelector(".suggest").getBoundingClientRect(); return on.top >= list.top - 1 && on.bottom <= list.bottom + 1; });
+    expect(chosen, "the chosen suggestion is not in sight in its list");
+    // Near the right edge the list is kept inside the window, and still widens nothing.
+    await K("Escape");
+    await K("End");
+    const room = await p.evaluate(() => { const s = document.querySelector(".group.focused .scroller"), c = document.querySelector(".group.focused .caret").getBoundingClientRect(); const w = document.querySelector(".group.focused .code").getBoundingClientRect().width / Math.max(1, document.querySelector(".group.focused .code").textContent.length); return Math.floor((s.getBoundingClientRect().right - c.left) / (w || 8)) - 14; });
+    await p.keyboard.type(" " + "x".repeat(Math.max(4, room)) + " gleam/in", { delay: 5 });
+    await until("the list at the edge", async () => (await offered()).length > 0, 15000, async () => { await K("Backspace"); await p.keyboard.type("n"); });
+    const edge = await facts();
+    expect(edge.left === 0 && edge.over <= 0 && edge.numbers && edge.inside, "the editor with the list at its right edge: " + JSON.stringify(edge));
+    await shot("suggest-edge");
+    // Escape closes the list, and an answer still on its way does not open it again.
+    await p.keyboard.type("t");
+    await K("Escape");
+    await p.waitForTimeout(1500);
+    expect((await offered()).length === 0, "the list came back after Escape: " + JSON.stringify(await offered()));
+    // Nothing of this is kept: the tab is closed with its changes.
+    await K("Escape");
+    await K("Control+w");
+    if (!wrapped) { await open("README.md"); await K("Alt+z"); await until("word wrap off again", async () => saved()["editor.wordWrap"] !== "on", 8000); }
+  });
+
+  await check("tabs: one dropped on another group's strip of tabs joins that group, at the tab it is dropped on", async () => {
+    for (const name of ["t1.txt", "t2.txt", "t3.txt"]) fs.writeFileSync(path.join(project, name), name + "\n");
+    await listed("t3.txt");
+    await open("t1.txt"); await open("t2.txt");
+    await K("Control+\\");
+    await until("two groups", async () => (await p.locator(".group").count()) === 2, 4000);
+    await open("t3.txt");
+    // A tab's name comes after its icon, which is a letter of an icon font.
+    const tabsOf = () => p.evaluate(() => [...document.querySelectorAll(".group")].map((g) => [...g.querySelectorAll(".tab .tab-name")].map((t) => t.textContent.replace(/[^\x21-\x7e]/g, ""))));
+    const before = await tabsOf();
+    const groups = before.length;
+    // Dropped on the strip itself, past the last tab: it joins the group at the end.
+    const drop = (name, group, onto) => p.evaluate(([name, group, onto]) => {
+      const all = [...document.querySelectorAll(".group")];
+      const called = (t) => t.querySelector(".tab-name").textContent.replace(/[^\x21-\x7e]/g, "");
+      const named = [...document.querySelectorAll(".tab")].filter((t) => called(t) === name);
+      const to = group < 0 ? 0 : group;
+      // From another group when it is in one; else from the group itself (to put it in another place there).
+      const tab = named.find((t) => all.indexOf(t.closest(".group")) !== to) ?? named[0];
+      const strip = all[to].querySelector(".tabs");
+      const target = onto ? [...strip.querySelectorAll(".tab")].find((t) => called(t) === onto) : strip;
+      const data = new DataTransfer();
+      const fire = (el, kind) => el.dispatchEvent(new DragEvent(kind, { bubbles: true, cancelable: true, dataTransfer: data }));
+      fire(tab, "dragstart");
+      return new Promise((done) => requestAnimationFrame(() => { fire(target, "dragover"); requestAnimationFrame(() => { const lit = strip.classList.contains("drop-here"); fire(target, "drop"); fire(tab, "dragend"); done(lit); }); }));
+    }, [name, group, onto]);
+    const lit = await drop("t3.txt", 0, "");
+    expect(lit, "the strip does not show that a tab can be dropped on it");
+    await until("the tab in the first group, last", async () => { const now = await tabsOf(); return now[0][now[0].length - 1] === "t3.txt"; }, 4000).catch(async (e) => { throw new Error(e.message + ": " + JSON.stringify(await tabsOf())); });
+    expect((await p.locator(".group").count()) <= groups, "a new tile was made: " + JSON.stringify(await tabsOf()));
+    expect(((await p.locator(".group.focused .tab.on").textContent()) ?? "").includes("t3.txt"), "the tab that was moved is not the one in front");
+    // Dropped on a tab: it goes in before that tab. This is also how tabs are put in another order.
+    await drop("t3.txt", -1, "t1.txt");
+    await until("the tab before the one it was dropped on", async () => { const now = (await tabsOf())[0]; return now.indexOf("t3.txt") === now.indexOf("t1.txt") - 1; }, 4000).catch(async (e) => { throw new Error(e.message + ": " + JSON.stringify(await tabsOf())); });
+    // From one group to a place in another.
+    if ((await p.locator(".group").count()) < 2) { await K("Control+\\"); await until("two groups again", async () => (await p.locator(".group").count()) === 2, 4000); }
+    const two = await tabsOf();
+    const mover = two[1].find((t) => !two[0].includes(t)) ?? two[1][0];
+    const onto = two[0].find((t) => t !== mover && /^t\d/.test(t) && two[0].indexOf(t) !== two[0].indexOf(mover) + 1);
+    await drop(mover, 0, onto);
+    await until("the tab in the first group, before the one it was dropped on", async () => { const now = (await tabsOf())[0]; return now.includes(mover) && now.indexOf(mover) === now.indexOf(onto) - 1; }, 4000).catch(async (e) => { throw new Error(e.message + ": moved " + mover + " onto " + onto + " from " + JSON.stringify(two) + " to " + JSON.stringify(await tabsOf())); });
+    expect((await p.locator(".group").count()) === 1, "the group the tab left, now empty, is still there");
+    await shot("tabs-grouped");
+    // Back to one group, and the test files closed.
+    for (let i = 0; i < 6 && (await p.locator(".group").count()) > 1; i++) { await p.locator(".group").last().locator(".tab.on .tab-close").click().catch(() => {}); await settle(); }
+    for (const name of ["t1.txt", "t2.txt", "t3.txt"]) { const tab = p.locator(".tab", { hasText: name }).first(); if (await tab.count()) await tab.locator(".tab-close").click(); fs.rmSync(path.join(project, name), { force: true }); }
+  });
+
+  await check("terminal: a password or a token typed into it never becomes its name", async () => {
+    await K("Control+`");
+    await p.waitForSelector("runes-terminal.shown .xterm-screen");
+    const term = p.locator("runes-terminal.shown .xterm-rows");
+    const name = async () => ((await p.locator(".term-list .term-tab.on").innerText().catch(() => "")) ?? "").trim().split("\n")[0].trim();
+    await p.waitForTimeout(600);
+    await p.locator("runes-terminal.shown .xterm-helper-textarea").focus();
+    await p.keyboard.type("echo named-by-command"); await K("Enter");
+    await until("the terminal named after the command", async () => (await name()).includes("echo named-by-command"), 6000).catch(async (e) => { throw new Error(e.message + ": it is called " + await name()); });
+    // A program that asks for something: what is typed to it is not a command, shown or not.
+    await p.keyboard.type("read -s -p 'Password: ' pw; echo; read -p 'Username: ' who"); await K("Enter");
+    await until("the first question", async () => ((await term.textContent()) ?? "").includes("Password:"), 6000);
+    // (Its name by now is the command that asks: names are given a moment after Enter.)
+    await until("the terminal named after the asking command", async () => (await name()).startsWith("read"), 6000);
+    const asked = await name();
+    await p.keyboard.type("hunter2-the-password"); await K("Enter");
+    await until("the second question", async () => ((await term.textContent()) ?? "").includes("Username:"), 6000);
+    await app.evaluate(({ clipboard }) => clipboard.writeText("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
+    await K("Control+Shift+v");
+    await until("the pasted token on the line", async () => ((await term.textContent()) ?? "").includes("ghp_abcdefghij"), 5000);
+    await K("Enter");
+    await p.waitForTimeout(900);
+    const every = (await p.locator(".term-list .term-tab").allInnerTexts()).join(" | ") + " | " + (await p.locator(".tab").allInnerTexts()).join(" | ");
+    expect(!every.includes("hunter2") && !every.includes("ghp_"), "a secret is on show in a name: " + every);
+    expect((await name()) === asked, "the name changed while a program had the terminal: " + await name());
+    // A token at the shell's own prompt, and a command that carries one: never the token.
+    await K("Control+Shift+v");
+    await until("the token pasted at the prompt", async () => (((await term.textContent()) ?? "").match(/ghp_abcdefghij/g) ?? []).length >= 2, 5000);
+    await K("Enter");
+    await until("the shell to say it is no command", async () => ((await term.textContent()) ?? "").includes("not found"), 6000);
+    expect(!(await name()).includes("ghp_"), "a token pasted at the prompt named the terminal: " + await name());
+    // A program the shell started has the terminal: what is typed to it is its own, shown or not.
+    await p.keyboard.type("cat"); await K("Enter");
+    await until("the terminal named after the program", async () => (await name()) === "cat", 6000).catch(async (e) => { throw new Error(e.message + ": it is called " + JSON.stringify(await name()) + ", and shows " + JSON.stringify(((await term.textContent()) ?? "").trim().slice(-160))); });
+    await p.keyboard.type("words typed into cat"); await K("Enter");
+    await until("the program to have taken them", async () => (((await term.textContent()) ?? "").match(/words typed into cat/g) ?? []).length >= 2, 6000);
+    await p.waitForTimeout(500);
+    expect((await name()) === "cat", "what was typed into a program named the terminal: " + await name());
+    await K("Control+c");
+    await p.waitForTimeout(400);
+    await p.keyboard.type("echo quiet --password hunter2-again"); await K("Enter");
+    await until("the terminal named after the program alone", async () => (await name()) === "echo", 6000).catch(async (e) => { throw new Error(e.message + ": it is called " + await name()); });
+    await p.keyboard.type("echo fine-again"); await K("Enter");
+    await until("an ordinary command to name it again", async () => (await name()).includes("echo fine-again"), 6000);
+    await app.evaluate(({ clipboard }) => clipboard.writeText(""));
+    await K("Control+`");
+  });
+
+  await check("viewers: pictures, sound, film, PDFs, workbooks and CSV open to be looked at, not as text", async () => {
+    const zip = require("fflate");
+    const at = (name) => path.join(project, "media", name);
+    fs.mkdirSync(path.join(project, "media"), { recursive: true });
+    fs.writeFileSync(at("dot.png"), png);
+    fs.writeFileSync(at("dot.gif"), Buffer.from("R0lGODlhAgADAIAAAP8AAP///ywAAAAAAgADAAACA4RvBQA7", "base64"));
+    // One second of a tone, as a WAV file.
+    const rate = 8000, tone = Buffer.alloc(44 + rate);
+    tone.write("RIFF", 0); tone.writeUInt32LE(36 + rate, 4); tone.write("WAVEfmt ", 8); tone.writeUInt32LE(16, 16); tone.writeUInt16LE(1, 20); tone.writeUInt16LE(1, 22);
+    tone.writeUInt32LE(rate, 24); tone.writeUInt32LE(rate, 28); tone.writeUInt16LE(1, 32); tone.writeUInt16LE(8, 34); tone.write("data", 36); tone.writeUInt32LE(rate, 40);
+    for (let i = 0; i < rate; i++) tone[44 + i] = 128 + Math.round(60 * Math.sin(i / 3));
+    fs.writeFileSync(at("tone.wav"), tone);
+    fs.writeFileSync(at("paper.pdf"), "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 200]>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n");
+    const cell = (r, v, more = "") => `<c r="${r}"${more}><v>${v}</v></c>`;
+    fs.writeFileSync(at("book.xlsx"), zip.zipSync({
+      "xl/workbook.xml": zip.strToU8('<workbook><sheets><sheet name="Orders" sheetId="1" r:id="rId1"/><sheet name="Totals" sheetId="2" r:id="rId2"/></sheets></workbook>'),
+      "xl/_rels/workbook.xml.rels": zip.strToU8('<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>'),
+      "xl/sharedStrings.xml": zip.strToU8("<sst><si><t>item</t></si><si><t>price</t></si><si><t>tea &amp; &lt;cake&gt;</t></si><si><t>bread</t></si><si><t>jam</t></si></sst>"),
+      "xl/worksheets/sheet1.xml": zip.strToU8("<worksheet><sheetData><row r=\"1\">" + cell("A1", 0, ' t="s"') + cell("B1", 1, ' t="s"') + "</row><row r=\"2\">" + cell("A2", 2, ' t="s"') + cell("B2", 12.5) + "</row><row r=\"3\">" + cell("A3", 3, ' t="s"') + cell("B3", 3) + "</row><row r=\"4\">" + cell("A4", 4, ' t="s"') + cell("B4", 40) + "</row></sheetData></worksheet>"),
+      "xl/worksheets/sheet2.xml": zip.strToU8("<worksheet><sheetData><row r=\"1\">" + cell("A1", 55.5) + "</row></sheetData></worksheet>"),
+    }));
+    fs.writeFileSync(at("people.csv"), 'name,age,note\n"Smith, John",42,"said ""hi"""\nAda,36,\n' + Array.from({ length: 2500 }, (_, i) => `Person ${i},${20 + (i % 50)},row`).join("\n") + "\n");
+    let film = false;
+    try { execFileSync("ffmpeg", ["-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=64x48:rate=5", "-pix_fmt", "yuv420p", at("clip.mp4")], { stdio: "pipe", timeout: 60000 }); film = fs.existsSync(at("clip.mp4")); } catch {}
+    await K("Control+Shift+e");
+    await unfold("media");
+    await listed("people.csv");
+    const viewer = p.locator(".group.focused runes-viewer");
+    const foot = async () => (await viewer.locator(".rv-foot").innerText().catch(() => "")).replace(/\s+/g, " ");
+
+    await open("dot.png");
+    await until("the picture, with its size", async () => (await foot()).includes("8 × 8"), 8000).catch(async (e) => { throw new Error(e.message + ": " + await viewer.innerText().catch(() => "no viewer")); });
+    expect((await viewer.locator("img").evaluate((i) => i.naturalWidth)) === 8 && (await viewer.locator("img").getAttribute("src")).startsWith("runes://view/"), "the picture is not drawn from the shell's address");
+    expect((await p.locator(".group.focused .scroller").count()) === 0, "a picture was opened as text as well");
+    // A click shows it at its own size, another fits it in again.
+    await viewer.locator(".rv-stage").click();
+    expect(!(await viewer.locator(".rv-stage").evaluate((s) => s.classList.contains("fit"))), "a click did not show the picture at its own size");
+    await viewer.locator(".rv-stage").click();
+    // What is looked at is never written: saving and typing do nothing to the file.
+    const bytes = fs.readFileSync(at("dot.png"));
+    await K("Control+s"); await K("Control+Shift+k"); await p.keyboard.type("x");
+    await p.waitForTimeout(300);
+    expect(fs.readFileSync(at("dot.png")).equals(bytes), "the picture's file was written to");
+    expect(!(await p.locator(".group.focused .tab.on").evaluate((t) => t.classList.contains("dirty"))), "a picture can be edited as if it were text");
+    await shot("viewer-image");
+
+    await open("dot.gif");
+    await until("the animation, with its size", async () => (await foot()).includes("2 × 3"), 8000);
+    await open("tone.wav");
+    await until("the sound, with its length", async () => /Sound · .* · 0:01/.test(await foot()), 10000).catch(async (e) => { throw new Error(e.message + ": " + await foot()); });
+    expect(await viewer.locator("audio").evaluate((a) => a.controls && a.duration > 0.9 && !a.error), "the sound cannot be played");
+    // A player asks for part of a file to move about in it.
+    const part = await p.evaluate(async () => { const r = await fetch(document.querySelector(".group.focused audio").src, { headers: { range: "bytes=0-3" } }); return [r.status, r.headers.get("content-range"), await r.text()]; });
+    expect(part[0] === 206 && part[1] === "bytes 0-3/8044" && part[2] === "RIFF", "part of a file: " + JSON.stringify(part));
+    if (film) {
+      await open("clip.mp4");
+      await until("the film, with its size and length", async () => /Film · .* · 64 × 48 · 0:01/.test(await foot()), 15000).catch(async (e) => { throw new Error(e.message + ": " + await foot()); });
+      await viewer.locator("video").evaluate((v) => { v.muted = true; return v.play(); });
+      await until("it to play", async () => viewer.locator("video").evaluate((v) => v.currentTime > 0.1), 8000);
+    }
+    await open("paper.pdf");
+    await until("the PDF in the engine's own viewer", async () => (await viewer.locator("iframe.rv-pdf").count()) === 1 && p.frames().some((f) => f.url().startsWith("runes://view/") || f.url().includes("mhjfbmdgcfjbbpaeojofohoefgiehjai")), 10000);
+    await shot("viewer-pdf");
+
+    await open("book.xlsx");
+    const table = p.locator(".group.focused runes-table");
+    await until("the first sheet as a table", async () => (await table.locator(".rt-row").count()) === 3, 10000).catch(async (e) => { throw new Error(e.message + ": " + await viewer.innerText().catch(() => "")); });
+    const cells = () => table.locator(".rt-row").evaluateAll((rows) => rows.map((r) => [...r.querySelectorAll(".rt-c")].map((c) => c.textContent)));
+    expect((await table.locator(".rt-h span").allTextContents()).join() === "item,price", "the headings: " + (await table.locator(".rt-h span").allTextContents()).join());
+    expect(JSON.stringify(await cells()) === JSON.stringify([["tea & <cake>", "12.5"], ["bread", "3"], ["jam", "40"]]), "the cells: " + JSON.stringify(await cells()));
+    // A heading sorts by its column: numbers as numbers, then the other way, then as it was.
+    await table.locator(".rt-h", { hasText: "price" }).click();
+    expect((await cells()).map((r) => r[1]).join() === "3,12.5,40", "sorted up: " + JSON.stringify(await cells()));
+    await table.locator(".rt-h", { hasText: "price" }).click();
+    expect((await cells()).map((r) => r[1]).join() === "40,12.5,3", "sorted down: " + JSON.stringify(await cells()));
+    await table.locator(".rt-h", { hasText: "price" }).click();
+    expect((await cells()).map((r) => r[0]).join() === "tea & <cake>,bread,jam", "back as it was: " + JSON.stringify(await cells()));
+    await table.locator(".rt-tab", { hasText: "Totals" }).click();
+    await until("the second sheet", async () => (await table.locator(".rt-note").innerText()).includes("0 rows × 1 column"), 4000);
+    expect((await table.locator(".rt-h span").allTextContents()).join() === "55.5", "the second sheet: " + (await table.locator(".rt-h span").allTextContents()).join());
+    await shot("viewer-xlsx");
+
+    // CSV is a table that is also text: looked at as one, edited as the other, and back.
+    await open("people.csv");
+    await until("the table of the CSV", async () => (await table.locator(".rt-note").innerText().catch(() => "")).includes("2,502 rows × 3 columns · comma separated"), 8000).catch(async (e) => { throw new Error(e.message + ": " + await table.innerText().catch(() => "no table")); });
+    expect(JSON.stringify((await cells())[0]) === JSON.stringify(["Smith, John", "42", 'said "hi"']), "the first row: " + JSON.stringify((await cells())[0]));
+    expect((await table.locator(".rt-row").count()) < 120, "every row of a long table is in the page: " + await table.locator(".rt-row").count());
+    await table.locator(".rt-scroll").evaluate((s) => { s.scrollTop = s.scrollHeight; });
+    await until("the last rows when scrolled to", async () => (await cells()).some((r) => r[0] === "Person 2499"), 4000);
+    await shot("viewer-csv");
+    await table.locator(".rt-raw").click();
+    await until("the text of it", async () => (await lines())[0] === "name,age,note", 4000);
+    await inEditor(3);
+    await K("End"); await p.keyboard.type("new");
+    await save();
+    expect(fs.readFileSync(at("people.csv"), "utf8").split("\n")[2] === "Ada,36,new", "the CSV was not edited as text: " + fs.readFileSync(at("people.csv"), "utf8").split("\n")[2]);
+    await p.locator(".group.focused .canvas-raw .link", { hasText: "Show the table" }).click();
+    await until("the table again, with the change", async () => (await cells().catch(() => []))[1]?.[2] === "new", 4000);
+
+    // The shell serves only what it gave an address for: a file of the open folder, of a kind that is looked at.
+    const refused = await p.evaluate(async (root) => {
+      const ask = (file) => window.runesHost.fileView(file).then((v) => "allowed " + v.url, (e) => String(e.message).replace(/^.*?: /, ""));
+      const get = (url) => fetch(url).then((r) => r.status, () => "blocked");
+      const good = await window.runesHost.fileView(root + "/media/dot.png");
+      return {
+        outside: await ask("/etc/passwd"), climbing: await ask(root + "/media/../../../etc/passwd"), text: await ask(root + "/README.md"), page: await ask(root + "/media/x.html"), missing: await ask(root + "/media/none.png"),
+        guessed: await get(good.url.replace(/view\/[0-9a-f]+/, "view/" + "0".repeat(36))), other: await get(good.url.replace("dot.png", "../../README.md")), good: await get(good.url),
+        type: (await fetch(good.url)).headers.get("content-type"), policy: (await fetch(good.url)).headers.get("content-security-policy") ?? "", hidden: !good.url.includes(root),
+      };
+    }, project);
+    expect(/outside/.test(refused.outside) && /outside/.test(refused.climbing), "a file outside the folder: " + JSON.stringify(refused));
+    expect(/no viewer/.test(refused.text) && /no viewer/.test(refused.page) && !/allowed/.test(refused.missing), "what is not looked at, or not there: " + JSON.stringify(refused));
+    expect(refused.guessed === 404 && refused.good === 200 && refused.type === "image/png" && refused.hidden, "addresses: " + JSON.stringify(refused));
+    expect(refused.other === 200 || refused.other === 404, "an address followed out of its file: " + JSON.stringify(refused));
+    expect(/default-src 'none'/.test(refused.policy) && /sandbox/.test(refused.policy), "what is served may do things: " + refused.policy);
+    // A page dressed as a picture is shown as a broken picture, and nothing in it runs.
+    fs.writeFileSync(at("fake.png"), "<script>window.parent.postMessage('ran','*')</script><h1>not a picture</h1>");
+    await listed("fake.png");
+    await open("fake.png");
+    await until("it to say the picture cannot be shown", async () => (await viewer.innerText().catch(() => "")).includes("could not be shown"), 8000);
+    for (const tab of ["dot.png", "dot.gif", "tone.wav", "clip.mp4", "paper.pdf", "book.xlsx", "people.csv", "fake.png"]) { const t = p.locator(".tab", { hasText: tab }).first(); if (await t.count()) await t.locator(".tab-close").click(); }
+    fs.rmSync(path.join(project, "media"), { recursive: true });
+  });
+
+  await check("canvas: lines stop sticking to shapes when that is turned off, and Alt holds it off once", async () => {
+    const file = path.join(project, "stick.rux");
+    fs.writeFileSync(file, JSON.stringify({ rune: "canvas", version: 1, elements: [{ id: "box", type: "rect", x: 100, y: -40, w: 120, h: 80, sketch: false }] }));
+    await listed("stick.rux");
+    await open("stick.rux");
+    await p.waitForSelector(".group.focused runes-canvas .rc-el");
+    const read = () => JSON.parse(fs.readFileSync(file, "utf8")).elements;
+    const canvas = p.locator(".group.focused runes-canvas");
+    // Draws from one place to another, each given in the drawing's own coordinates.
+    const place = (x, y) => canvas.evaluate((c, [x, y]) => { const r = c.board.getBoundingClientRect(); return [r.left + c.view.x + x * c.view.k, r.top + c.view.y + y * c.view.k]; }, [x, y]);
+    const draw = async (x1, y1, x2, y2, keys = []) => {
+      const [ax, ay] = await place(x1, y1), [bx, by] = await place(x2, y2);
+      await p.mouse.move(ax, ay); await p.mouse.down();
+      for (const k of keys) await p.keyboard.down(k);
+      await p.mouse.move((ax + bx) / 2, (ay + by) / 2, { steps: 4 }); await p.mouse.move(bx, by, { steps: 4 });
+      await p.mouse.up();
+      for (const k of keys) await p.keyboard.up(k);
+      await settle();
+    };
+    await canvas.focus();
+    const magnet = canvas.locator('.rc-foot .rc-button[aria-label^="Lines and arrows stick"]');
+    expect((await magnet.getAttribute("aria-pressed")) === "true", "lines do not stick to begin with");
+    // (From the right: the panel of what a line looks like stands over the left of the board.)
+    await K("l");
+    await draw(400, 0, 160, 0);
+    await store();
+    expect(read().find((e) => e.type === "line")?.to === "box", "a line drawn onto a shape is not tied to it: " + JSON.stringify(read()));
+    await K("Control+z");
+    // Turned off: the same line goes exactly where it is put.
+    await magnet.click();
+    expect((await magnet.getAttribute("aria-pressed")) === "false", "the button does not say sticking is off");
+    await K("l");
+    await draw(400, 0, 160, 0);
+    await store();
+    const free = read().find((e) => e.type === "line");
+    expect(free && !free.to && !free.from && Math.abs(free.x + free.w - 160) < 3, "with sticking off the line was moved or tied: " + JSON.stringify(free));
+    // The choice outlives the board: it is the person's, not the drawing's.
+    expect((await p.evaluate(() => localStorage.getItem("runes-canvas"))).includes('"sticks":false'), "the choice is not kept");
+    expect(!fs.readFileSync(file, "utf8").includes("sticks"), "the choice was written into the drawing");
+    await K("Control+z");
+    await K("m");
+    expect((await magnet.getAttribute("aria-pressed")) === "true", "M did not turn sticking on again");
+    // On again, with Alt held: not this once.
+    await K("l");
+    await draw(400, 20, 160, 20, ["Alt"]);
+    await store();
+    const once = read().find((e) => e.type === "line");
+    expect(once && !once.to, "Alt did not hold the sticking off: " + JSON.stringify(once));
+    await shot("canvas-sticking");
+    fs.rmSync(file);
+  });
+
+  await check("canvas: writing is made larger and smaller, from the panel and by pulling its corner", async () => {
+    const file = path.join(project, "words.rux");
+    fs.writeFileSync(file, JSON.stringify({ rune: "canvas", version: 1, elements: [{ id: "w", type: "text", x: -60, y: -20, text: "Hello", size: 20 }] }));
+    await listed("words.rux");
+    await open("words.rux");
+    await p.waitForSelector(".group.focused runes-canvas .rc-el");
+    const size = () => JSON.parse(fs.readFileSync(file, "utf8")).elements[0].size ?? 20;
+    const canvas = p.locator(".group.focused runes-canvas");
+    await canvas.focus();
+    await K("Control+a");
+    await p.waitForSelector(".group.focused .rc-props .rc-size");
+    expect((await canvas.locator(".rc-props .rc-size").first().innerText()) === "20", "the panel does not say the size");
+    await canvas.locator('.rc-props .rc-button[aria-label="Larger text"]').click();
+    await canvas.locator('.rc-props .rc-button[aria-label="Larger text"]').click();
+    await store();
+    expect(size() === 26, "two steps larger from 20 is " + size());
+    await canvas.locator('.rc-props .rc-button[aria-label="Smaller text"]').click();
+    await store();
+    expect(size() === 23, "a step smaller is " + size());
+    // The named sizes are still there, and a size between them is none of them.
+    expect((await canvas.locator(".rc-props .rc-choice.on", { hasText: /^(S|M|L|XL)$/ }).count()) === 0, "a size between the named ones is shown as one of them");
+    await canvas.locator('.rc-props .rc-choice[aria-label="Large text"]').click();
+    await store();
+    expect(size() === 28, "Large is " + size());
+    // Its corner, pulled out: writing only has corners, and keeps its shape.
+    expect((await canvas.locator(".rc-handle").count()) === 4, "writing has " + (await canvas.locator(".rc-handle").count()) + " handles, not its four corners");
+    const corner = await canvas.locator('.rc-handle[data-handle="se"]').boundingBox(), frame = await canvas.locator(".rc-frame").boundingBox();
+    await p.mouse.move(corner.x + 4, corner.y + 4); await p.mouse.down();
+    await p.mouse.move(corner.x + 4 + frame.width / 2, corner.y + 4 + frame.height / 2, { steps: 5 });
+    await p.mouse.move(corner.x + 4 + frame.width, corner.y + 4 + frame.height, { steps: 5 });
+    await p.mouse.up(); await settle();
+    await store();
+    expect(size() > 45 && size() < 76, "pulled to about twice its size from 28 it is " + size());
+    const drawnAt = await canvas.locator(".rc-el text").first().getAttribute("font-size");
+    expect(Number(drawnAt) === size(), "it is drawn at " + drawnAt + " and saved at " + size());
+    await K("Control+z");
+    await store();
+    expect(size() === 28, "undo did not put the size back: " + size());
+    await shot("canvas-text-size");
+    fs.rmSync(file);
+  });
+
+  await check("canvas: things are grouped into one and taken apart again, from the panel of what is chosen", async () => {
+    const file = path.join(project, "group.rux");
+    const shape = (id, x) => ({ id, type: "rect", x, y: -30, w: 80, h: 60, sketch: false });
+    fs.writeFileSync(file, JSON.stringify({ rune: "canvas", version: 1, elements: [shape("a", 0), shape("b", 140), shape("c", 320), { id: "far", type: "text", x: -700, y: 0, text: "." }] }));
+    await listed("group.rux");
+    await open("group.rux");
+    await p.waitForSelector(".group.focused runes-canvas .rc-el");
+    // (The writing far to the left is only there to keep the shapes clear of the panel.)
+    const read = () => JSON.parse(fs.readFileSync(file, "utf8")).elements.filter((e) => e.type === "rect");
+    const canvas = p.locator(".group.focused runes-canvas");
+    const chosen = () => canvas.evaluate((c) => [...c.selected].sort());
+    // On its right edge: a shape with no fill is taken hold of by its outline, and the panel of what is chosen stands over the left of the board.
+    const at = async (id) => canvas.evaluate((c, id) => { const e = c.elements.find((k) => k.id === id), r = c.board.getBoundingClientRect(); return [r.left + c.view.x + (e.x + e.w) * c.view.k, r.top + c.view.y + (e.y + e.h / 2) * c.view.k]; }, id);
+    const click = async (id, keys = []) => { const [x, y] = await at(id); for (const k of keys) await p.keyboard.down(k); await p.mouse.click(x, y); for (const k of keys) await p.keyboard.up(k); await settle(); };
+    await canvas.focus();
+    // One thing chosen: nothing to group. Two: the panel offers it, and the tools do not.
+    await click("a");
+    expect((await canvas.locator('.rc-props .rc-row[aria-label="Group"]').count()) === 0, "one thing chosen, and grouping is offered");
+    await click("b", ["Shift"]);
+    expect(JSON.stringify(await chosen()) === '["a","b"]', "two are not chosen: " + JSON.stringify(await chosen()));
+    const make = canvas.locator('.rc-props .rc-row[aria-label="Group"] .rc-button').nth(0), apart = canvas.locator('.rc-props .rc-row[aria-label="Group"] .rc-button').nth(1);
+    expect((await make.count()) === 1 && (await make.isEnabled()) && !(await apart.isEnabled()), "the panel does not offer to group two things");
+    expect((await canvas.locator('.rc-tools [aria-label*="roup"], .rc-foot [aria-label*="roup"]').count()) === 0, "grouping is among the tools, not with what is chosen");
+    const toolsBefore = await canvas.locator(".rc-tools").innerHTML();
+    await make.click();
+    await store();
+    const made = read();
+    expect(made[0].groups?.length === 1 && made[0].groups[0] === made[1].groups?.[0] && !made[2].groups, "the group in the file: " + JSON.stringify(made.map((e) => e.groups)));
+    expect((await canvas.locator(".rc-tools").innerHTML()) === toolsBefore, "grouping changed the tools");
+    expect((await make.isEnabled()) === false && (await apart.isEnabled()) && (await canvas.locator(".rc-props").innerText()).includes("2 in the group"), "the panel does not show that this is a group: " + await canvas.locator(".rc-props").innerText());
+    await shot("canvas-group");
+    // A click on either chooses both; a drag moves both; Alt chooses the one.
+    await K("Escape");
+    await click("b");
+    expect(JSON.stringify(await chosen()) === '["a","b"]', "a click on one of a group chose " + JSON.stringify(await chosen()));
+    // (By its top edge: the middle of its right edge is where the group's own handle is.)
+    const [bx, by] = await canvas.evaluate((c) => { const e = c.elements.find((k) => k.id === "b"), r = c.board.getBoundingClientRect(); return [r.left + c.view.x + (e.x + e.w * 0.3) * c.view.k, r.top + c.view.y + e.y * c.view.k]; });
+    await p.mouse.move(bx, by); await p.mouse.down(); await p.mouse.move(bx, by + 40, { steps: 4 }); await p.mouse.move(bx, by + 80, { steps: 4 }); await p.mouse.up(); await settle();
+    await store();
+    expect(read()[0].y > 30 && read()[1].y > 30 && read()[2].y === -30, "the group did not move as one: " + JSON.stringify(read().map((e) => e.y)));
+    await click("a", ["Alt"]);
+    expect(JSON.stringify(await chosen()) === '["a"]', "Alt and a click chose " + JSON.stringify(await chosen()));
+    // The group and a third thing, grouped: then the copy of it all is a group of its own.
+    await K("Escape");
+    await click("c"); await click("a", ["Shift"]);
+    expect(JSON.stringify(await chosen()) === '["a","b","c"]', "the group and one more are not chosen: " + JSON.stringify(await chosen()));
+    await K("Control+g");
+    await store();
+    expect(read().every((e) => e.groups?.length >= 1) && read()[0].groups.length === 2 && read()[2].groups.length === 1 && read()[0].groups[1] === read()[2].groups[0], "a group in a group: " + JSON.stringify(read().map((e) => e.groups)));
+    await K("Control+d");
+    await store();
+    const six = read();
+    expect(six.length === 6 && six[3].groups.length === 2 && six[3].groups[1] === six[5].groups[0] && six[3].groups[1] !== six[0].groups[1] && six[3].groups[0] !== six[0].groups[0], "the copy is part of the group it was copied from: " + JSON.stringify(six.map((e) => e.groups)));
+    await K("Control+z");
+    // Taken apart with the keys: the inner group is itself again. And once more from the panel: nothing is grouped.
+    await K("Escape"); await click("c");
+    await K("Control+Shift+g");
+    await store();
+    expect(JSON.stringify(read().map((e) => e.groups?.length ?? 0)) === "[1,1,0]", "taken apart once: " + JSON.stringify(read().map((e) => e.groups)));
+    await K("Escape"); await click("a");
+    await canvas.locator('.rc-props .rc-row[aria-label="Group"] .rc-button').nth(1).click();
+    await store();
+    expect(!fs.readFileSync(file, "utf8").includes("groups"), "taken apart, the file still speaks of groups: " + fs.readFileSync(file, "utf8"));
+    await K("Escape"); await click("b");
+    expect(JSON.stringify(await chosen()) === '["b"]', "its parts are not themselves again: " + JSON.stringify(await chosen()));
+    // Undo brings the group back.
+    await K("Control+z");
+    await K("Escape"); await click("b");
+    expect(JSON.stringify(await chosen()) === '["a","b"]', "undo did not bring the group back: " + JSON.stringify(await chosen()));
+    await store();
+    fs.rmSync(file);
+  });
+
+  await check("the logo is still when pointed at", async () => {
+    const hovered = await p.evaluate(() => [...document.styleSheets].flatMap((s) => { try { return [...s.cssRules]; } catch { return []; } }).filter((r) => r.selectorText && /(logo|mark)[^,]*:hover/.test(r.selectorText) && /animation/.test(r.cssText)).map((r) => r.selectorText));
+    expect(hovered.length === 0, "pointing at the logo animates it: " + hovered.join());
+    const passive = await p.evaluate(() => [...document.styleSheets].flatMap((s) => { try { return [...s.cssRules]; } catch { return []; } }).some((r) => r.selectorText === ".rune-light" && /animation/.test(r.cssText)));
+    expect(passive, "the logo's own slow light is gone too");
   });
 
   // The Python extension is 7 MB and not kept in this repository. Download it from Open VSX
@@ -2532,8 +3297,21 @@ const expect = (condition, message) => { if (!condition) throw new Error(message
     if (process.env.RUNES_STEPS) console.log("  .. step 7");
     expect(!(await p.locator(".group.focused .tab.on").evaluate((t) => t.classList.contains("dirty"))), "a library file that was only opened counts as changed");
     await K("Control+w");
-    // Enter, by the rules the extension gives as it runs: deeper after a colon, back after pass.
+    // What a call expects, from Jedi, as its arguments are written.
     await open("tool.py");
+    await K("Control+End");
+    const asItWas = JSON.stringify(await lines());
+    await p.keyboard.type("greet(");
+    const label = async () => (await p.locator(".group.focused .signature-label").innerText().catch(() => "")).replace(/\s+/g, " ");
+    await until("what greet expects", async () => (await label()).includes("greet(name: str"), 90000, async () => { await K("Backspace"); await p.keyboard.type("("); });
+    expect((await p.locator(".group.focused .signature-arg").innerText()).includes("name: str"), "the argument in hand is not marked: " + await label());
+    expect((await p.locator(".group.focused .signature").innerText()).includes("Say hello to someone"), "what Jedi says of the function is not shown");
+    await shot("python-signature");
+    await K("Escape");
+    for (let i = 0; i < 12 && JSON.stringify(await lines()) !== asItWas; i++) await K("Control+z");
+    expect(JSON.stringify(await lines()) === asItWas, "the file was not put back as it was");
+    if (process.env.RUNES_STEPS) console.log("  .. step 7b");
+    // Enter, by the rules the extension gives as it runs: deeper after a colon, back after pass.
     await K("Control+End");
     await p.keyboard.type("def f(x):"); await K("Enter"); await p.keyboard.type("pass"); await K("Enter"); await p.keyboard.type("z = 1");
     await K("Control+s");

@@ -7,7 +7,7 @@ const direct = ["info", "root", "pickFolder", "readDir", "walk", "readFile", "wr
   "replaceInFiles", "extensions", "installExtension", "removeExtension", "zoom", "devtools", "openLink",
   "marketSearch", "marketDownload", "gitStatus", "gitLog", "gitShow", "gitStage", "gitUnstage", "gitFile", "gitChanged", "gitRefs", "gitDays", "gitTree", "gitHistory", "promptAnswer", "sshSessions", "sshSave", "sshRemove", "sshImport", "sshForget", "sshConnect", "sshOpen", "sshDisconnect", "marketIcon", "marketReadme", "fonts", "fontAdd", "fontRemove",
   "fileCreate", "fileRename", "fileRemove", "fileReveal", "watchDirs", "gitDiscard", "gitBlame", "saveImage",
-  "extensionsDisabled", "extensionEnable", "extensionsRunning", "extensionsRestart", "reload", "filePlace", "fileImport", "clipboardFiles", "filesRemove"];
+  "extensionsDisabled", "extensionEnable", "extensionsRunning", "extensionsRestart", "reload", "filePlace", "fileImport", "clipboardFiles", "filesRemove", "fileUndo", "fileView"];
 
 let onExtension = () => {};
 ipcRenderer.on("runes:ext", (_event, message) => onExtension(message));
@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld("runesHost", {
   term: {
     create: (id, shell, cwd, cols, rows) => ipcRenderer.invoke("runes:termCreate", id, shell, cwd, cols, rows),
     write: (id, data) => ipcRenderer.invoke("runes:termWrite", id, data),
+    atPrompt: (id) => ipcRenderer.invoke("runes:termAtPrompt", id),
     resize: (id, cols, rows) => ipcRenderer.invoke("runes:termResize", id, cols, rows),
     kill: (id) => { terminalData.delete(id); return ipcRenderer.invoke("runes:termKill", id); },
     onData: (id, listener) => { terminalData.set(id, listener); },

@@ -44,6 +44,8 @@ pub type Settings {
   folding: Bool,
   /// Mark the bracket that pairs with the one at the cursor.
   match_brackets: Bool,
+  /// The line above each editor that says which file it is and what the cursor is inside.
+  breadcrumbs: Bool,
 }
 
 pub const default_pie = [
@@ -85,6 +87,7 @@ pub const defaults = Settings(
   guides: True,
   folding: True,
   match_brackets: True,
+  breadcrumbs: True,
 )
 
 /// The file a new user starts with.
@@ -278,6 +281,7 @@ pub def parse(text: String) -> Settings {
       "never" -> False
       _ -> True
     },
+    breadcrumbs: get(all, "breadcrumbs.enabled", decode.bool, d.breadcrumbs),
   )
 }
 

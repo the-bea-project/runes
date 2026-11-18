@@ -231,3 +231,27 @@ test("rules an extension gives as it runs come before the language's own", () =>
   assert.equal(L.merge_rules(own, "{ broken"), own);
   assert.deepEqual(L.enter_rule(L.merge_rules("", more), "    pass", "", ""), [3, "", 0]);
 });
+
+test("what the cursor is inside is named from the indentation, outermost first", () => {
+  const py = ["import os", "", "class Shop:", "    def total(self, items):", "        for item in items:", "            yield item", "", "    limit = 3", "", "def main():", "    pass", "x = 1"];
+  const names = (lines, line, key = "k" + Math.random()) => L.scopes_at(key, 1, lines, line).map((s) => s[0]);
+  assert.deepEqual(names(py, 5), ["Shop", "total"]);
+  assert.deepEqual(names(py, 3), ["Shop", "total"], "the line that starts a definition is inside it");
+  assert.deepEqual(names(py, 7), ["Shop"]);
+  assert.deepEqual(names(py, 6), ["Shop", "total"], "an empty line belongs with what is above it");
+  assert.deepEqual(names(py, 10), ["main"]);
+  assert.deepEqual(names(py, 11), []);
+  assert.deepEqual(names(py, 0), []);
+  assert.deepEqual(L.scopes_at("where", 1, py, 5), [["Shop", 2], ["total", 3]], "each with the line it starts on");
+  const js = ["export async function load(path) {", "  const inner = (x) => {", "    return x;", "  };", "}", "const top = () => 1;", "class A extends B {", "  static make() {}", "}"];
+  assert.deepEqual(names(js, 2), ["load", "inner"]);
+  assert.deepEqual(names(js, 5), ["top"]);
+  assert.deepEqual(names(js, 7), ["A"]);
+  const more = ["pub def area(Circle(r)) {", "  r", "}", "impl Shape for Circle {", "    fn area(&self) -> f64 {", "        1.0", "    }", "}", "pub(crate) struct Point {", "    x: i32,", "}", "func (s *Server) Run() {", "\treturn", "}"];
+  assert.deepEqual(names(more, 1), ["area"]);
+  assert.deepEqual(names(more, 5), ["Shape", "area"]);
+  assert.deepEqual(names(more, 9), ["Point"]);
+  assert.deepEqual(names(more, 12), ["Run"]);
+  assert.deepEqual(names([], 0), []);
+  assert.deepEqual(names(["x"], 99), []);
+});

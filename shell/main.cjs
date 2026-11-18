@@ -15,6 +15,8 @@ const git = require("./git.cjs");
 const fonts = require("./fonts.cjs");
 const market = require("./market.cjs");
 const ssh = require("./ssh.cjs");
+const undo = require("./undo.cjs");
+const view = require("./view.cjs");
 
 // Started from a terminal, the installed app lets the terminal go at once, as `code` does:
 // it starts itself again in the background, with nowhere for Chromium's own chatter to be
@@ -34,7 +36,11 @@ if (app.isPackaged && process.platform !== "win32" && process.stdout.isTTY && !p
 }
 
 const ORIGIN = "runes://app";
-const CSP = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self' blob: data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+// Files that are looked at (pictures, sound, film, PDFs, spreadsheets) come from runes://view/,
+// one address to a file, handed out by the shell (see `fileView`). Nothing there can run.
+const VIEW = "runes://view";
+const CSP = `default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: ${VIEW}; media-src ${VIEW}; frame-src ${VIEW}; font-src 'self' blob: data:; connect-src 'self' ${VIEW}; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
+const viewed = view.grants();
 const dist = path.join(__dirname, "..", "dist");
 const user = (...parts) => path.join(app.getPath("userData"), ...parts);
 
@@ -42,7 +48,7 @@ const user = (...parts) => path.join(app.getPath("userData"), ...parts);
 // with --no-sandbox (needed when running as root, as in CI containers).
 if (!app.commandLine.hasSwitch("no-sandbox")) app.enableSandbox();
 protocol.registerSchemesAsPrivileged([
-  { scheme: "runes", privileges: { standard: true, secure: true, supportFetchAPI: true } },
+  { scheme: "runes", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true } },
 ]);
 
 // --- Settings the shell itself needs ---------------------------------------------------------
@@ -254,6 +260,33 @@ async function upload(from, to, info, sent) {
   await remote.call("fastPut", from, to);
 }
 
+/**
+ * Whether a shell is itself what its terminal is listening to, or a program it started is:
+ * true or false, or null where the system does not say. It goes by which group of processes
+ * has the terminal, not by names: a script run by bash is also called bash.
+ */
+function shellInFront(pid) {
+  try {
+    if (process.platform === "linux") {
+      // /proc/<pid>/stat: "pid (name) state ppid pgrp session tty tpgid …"; the name may hold anything, so count from its end.
+      const stat = fsSync.readFileSync(`/proc/${pid}/stat`, "utf8");
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      const group = Number(fields[2]), front = Number(fields[5]);
+      return group > 0 && front > 0 ? group === front : null;
+    }
+    if (process.platform === "darwin" || process.platform.endsWith("bsd")) {
+      const out = require("node:child_process").execFileSync("ps", ["-o", "pgid=,tpgid=", "-p", String(pid)], { encoding: "utf8", timeout: 1500 }).trim().split(/\s+/).map(Number);
+      return out.length === 2 && out[0] > 0 && out[1] > 0 ? out[0] === out[1] : null;
+    }
+  } catch {}
+  return null;
+}
+
+// What the explorer deletes on this machine is held aside before it goes to the trash, so
+// that Ctrl+Z there can put it back (see undo.cjs).
+let heldFiles = null;
+const held = () => (heldFiles ??= undo.create({ dir: user("undo"), trash: (file) => shell.trashItem(file) }));
+
 function within(file) {
   const P = remote ? path.posix : path;
   text(file);
@@ -443,12 +476,8 @@ const handlers = {
       await remote.remove(full);
       return true;
     }
-    if (!(await question("confirm", "Move " + name + " to the trash?", full + "\n\nA folder goes with everything in it. You can bring it back from the trash.", "Move to trash"))) return false;
-    try { await shell.trashItem(full); }
-    catch {
-      if (!(await question("confirm", "Delete " + name + " for good?", "It could not be moved to the trash on this system.\n" + full + "\n\nThis cannot be undone.", "Delete"))) return false;
-      await fs.rm(full, { recursive: true, force: true });
-    }
+    if (!(await question("confirm", "Move " + name + " to the trash?", full + "\n\nA folder goes with everything in it. Ctrl+Z in the explorer brings it back.", "Move to trash"))) return false;
+    await held().hold([full], folder);
     return true;
   },
   /** Several at once, asked about once. Resolves to the paths that are gone. */
@@ -464,19 +493,34 @@ const handlers = {
       for (const f of full) await remote.remove(f);
       return full;
     }
-    if (!(await question("confirm", "Move " + full.length + " items to the trash?", names + "\n\nFolders go with everything in them. You can bring them back from the trash.", "Move to trash"))) return [];
-    const gone = [];
-    for (const f of full) {
-      try { await shell.trashItem(f); gone.push(f); }
-      catch {
-        if (!(await question("confirm", "Delete " + P.basename(f) + " for good?", "It could not be moved to the trash on this system.\n" + f + "\n\nThis cannot be undone.", "Delete"))) continue;
-        await fs.rm(f, { recursive: true, force: true });
-        gone.push(f);
-      }
-    }
-    return gone;
+    if (!(await question("confirm", "Move " + full.length + " items to the trash?", names + "\n\nFolders go with everything in them. Ctrl+Z in the explorer brings them back.", "Move to trash"))) return [];
+    return held().hold(full, folder);
+  },
+  /**
+   * Puts back what the explorer last deleted from the open folder: `{ restored, kept }`.
+   * Nothing is named by the window: only what Runes itself took out can come back, and only
+   * to the place it was taken from.
+   */
+  fileUndo: async () => {
+    if (remote) throw new Error("A deletion on another machine cannot be undone");
+    if (!folder) throw new Error("There is no deletion to undo here");
+    return held().undo(folder);
   },
   fileReveal: (file) => { if (!remote) shell.showItemInFolder(within(file)); },
+  /**
+   * An address the window can show a picture, a sound, a film, a PDF or a spreadsheet from:
+   * `{ url, kind, size }`. Only for a file of the open folder, on this machine, of a kind
+   * that is looked at; the address stands for that one file and says nothing of where it is.
+   */
+  fileView: async (file) => {
+    if (remote) throw new Error("Files on another machine cannot be shown this way yet. Copy the file here to look at it.");
+    const full = within(file);
+    const kind = view.kindOf(full);
+    if (!kind) throw new Error("Runes has no viewer for this kind of file");
+    const stat = await fs.stat(full);
+    if (!stat.isFile()) throw new Error(path.basename(full) + " is not a file");
+    return { url: `${VIEW}/${viewed.grant(full)}/${encodeURIComponent(path.basename(full))}`, kind, size: stat.size };
+  },
   /**
    * Copies or moves files and folders of the open folder into one of its folders. Nothing is
    * written over: a name that is taken gets " copy" added. Resolves to the new paths.
@@ -730,6 +774,17 @@ const handlers = {
     term.onData((data) => { if (window && !window.isDestroyed()) window.webContents.send("runes:term", id, data); });
     term.onExit(() => { if (terminals.get(id) === term) terminals.delete(id); if (window && !window.isDestroyed()) window.webContents.send("runes:termExit", id); });
   },
+  /**
+   * Whether the shell itself has the terminal, and not a program it started: true or false
+   * where the system can say, null where it cannot (a shell on another machine, Windows).
+   * The window names a terminal after what was typed at the shell, never after what was
+   * typed into a program: that may be a password.
+   */
+  termAtPrompt: (id) => {
+    const term = terminals.get(id);
+    if (!term || term.far || !term.pid) return null;
+    return shellInFront(term.pid);
+  },
   termWrite: (id, data) => terminals.get(id)?.write(text(data, 1 << 20)),
   termResize: (id, cols, rows) => { try { terminals.get(id)?.resize(whole(cols, 2, 1000), whole(rows, 1, 1000)); } catch {} },
   termKill: (id) => { terminals.get(id)?.kill(); terminals.delete(id); },
@@ -772,6 +827,14 @@ app.whenReady().then(() => {
   // dist/ is served as runes://app/, so the page can fetch its own files and nothing else.
   protocol.handle("runes", async (request) => {
     const url = new URL(request.url);
+    if (url.host === "view") {
+      // runes://view/<address>/<name>: only what the shell handed an address for, and only its bytes.
+      const file = viewed.file(url.pathname.split("/")[1] ?? "");
+      if (!file || !["GET", "HEAD"].includes(request.method)) return new Response("Not found", { status: 404 });
+      const found = await view.answer(file, request.headers.get("range"), request.method);
+      // The page itself may read it (a spreadsheet is drawn by the page); nothing else is asked.
+      return new Response(found.body, { status: found.status, headers: { ...found.headers, "access-control-allow-origin": ORIGIN } });
+    }
     if (url.host !== "app") return new Response("Not found", { status: 404 });
     const file = path.normalize(path.join(dist, decodeURIComponent(url.pathname === "/" ? "/index.html" : url.pathname)));
     if (!file.startsWith(dist + path.sep)) return new Response("Forbidden", { status: 403 });
@@ -799,13 +862,25 @@ app.whenReady().then(() => {
     width: 1400, height: 880, minWidth: 720, minHeight: 420,
     title: "Runes", icon: path.join(dist, "logo.png"),
     backgroundColor: "#000000",
-    webPreferences: { preload: path.join(__dirname, "preload.cjs"), contextIsolation: true, sandbox: true, nodeIntegration: false, webviewTag: false, spellcheck: false },
+    // `plugins` is the PDF viewer built into the engine, and nothing else: there are no others.
+    webPreferences: { preload: path.join(__dirname, "preload.cjs"), contextIsolation: true, sandbox: true, nodeIntegration: false, webviewTag: false, spellcheck: false, plugins: true },
   });
   // The window shows Runes and nothing else: no navigation, no new windows.
   window.webContents.on("will-navigate", (event) => event.preventDefault());
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-attach-webview", (event) => event.preventDefault());
   window.loadURL(ORIGIN + "/");
+  // What a run that was stopped short left held goes to the trash, where it was promised.
+  held().sweep().catch(() => {});
+});
+
+// Closing settles what was deleted: it goes to the trash now, and Runes waits for that.
+let settled = false;
+app.on("will-quit", (event) => {
+  if (settled || !heldFiles?.held()) return;
+  event.preventDefault();
+  settled = true;
+  Promise.race([heldFiles.flush(), new Promise((r) => setTimeout(r, 8000))]).finally(() => app.quit());
 });
 
 app.on("window-all-closed", () => {

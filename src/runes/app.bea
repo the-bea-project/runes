@@ -146,6 +146,12 @@ def file_import(paths: List(String), into: String, done: fn(List(String), String
 @external(javascript, "../runes_ffi.mjs", "clipboard_files")
 def clipboard_files(done: fn(List(String)) -> Nil) -> Nil
 
+@external(javascript, "../runes_ffi.mjs", "file_undo")
+def file_undo(done: fn(List(String), Int, String) -> Nil) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "focus_tree")
+def focus_tree() -> Nil
+
 @external(javascript, "../runes_ffi.mjs", "files_remove")
 def files_remove(paths: List(String), done: fn(List(String), String) -> Nil) -> Nil
 
@@ -364,6 +370,15 @@ def lsp_actions_soon(path: String, line: Int, col: Int, end_line: Int, end_col: 
 @external(javascript, "../runes_ffi.mjs", "lsp_hover")
 def lsp_hover(path: String, line: Int, col: Int, done: fn(String) -> Nil) -> Nil
 
+@external(javascript, "../runes_ffi.mjs", "lsp_symbols_soon")
+def lsp_symbols_soon(path: String, done: fn(Bool, List((String, String, Int, Int, Int))) -> Nil) -> Nil
+
+@external(javascript, "../runes_ffi.mjs", "scopes_at")
+pub def scopes_at(key: String, version: Int, lines: List(String), line: Int) -> List((String, Int))
+
+@external(javascript, "../runes_ffi.mjs", "lsp_signature")
+def lsp_signature(path: String, line: Int, col: Int, ch: String, open: Bool, done: fn(Bool, String, Int, Int, String, String, Int, Int) -> Nil) -> Nil
+
 @external(javascript, "../runes_ffi.mjs", "lsp_definition")
 def lsp_definition(path: String, line: Int, col: Int, done: fn(String, Int, Int) -> Nil) -> Nil
 
@@ -527,6 +542,43 @@ pub const canvas_language = "rune"
 
 pub const canvas_extension = ".rux"
 
+/// Files that are looked at and not typed in: the language their tabs have. Nothing of such
+/// a file is read into the editor; the view asks the shell for it (see runes_viewers.mjs).
+pub const media_language = "runes-media"
+
+/// How a file is shown when it is not as text: "image", "audio", "video", "pdf" or "sheet"
+/// (all looked at only), "table" (CSV, which is text and can also be edited as text), or "".
+/// The same list as shell/view.cjs keeps, which is the one that decides what is served.
+pub def viewer_of(name: String) -> String {
+  ending = string.lowercase(name) |> string.split(".") |> list.last |> result.unwrap("")
+  dotted = string.contains(name, ".")
+  cond {
+    not dotted -> ""
+    list.contains(["png", "jpg", "jpeg", "jpe", "jfif", "gif", "webp", "bmp", "ico", "avif", "apng"], ending) -> "image"
+    list.contains(["mp3", "wav", "wave", "ogg", "oga", "opus", "flac", "m4a", "aac", "weba", "mka"], ending) -> "audio"
+    list.contains(["mp4", "m4v", "webm", "ogv", "mov", "mkv"], ending) -> "video"
+    ending == "pdf" -> "pdf"
+    list.contains(["xlsx", "xlsm"], ending) -> "sheet"
+    list.contains(["csv", "tsv"], ending) -> "table"
+    _ -> ""
+  }
+}
+
+/// Whether a file at a path is opened to be looked at, with none of it read as text.
+pub def looked_at(path: String) -> Bool {
+  not string.starts_with(path, "runes://") and list.contains(["image", "audio", "video", "pdf", "sheet"], viewer_of(base_name(path)))
+}
+
+/// Whether a file's tab holds a viewer and no text at all.
+pub def is_media(d: Doc) -> Bool {
+  d.language == media_language
+}
+
+/// Whether a CSV file is on show as a table, not as its text.
+pub def is_table(model: Model, d: Doc) -> Bool {
+  viewer_of(d.name) == "table" and d.language != "runes" and not list.contains(model.raw, d.path)
+}
+
 /// Whether a file is on show as a board to draw on, not as text to type in.
 pub def is_canvas(model: Model, d: Doc) -> Bool {
   d.language == canvas_language and not list.contains(model.raw, d.path)
@@ -663,6 +715,31 @@ pub type Overlay {
   NodeMenu(x: Int, y: Int, path: String, folder: Bool)
 }
 
+/// A named thing of a file (a function, a type, a method), as a language server lists them.
+pub type Symbol {
+  name: String,
+  kind: String,
+  line: Int,
+  last: Int,
+  depth: Int,
+}
+
+/// What the function being called expects, shown above the call while its arguments are written.
+pub type Signature {
+  path: String,
+  at: Pos,
+  label: String,
+  /// The stretch of the label that is the argument being written; both 0 when the server did not say.
+  from: Int,
+  to: Int,
+  /// What the server says of that argument, and of the function.
+  about: String,
+  doc: String,
+  /// Which of several signatures this is, and how many there are.
+  index: Int,
+  count: Int,
+}
+
 pub type Hover {
   group: Int,
   at: Pos,
@@ -714,7 +791,13 @@ pub type Model {
   hits: List(Hit),
   search_note: String,
   completion: Option(Completion),
+  /// Escape closed the suggestions: an answer still on its way from a server must not open
+  /// them again. Typing, or asking for them, lifts this.
+  hushed: Bool,
   hover: Option(Hover),
+  signature: Option(Signature),
+  /// What a language server has named in each file, and the version of the text it was asked about.
+  symbols: Dict(String, (Int, List(Symbol))),
   diagnostics: Dict(String, List(Diagnostic)),
   output: List(String),
   heights: Dict(Int, Int),
@@ -826,6 +909,8 @@ pub type Model {
   market_note: String,
   show_builtin: Bool,
   paint: Int,
+  /// Counts the times a file that is only looked at has changed on disk.
+  stamp: Int,
   toast: String,
   toasts: Int,
   untitled: Int,
@@ -854,6 +939,8 @@ pub type Msg {
   TreeImported(paths: List(String), into: String)
   FilesPlaced(into: String, sources: List(String), made: List(String), moved: Bool, problem: String)
   FilesGone(paths: List(String), problem: String)
+  /// What the explorer last deleted was asked back: those that came, and how many could not.
+  FilesRestored(paths: List(String), kept: Int, problem: String)
   UserFiles(settings: String, keys: String)
   UserFileRead(path: String, text: String)
   Key(key: String, ctrl: Bool, shift: Bool, alt: Bool, editor: Bool, chord: String)
@@ -874,6 +961,10 @@ pub type Msg {
   MouseDragged(group: Int, x: Int, y: Int)
   HoverAsked(group: Int, x: Int, y: Int)
   Hovered(group: Int, at: Pos, text: String)
+  /// What a server names in a file. `known` is false when no server answers for it.
+  SymbolsRead(path: String, version: Int, known: Bool, found: List((String, String, Int, Int, Int)))
+  /// What a server says the call the cursor is in expects (or, with `found` false, that it is in none).
+  SignatureRead(path: String, line: Int, col: Int, found: Bool, label: String, from: Int, to: Int, about: String, doc: String, index: Int, count: Int)
   PieEvent(kind: String, x: Int, y: Int)
   PiePicked(index: Int)
   /// A slice was picked with the pointer at this spot; a submenu opens there.
@@ -907,6 +998,8 @@ pub type Msg {
   DropHover(group: Int, edge: Edge)
   Dropped(group: Int, edge: Edge)
   DragEnded
+  /// A tab was dropped on another tab: it joins that tab's group, just before it.
+  TabDroppedAt(group: Int, before: String)
   SashGrabbed(path: String, row: Bool)
   SashMoved(path: String, ratio: Float)
   EdgeGrabbed(which: String)
@@ -1080,6 +1173,7 @@ pub const commands = [
   ("explorer.newFile", "Explorer: New File…"),
   ("explorer.newFolder", "Explorer: New Folder…"),
   ("renameFile", "Explorer: Rename…"),
+  ("runes.explorer.undoDelete", "Explorer: Undo Delete"),
   ("deleteFile", "Explorer: Delete…"),
   ("workbench.files.action.refreshFilesExplorer", "Explorer: Refresh"),
   ("workbench.files.action.collapseExplorerFolders", "Explorer: Collapse Folders"),
@@ -1136,6 +1230,7 @@ pub const commands = [
   ("editor.foldAll", "Fold All"),
   ("editor.unfoldAll", "Unfold All"),
   ("editor.action.toggleWordWrap", "View: Toggle Word Wrap"),
+  ("breadcrumbs.toggle", "View: Toggle Breadcrumbs"),
   ("editor.action.jumpToBracket", "Go to Bracket"),
   ("editor.action.indentationToSpaces", "Indentation: Use Spaces, Use Tabs, or Detect from the File…"),
   ("runes.reload", "Runes: Reload"),
@@ -1147,6 +1242,9 @@ pub const commands = [
   ("workbench.action.restartExtensionHost", "Extensions: Restart Extension Host"),
   ("editor.action.commentLine", "Toggle Line Comment"),
   ("editor.action.copyLinesDownAction", "Copy Line Down"),
+  ("editor.action.indentLines", "Indent Line"),
+  ("editor.action.outdentLines", "Outdent Line"),
+  ("editor.action.deleteLines", "Delete Line"),
   ("editor.action.selectHighlights", "Select All Occurrences"),
   ("editor.action.addSelectionToNextFindMatch", "Add Next Occurrence to the Selection"),
   ("editor.action.insertCursorAbove", "Add Cursor Above"),
@@ -1160,6 +1258,7 @@ pub const commands = [
   ("editor.action.clipboardCopyAction", "Copy"),
   ("editor.action.clipboardPasteAction", "Paste"),
   ("editor.action.triggerSuggest", "Trigger Suggest"),
+  ("editor.action.triggerParameterHints", "Trigger Parameter Hints"),
   ("editor.action.revealDefinition", "Go to Definition"),
   ("editor.action.formatDocument", "Format Document"),
   ("editor.action.marker.next", "Go to Next Problem"),
@@ -1222,7 +1321,10 @@ pub def init(_flags: Nil) -> (Model, Effect(Msg)) {
     hits: [],
     search_note: "",
     completion: None,
+    hushed: False,
     hover: None,
+    signature: None,
+    symbols: dict.new(),
     diagnostics: dict.new(),
     output: [],
     heights: dict.new(),
@@ -1291,6 +1393,7 @@ pub def init(_flags: Nil) -> (Model, Effect(Msg)) {
     market_note: "",
     show_builtin: False,
     paint: 0,
+    stamp: 0,
     toast: "",
     toasts: 0,
     untitled: 0,
@@ -1540,7 +1643,7 @@ def rewalk(model: Model) -> Effect(Msg) {
 
 /// Clean files follow the disk: these are read again, and replaced if they differ.
 def reload(model: Model, paths: List(String)) -> Effect(Msg) {
-  clean = list.filter(model.docs, fn(d) { on_disk(d) and d.version == d.saved and list.contains(paths, d.path) }) |> list.map(fn(d) { d.path })
+  clean = list.filter(model.docs, fn(d) { on_disk(d) and not is_media(d) and d.version == d.saved and list.contains(paths, d.path) }) |> list.map(fn(d) { d.path })
   effect.from(fn(dispatch) {
     list.each(clean, fn(path) {
       read_file(path, fn(text, failed) {
@@ -1764,8 +1867,9 @@ def change_kept(model: Model, with: fn(Doc, Lang) -> Doc) -> (Model, Effect(Msg)
       False -> changed
     }
   }
+  // A drawing on its board, a table, a picture: none of them is text with a cursor in it.
   drawing = case doc(model) {
-    Some(d) -> is_canvas(model, d)
+    Some(d) -> is_canvas(model, d) or is_media(d) or is_table(model, d)
     None -> False
   }
   case doc(model) {
@@ -2076,7 +2180,7 @@ def ask_actions(model: Model) -> Effect(Msg) {
 
 /// The extension host starts afresh when extensions change: tell it again what is open.
 def announce(model: Model) -> Effect(Msg) {
-  open = list.filter(model.docs, on_disk)
+  open = list.filter(model.docs, fn(d) { on_disk(d) and not is_media(d) })
   effect.from(fn(_) { list.each(open, fn(d) { doc_opened(d.path, d.language, d.lines) }) })
 }
 
@@ -2107,7 +2211,8 @@ def open_palette(model: Model, kind: String) -> (Model, Effect(Msg)) {
 def save(model: Model) -> (Model, Effect(Msg)) {
   case doc(model) {
     None -> (model, effect.none())
-    Some(d) if d.language == "runes" -> (model, effect.none())
+    // What is only looked at holds none of the file's bytes: there is nothing of it to write.
+    Some(d) if d.language == "runes" or d.language == media_language -> (model, effect.none())
     Some(d) if d.untitled -> case string.starts_with(d.path, at_tab) {
       True -> toast(model, "This is the file as it was in the past. Open the current file to change it.")
       False -> (model, effect.from(fn(dispatch) { save_as(d.name, fn(path) { dispatch(SavedAs(d.path, path)) }) }))
@@ -2250,7 +2355,8 @@ def next_problem(model: Model, by: Int) -> (Model, Effect(Msg)) {
   case doc(model) {
     None -> (model, effect.none())
     Some(d) -> {
-      all = problems(model, d.path) |> list.sort(fn(a, b) { int.compare(a.from.line * 10_000 + a.from.col, b.from.line * 10_000 + b.from.col) })
+      // Hints are not problems to go to: they are not underlined, and not listed either.
+      all = problems(model, d.path) |> list.filter(fn(p) { p.severity < 4 }) |> list.sort(fn(a, b) { int.compare(a.from.line * 10_000 + a.from.col, b.from.line * 10_000 + b.from.col) })
       ahead = list.find(all, fn(p) { buffer.before(d.cursor, p.from) })
       behind = list.reverse(all) |> list.find(fn(p) { buffer.before(p.from, d.cursor) })
       target = case by > 0 {
@@ -2321,6 +2427,10 @@ pub def run(model: Model, command: String) -> (Model, Effect(Msg)) {
     "workbench.action.selectTheme" -> open_palette(model, "themes")
     "workbench.action.gotoLine" -> open_palette(model, "line")
     "editor.action.indentationToSpaces" -> open_palette(model, "indent")
+    "breadcrumbs.toggle" -> update(closed, SettingChanged("breadcrumbs.enabled", case model.settings.breadcrumbs {
+      True -> "false"
+      False -> "true"
+    }))
     "editor.action.toggleWordWrap" -> update(closed, SettingChanged("editor.wordWrap", case model.settings.word_wrap {
       True -> "\"off\""
       False -> "\"on\""
@@ -2451,8 +2561,17 @@ pub def run(model: Model, command: String) -> (Model, Effect(Msg)) {
     }
     "explorer.newFile" -> update(Model(closed | side: "explorer"), ExplorerDid("newFile", ""))
     "explorer.newFolder" -> update(Model(closed | side: "explorer"), ExplorerDid("newFolder", ""))
-    "renameFile" -> update(Model(closed | side: "explorer"), ExplorerDid("rename", ""))
+    // From the keyboard, away from the explorer, this is about the file being edited: what
+    // was last pointed at in the tree may be a folder opened long ago.
+    "renameFile" -> {
+      active = group(model, model.focus).active
+      update(Model(closed | side: "explorer"), ExplorerDid("rename", case within(active, model.root) and active != model.root {
+        True -> active
+        False -> ""
+      }))
+    }
     "deleteFile" -> update(closed, ExplorerDid("delete", ""))
+    "runes.explorer.undoDelete" -> (closed, effect.from(fn(dispatch) { file_undo(fn(paths, kept, problem) { dispatch(FilesRestored(paths, kept, problem)) }) }))
     "workbench.files.action.refreshFilesExplorer" -> update(closed, ExplorerDid("refresh", ""))
     "workbench.files.action.collapseExplorerFolders" -> update(closed, ExplorerDid("collapse", ""))
     "workbench.view.extensions" -> side("extensions")
@@ -2579,6 +2698,9 @@ pub def run(model: Model, command: String) -> (Model, Effect(Msg)) {
     "editor.action.previousMatchFindAction" -> step_match(closed, -1)
     "editor.action.commentLine" -> edit_with(doc.comment)
     "editor.action.copyLinesDownAction" -> edit_with(fn(d, _) { doc.duplicate(d) })
+    "editor.action.indentLines" -> edit_with(doc.indent_lines)
+    "editor.action.outdentLines" -> edit_with(doc.outdent)
+    "editor.action.deleteLines" -> edit_with(fn(d, _) { doc.delete_lines(d) })
     "editor.action.moveLinesUpAction" -> edit_with(fn(d, _) { doc.move_line(d, -1) })
     "editor.action.moveLinesDownAction" -> edit_with(fn(d, _) { doc.move_line(d, 1) })
     "undo" -> edit_with(fn(d, _) { doc.undo(d) })
@@ -2606,9 +2728,13 @@ pub def run(model: Model, command: String) -> (Model, Effect(Msg)) {
     )
     "editor.action.triggerSuggest" -> case doc(model) {
       Some(d) -> (
-        Model(closed | completion: doc.complete(d, lang(model, d.language), True)),
+        Model(closed | hushed: False, completion: doc.complete(d, lang(model, d.language), True)),
         effect.batch([focus_editor(), ask_completion(d, "")]),
       )
+      None -> (closed, effect.none())
+    }
+    "editor.action.triggerParameterHints" -> case doc(model) {
+      Some(d) -> (closed, effect.batch([focus_editor(), ask_signature(d, "", False)]))
       None -> (closed, effect.none())
     }
     "editor.action.revealDefinition" -> case doc(model) {
@@ -2654,6 +2780,19 @@ def ask_completion(d: Doc, ch: String) -> Effect(Msg) {
     // effects are not promised to run in the order they were made.
     doc_changed(d.path, d.version, d.lines)
     lsp_complete(d.path, line, col, ch, fn(known, incomplete, items) { dispatch(Completed(d.path, line, col, before, known, incomplete, items)) })
+  })
+}
+
+/// Asks what the call at the cursor expects. `ch` is the character just typed, if one was:
+/// a server only opens its help on the characters it has named. `open` says help is showing.
+def ask_signature(d: Doc, ch: String, open: Bool) -> Effect(Msg) {
+  line = d.cursor.line
+  col = d.cursor.col
+  effect.from(fn(dispatch) {
+    doc_changed(d.path, d.version, d.lines)
+    lsp_signature(d.path, line, col, ch, open, fn(found, label, from, to, about, text, index, count) {
+      dispatch(SignatureRead(d.path, line, col, found, label, from, to, about, text, index, count))
+    })
   })
 }
 
@@ -2794,6 +2933,33 @@ pub def update(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
       }
       _, _ -> (Model(moved | blame: None), acted)
     }
+  }
+  // While the help for a call is open it follows the cursor: asked again whenever the text
+  // or the cursor has changed, and closed when another file comes to the front.
+  (stepped, done) = case stepped.signature, doc(stepped) {
+    Some(s), Some(d) if d.path == s.path -> case s.at == d.cursor and Some(d.version) == option.map(doc(model), fn(was) { was.version }) {
+      True -> (stepped, done)
+      False -> (stepped, effect.batch([done, ask_signature(d, "", True)]))
+    }
+    Some(_), _ -> (Model(stepped | signature: None), done)
+    None, _ -> (stepped, done)
+  }
+  // The line above the editor names what the cursor is inside: the server is asked for the
+  // file's symbols when the file in front, or its text, is not the one it last answered about.
+  done = case stepped.settings.breadcrumbs, doc(stepped) {
+    True, Some(d) if d.language != "runes" and d.language != media_language -> {
+      asked = dict.get(stepped.symbols, d.path) |> result.map(fn(s) { s.0 }) |> result.unwrap(-1)
+      was = option.map(doc(model), fn(w) { (w.path, w.version) })
+      // Only when the file in front or its text has just changed: asking on every update
+      // would put the question off for ever, since it waits for the text to rest.
+      case asked == d.version or was == Some((d.path, d.version)) {
+        True -> done
+        False -> effect.batch([done, effect.from(fn(dispatch) {
+          lsp_symbols_soon(d.path, fn(known, found) { dispatch(SymbolsRead(d.path, d.version, known, found)) })
+        })])
+      }
+    }
+    _, _ -> done
   }
   (lit, lighting) = case bulb_spot(stepped) == bulb_spot(model) {
     True -> (stepped, done)
@@ -2960,7 +3126,8 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
         }
         (Model(model | chosen: picked), effect.none())
       }
-      False, False -> update(Model(model | chosen: []), case folder {
+      // A file that is clicked is the one the explorer's keys are about, as a folder is.
+      False, False -> update(Model(model | chosen: [], pointed: path), case folder {
         True -> DirToggled(path)
         False -> FileOpened(path)
       })
@@ -2971,6 +3138,7 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
       "ctrl+v" -> update(model, ExplorerDid("paste", ""))
       "delete" -> update(model, ExplorerDid("delete", ""))
       "f2" -> update(model, ExplorerDid("rename", ""))
+      "ctrl+z" -> run(model, "runes.explorer.undoDelete")
       "ctrl+a" -> (Model(model | chosen: shown_paths(model, model.root)), effect.none())
       _ -> (Model(model | chosen: [], clip: None), effect.none())
     }
@@ -3033,6 +3201,32 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
         }
       }
     }
+    FilesRestored(paths, kept, problem) -> {
+      // What could not go back, because something else has its name now, is in the trash.
+      lost = case kept {
+        0 -> ""
+        1 -> "One thing could not be put back, as something else has its name now: it is in the trash."
+        n -> int.to_string(n) <> " things could not be put back, as something else has their names now: they are in the trash."
+      }
+      case paths, problem {
+        [], "" -> case lost {
+          "" -> (model, effect.none())
+          _ -> toast(model, lost)
+        }
+        [], _ -> toast(model, problem)
+        _, _ -> {
+          back = Model(model | chosen: paths, pointed: list.first(paths) |> result.unwrap(model.pointed))
+          (told, timer) = toast(back, case paths {
+            [one] -> "Put back " <> base_name(one)
+            _ -> "Put back " <> int.to_string(list.length(paths)) <> " items"
+          } <> case lost {
+            "" -> ""
+            _ -> ". " <> lost
+          })
+          (told, effect.batch([timer, reread(told, list.map(paths, dir_of) |> list.unique), rewalk(told), refresh_status()]))
+        }
+      }
+    }
     UserFiles(settings_path, keys_path) -> (
       Model(model | settings_path:, keys_path:),
       effect.from(fn(dispatch) {
@@ -3053,7 +3247,12 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
 
     Key(key, ctrl, shift, alt, editor, chord) -> {
       command = keymap.command(model.bindings, chord)
-      moves = editor and not alt and {
+      // A key that writes a character is not a move: what it writes arrives as text, and
+      // the list of suggestions must still be there then, to be matched against it. (It used
+      // to be closed here and asked for again on every letter; a character that is no part of
+      // a word, as the slash in `import gleam/`, then closed it for good.)
+      writes = string.length(key) == 1 and not ctrl
+      moves = editor and not alt and not writes and {
         not ctrl or string.starts_with(key, "Arrow") or list.contains(["Home", "End", "Backspace", "Delete"], key)
       }
       case model.overlay, model.completion, key {
@@ -3078,7 +3277,7 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
     }
 
     Typed(text) -> {
-      (changed, moved) = change_each(model, fn(d, l, _) { doc.typed(d, l, text) })
+      (changed, moved) = change_each(Model(model | hushed: False), fn(d, l, _) { doc.typed(d, l, text) })
       case doc(changed) {
         Some(d) -> {
           wordy = is_word(text)
@@ -3102,7 +3301,13 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
             False, False, _ -> ask_completion(d, text)
           }
           shown = Model(changed | completion:, hover: None)
-          (shown, effect.batch([moved, asking, ask_about(shown)]))
+          // An opening bracket or a comma may start a call's arguments: the server says. Help
+          // that is open already is kept up to date by `update`.
+          calling = case shown.signature, blank or wordy {
+            None, False -> ask_signature(d, string.slice(text, string.length(text) - 1, 1), False)
+            _, _ -> effect.none()
+          }
+          (shown, effect.batch([moved, asking, calling, ask_about(shown)]))
         }
         None -> (changed, moved)
       }
@@ -3168,7 +3373,7 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
       // The answer is for where it was asked. It still holds if the cursor is on that line,
       // at or past that column, and nothing before that column has changed: more may have
       // been typed since, and the items are matched against that.
-      Some(d) if known and d.path == path and d.cursor.line == line and d.cursor.col >= col and d.more == [] -> {
+      Some(d) if known and not model.hushed and d.path == path and d.cursor.line == line and d.cursor.col >= col and d.more == [] -> {
         text = buffer.line(d.lines, line)
         case buffer.cut(text, 0, col) == before {
           False -> (model, effect.none())
@@ -3239,7 +3444,7 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
 
     MouseDown(group_id, x, y, shift, clicks) -> {
       (line, column) = locate(group_id, x, y)
-      focused = Model(model | focus: group_id, completion: None, hover: None, overlay: Closed)
+      focused = Model(model | focus: group_id, completion: None, hover: None, signature: None, overlay: Closed)
       (changed, _) = change(focused, fn(d, _) {
         text = buffer.line(d.lines, line)
         at = buffer.clamp(d.lines, Pos(line, doc.col_at(text, column)))
@@ -3283,6 +3488,21 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
       _, _ -> (model, effect.none())
     }
     Hovered(group_id, at, text) -> (Model(model | hover: Some(Hover(group_id, at, text, True))), effect.none())
+    // No server answered (none is installed for the language, or it has not started yet):
+    // nothing is kept, so it is asked again when the text next changes.
+    SymbolsRead(path, version, known, found) -> case known {
+      True -> (Model(model | symbols: dict.insert(model.symbols, path, (version, list.map(found, fn(s) { Symbol(s.0, s.1, s.2, s.3, s.4) })))), effect.none())
+      False -> (model, effect.none())
+    }
+    // An answer about a place the cursor has left the line of is dropped. One about an
+    // earlier column of the same line is shown, and asked again by `update`: the cursor has moved.
+    SignatureRead(path, line, col, found, label, from, to, about, text, index, count) -> case doc(model) {
+      Some(d) if d.path == path and d.cursor.line == line -> case found {
+        True -> (Model(model | signature: Some(Signature(path, Pos(line, col), label, from, to, about, text, index, count)), hover: None), effect.none())
+        False -> (Model(model | signature: None), effect.none())
+      }
+      _ -> (model, effect.none())
+    }
 
     PieEvent(kind, x, y) -> case string.split(kind, "\n"), model.overlay {
       ["node", path, what], _ -> {
@@ -3550,11 +3770,16 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
           True -> ""
           False -> closed.pointed
         })
-        (tidy, effect.batch([closing, reread(tidy, [dir_of(path)]), rewalk(tidy), refresh_status()]))
+        // The keyboard stays with the explorer, so that Ctrl+Z there can take the deletion back.
+        (tidy, effect.batch([closing, reread(tidy, [dir_of(path)]), rewalk(tidy), refresh_status(), effect.from(fn(_) { focus_tree() })]))
       }
       _, _ -> toast(model, problem)
     }
-    FilesChanged(dirs, files, git) -> (model, effect.batch([
+    // A picture or a film that changed on disk is shown again: its view goes by `stamp`.
+    FilesChanged(dirs, files, git) -> (Model(model | stamp: case list.any(model.docs, fn(d) { is_media(d) and list.contains(files, d.path) }) {
+      True -> model.stamp + 1
+      False -> model.stamp
+    }), effect.batch([
       reread(model, dirs),
       reload(model, files),
       case dirs {
@@ -3582,10 +3807,16 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
         (told, effect.batch([timer, refresh_git(model.until)]))
       }
     }
-    FileOpened(path) -> case find_doc(model, path), path {
-      _, "" -> (model, effect.none())
+    FileOpened(path) -> case find_doc(model, path), path, looked_at(path) {
+      _, "", _ -> (model, effect.none())
+      // A picture, a sound, a film, a PDF, a workbook: shown, never read as text.
+      Some(d), _, _ if d.language == media_language -> show(model, model.focus, path)
+      None, _, True -> {
+        opened = Doc(path, base_name(path), media_language, [""], Pos(0, 0), Pos(0, 0), -1, 0, 0, 0, [], [], False, False, [])
+        show(Model(model | overlay: Closed, docs: list.append(model.docs, [opened])), model.focus, path)
+      }
       // Already open: show it, and read it again in case another program has changed it.
-      Some(_), _ -> {
+      Some(_), _, _ -> {
         (shown, showing) = show(model, model.focus, path)
         (shown, effect.batch([showing, effect.from(fn(dispatch) {
           read_file(path, fn(text, failed) {
@@ -3596,7 +3827,7 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
           })
         })]))
       }
-      None, _ -> (
+      None, _, _ -> (
         Model(model | overlay: Closed),
         effect.from(fn(dispatch) { read_file(path, fn(text, problem) { dispatch(FileRead(path, text, problem)) }) }),
       )
@@ -3689,6 +3920,23 @@ def step(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
             }
           }
         }
+      }
+    }
+    TabDroppedAt(target, before) -> case model.drag {
+      None -> (model, effect.none())
+      Some((path, _)) -> {
+        (moved, effects) = update(model, Dropped(target, Middle))
+        groups = list.map(moved.groups, fn(g) {
+          case g.id == target and path != before and list.contains(g.tabs, path) and list.contains(g.tabs, before) {
+            False -> g
+            True -> {
+              others = list.filter(g.tabs, fn(t) { t != path })
+              (ahead, behind) = list.split_while(others, fn(t) { t != before })
+              Group(g | tabs: list.flatten([ahead, [path], behind]))
+            }
+          }
+        })
+        (Model(moved | groups:), effects)
       }
     }
     SashGrabbed(path, row) -> (
@@ -4618,9 +4866,9 @@ def key_in_editor(
       }
       (shown, effect.batch([moved, ask_about(shown)]))
     }
-    Some(_), "Escape" -> (Model(model | completion: None), effect.none())
+    Some(_), "Escape" -> (Model(model | completion: None, hushed: True), effect.none())
     _, "Escape" if model.finding -> update(model, FindClosed)
-    _, "Escape" -> change_kept(Model(model | hover: None, peek: None), fn(d, _) { doc.single(d) })
+    _, "Escape" -> change_kept(Model(model | hover: None, peek: None, signature: None), fn(d, _) { doc.single(d) })
     _, "Enter" if model.finding and not editor -> step_match(model, case shift {
       True -> -1
       False -> 1

@@ -552,3 +552,39 @@ export function conflict_taken(table, lines, index, which) {
   const ours = all.slice(c.start + 1, c.base >= 0 ? c.base : c.mid), theirs = all.slice(c.mid + 1, c.end);
   return [c.start, c.end, which === "ours" ? ours : which === "theirs" ? theirs : [...ours, ...theirs]];
 }
+
+// --- What the cursor is inside ------------------------------------------------------------------
+// For the line above an editor that names the function, type or class the cursor is in, when
+// no language server has said. It goes by how lines are indented and by the words most
+// languages start a definition with: right often enough to be worth showing, and it claims
+// no more than a name.
+
+const DEFINES = /^\s*(?:(?:export|default|pub(?:\([a-z ]+\))?|public|private|protected|internal|static|async|abstract|final|override|unsafe|extern|inline|virtual|open|sealed|data|const)\s+)*(?:def|defp|defmodule|fn|func|fun|function\*?|class|struct|enum|trait|impl|interface|type|module|mod|namespace|object|sub|proc|macro|record|protocol|extension)\s+(?:\([^)]*\)\s*)?([\p{L}_$][\p{L}\p{N}_$]*(?:(?:\.|::)[\p{L}_$][\p{L}\p{N}_$]*)*)/u;
+const ASSIGNS = /^\s*(?:export\s+)?(?:const|let|var)\s+([\p{L}_$][\p{L}\p{N}_$]*)\s*=\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*(?::\s*[^=]+)?=>|[\p{L}_$][\p{L}\p{N}_$]*\s*=>)/u;
+const named = (text) => (DEFINES.exec(text) ?? ASSIGNS.exec(text))?.[1] ?? "";
+const scopeCache = new Map();
+/**
+ * The definitions a line is inside, outermost first: `[[name, line], …]`. `key` and
+ * `version` say which text this is, so that the same question is not worked out twice.
+ */
+export function scopes_at(key, version, lines, line) {
+  const id = key + "\u0000" + version + "\u0000" + line;
+  const known = scopeCache.get(id);
+  if (known) return known;
+  const all = Array.isArray(lines) ? lines : lines.toArray();
+  const out = [];
+  // Each definition found must be indented less than whatever was found below it.
+  let inside = Infinity;
+  for (let i = Math.min(line, all.length - 1); i >= 0 && inside > 0; i--) {
+    const text = all[i];
+    if (text.trim() === "") continue;
+    const depth = vcol(text, text.length - text.trimStart().length);
+    if (depth >= inside) continue;
+    const name = named(text);
+    if (name) out.unshift([name, i]);
+    inside = depth;
+  }
+  if (scopeCache.size > 400) scopeCache.clear();
+  scopeCache.set(id, out);
+  return out;
+}

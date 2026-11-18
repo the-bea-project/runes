@@ -110,6 +110,39 @@ try {
   assert.ok(Array.isArray(edits) && edits.length > 0);
   console.log(`ok  format document: ${edits.length} edit(s)`);
 
+  // What the call being written expects, from the real server: the signature, and the argument in hand.
+  const calling = 'import gleam/int\n\npub def double(n: Int) -> Int {\n  n * 2\n}\n\npub def label(n: Int) -> String {\n  int.to_string(double(\n}\n';
+  host.send({ type: "changed", path: file, version: 5, text: calling });
+  // The server answers once it has read the change: asked until it does.
+  const again = async (kind, line, col, extra) => {
+    for (let i = 0; i < 40; i++) { const found = await ask(kind, line, col, extra); if (found && (!Array.isArray(found) || found.length)) return found; await new Promise((r) => setTimeout(r, 500)); }
+    return null;
+  };
+  const help = await again("signature", 7, 23, { ch: "(", open: false });
+  assert.ok(help && /double/.test(help.label), "signature help: " + JSON.stringify(help));
+  assert.ok(help.to > help.from && /n/.test(help.label.slice(help.from, help.to)), "the argument in hand is marked: " + JSON.stringify(help));
+  assert.equal(await ask("signature", 7, 23, { ch: "x", open: false }), null, "a character the server did not name opens nothing");
+  console.log(`ok  signature help: ${help.label}, argument "${help.label.slice(help.from, help.to)}"`);
+
+  // The named things of the file, for the line above the editor.
+  host.send({ type: "changed", path: file, version: 6, text: good });
+  const named = (await again("symbols", 0, 0)) ?? [];
+  assert.deepEqual(named.map((s) => s.name), ["double", "label"], JSON.stringify(named));
+  assert.ok(named[0].line <= 2 && named[0].endLine >= 4 && named[0].kind === "function", JSON.stringify(named[0]));
+  console.log(`ok  document symbols: ${named.map((s) => s.name).join(", ")}`);
+
+  // A dependency added to the manifest while the editor runs is known without starting again:
+  // the extension is told the manifest changed (its file watcher is real), and its server,
+  // which does not take that in while it runs, is started again for it.
+  const needs = 'import gleam/json\n' + good;
+  host.send({ type: "changed", path: file, version: 7, text: needs });
+  await until("the import of a package that is not there to be an error", () => (diagnostics.get(file) ?? []).some((d) => d.severity === 1 && /Unknown module/.test(d.message)));
+  writeFileSync(join(project, "bea.toml"), 'name = "shop"\nversion = "0.1.0"\n\n[dependencies]\ngleam_stdlib = ">= 0.44.0 and < 2.0.0"\ngleam_json = ">= 3.0.0 and < 4.0.0"\n');
+  await until("the server to be started again for the changed manifest", () => notes.some((n) => /bea\.toml changed: running bea\.restartServer/.test(n)), 20000);
+  await until("the package to be known", () => { const now = diagnostics.get(file) ?? []; return !now.some((d) => /Unknown module/.test(d.message)) && now.some((d) => /Unused/.test(d.message)); }, 120000);
+  console.log("ok  a dependency added to bea.toml is known without a reload");
+  host.send({ type: "changed", path: file, version: 8, text: good });
+
   // A quick fix from a real language server: Gleam offers to remove an import nothing uses.
   const gleamProject = join(work, "gshop");
   mkdirSync(join(gleamProject, "src"), { recursive: true });

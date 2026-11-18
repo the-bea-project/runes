@@ -247,3 +247,74 @@ test("a bent line is drawn as one curve, the same every time, and its arrowhead 
   assert.ok(fx < 200 && fy > 0, "it arrives from below and to the left");
   assert.deepEqual(approach(arrow(), true), [0, 0]);
 });
+
+// --- Groups, and writing of any size ---------------------------------------------------------------
+import { groupOf, withGroups, isGroup, grouped, ungrouped, regrouped, cleanSize, SMALLEST, LARGEST, MOST_GROUPS } from "../src/runes_canvas.mjs";
+
+const three = () => ["a", "b", "c"].map((id, i) => cleanElement(rect({ id, x: i * 200 })));
+
+test("things grouped are chosen together, and a group can be grouped again", () => {
+  const one = grouped(three(), new Set(["a", "b"]), "g1");
+  assert.deepEqual(one.map((e) => e.groups), [["g1"], ["g1"], undefined]);
+  assert.deepEqual([...withGroups(one, ["a"])].sort(), ["a", "b"]);
+  assert.deepEqual([...withGroups(one, ["c"])], ["c"]);
+  assert.equal(isGroup(one, new Set(["a", "b"])), true);
+  assert.equal(isGroup(one, new Set(["a"])), false);
+  assert.equal(isGroup(one, new Set(["a", "b", "c"])), false);
+  // The group and a third thing, grouped: choosing any of the three now chooses all of them.
+  const two = grouped(one, new Set(["a", "b", "c"]), "g2");
+  assert.deepEqual(two.map((e) => e.groups), [["g1", "g2"], ["g1", "g2"], ["g2"]]);
+  assert.equal(groupOf(two[0]), "g2");
+  assert.deepEqual([...withGroups(two, ["c"])].sort(), ["a", "b", "c"]);
+  // Taken apart, the inner group is itself again; taken apart once more, nothing is grouped.
+  const back = ungrouped(two, new Set(["a", "b", "c"]));
+  assert.deepEqual(back.map((e) => e.groups), [["g1"], ["g1"], undefined]);
+  assert.deepEqual(ungrouped(back, new Set(["a", "b"])).map((e) => "groups" in e), [false, false, false]);
+});
+
+test("one thing is no group, and a thing cannot be in groups without end", () => {
+  const all = three();
+  assert.equal(grouped(all, new Set(["a"]), "g"), all);
+  assert.equal(grouped(all, new Set(["a", "b"]), "not a name!"), all);
+  let deep = all;
+  for (let i = 0; i < MOST_GROUPS; i++) deep = grouped(deep, new Set(["a", "b"]), "g" + i);
+  assert.equal(deep[0].groups.length, MOST_GROUPS);
+  assert.equal(grouped(deep, new Set(["a", "b"]), "more"), deep);
+});
+
+test("groups are kept in the file, and what is not a group's name is dropped on reading", () => {
+  const text = serialize(grouped(three(), new Set(["a", "b"]), "g1"));
+  assert.match(text.split("\n")[4], /"groups":\["g1"\]/);
+  assert.doesNotMatch(text.split("\n")[6], /groups/, "a thing in no group says nothing of groups");
+  assert.deepEqual(parse(text).elements.map((e) => e.groups), [["g1"], ["g1"], undefined]);
+  const odd = parse(file([rect({ groups: ["ok", 7, "<script>", "ok", null, "fine-1"] }), rect({ id: "b", groups: "g1" }), rect({ id: "c", groups: Array.from({ length: 30 }, (_, i) => "g" + i) })])).elements;
+  assert.deepEqual(odd[0].groups, ["ok", "fine-1"]);
+  assert.equal(odd[1].groups, undefined);
+  assert.equal(odd[2].groups.length, MOST_GROUPS);
+});
+
+test("a copy of a group is a group of its own", () => {
+  const made = regrouped(grouped(grouped(three(), new Set(["a", "b"]), "g1"), new Set(["a", "b", "c"]), "g2"), new Set(["g1", "g2"]));
+  assert.equal(made[0].groups[0], made[1].groups[0]);
+  assert.equal(made[0].groups[1], made[2].groups[0]);
+  assert.ok(!["g1", "g2"].includes(made[0].groups[0]) && !["g1", "g2"].includes(made[0].groups[1]));
+  assert.notEqual(made[0].groups[0], made[0].groups[1]);
+});
+
+test("writing can be any size within bounds, and is scaled when what it is part of is resized", () => {
+  assert.equal(cleanSize(33.4), 33);
+  assert.equal(cleanSize(1), SMALLEST);
+  assert.equal(cleanSize(9999), LARGEST);
+  assert.equal(cleanSize("big"), 20);
+  assert.equal(cleanSize(NaN), 20);
+  const word = cleanElement({ type: "text", text: "hi", x: 10, y: 10, size: 20 });
+  assert.equal(parse(file([{ ...word, size: 37 }])).elements[0].size, 37);
+  assert.match(serialize([{ ...word, size: 37 }]), /"size":37/);
+  const from = { x: 0, y: 0, w: 100, h: 50 };
+  assert.equal(fit(word, from, { x: 0, y: 0, w: 200, h: 100 }).size, 40);
+  assert.equal(fit(word, from, { x: 0, y: 0, w: 50, h: 25 }).size, 10);
+  assert.equal(fit(word, from, { x: 0, y: 0, w: 300, h: 50 }).size, 20, "made wider only, it stays the size it was");
+  assert.equal(fit(word, from, { x: 0, y: 0, w: 1, h: 1 }).size, SMALLEST);
+  // A shape's own label is not scaled with the shape: the shape is rewrapped round it.
+  assert.equal(fit(cleanElement(rect({ text: "label", size: 20 })), from, { x: 0, y: 0, w: 200, h: 100 }).size, 20);
+});

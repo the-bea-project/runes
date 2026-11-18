@@ -2,6 +2,84 @@
 
 Runes follows [semantic versioning](https://semver.org) from 1.0.0 on.
 
+## 1.3.0
+
+Editing
+- **Ctrl+] and Ctrl+[** move the line, or every line of the selection, a step in and out,
+  wherever the cursor is in it. **Ctrl+Shift+K** deletes the line.
+- **Alt+Shift+Up and Alt+Shift+Down** put another cursor on the line above or below, one for
+  each press, as in VS Code on Linux. Copy Line Down moves to Ctrl+Shift+Alt+Down.
+- **Signature help.** While a call's arguments are written, what the function expects is
+  shown over the line, with the argument in hand marked and what the server says of it.
+  It follows the cursor through the call and closes when the call does, or on Escape.
+  `Trigger Parameter Hints` in the palette asks for it.
+- **Breadcrumbs**: a line above each editor that says where the file is and which function,
+  type or class the cursor is inside. The names come from the language server; without one,
+  from how the lines are indented. A name that is clicked is gone to. `breadcrumbs.enabled`,
+  or `View: Toggle Breadcrumbs`.
+- Suggestions, hovers and signature help are placed against the window, not inside the text.
+  A wide list of suggestions no longer gives the editor a sideways scroll bar, breaks the
+  wrapping of lines, or scrolls the line numbers out of sight.
+- The list of suggestions stays open while characters are typed, and is matched against them.
+  It used to be closed on every key and asked for again, and a character that is no part of
+  a word, as the slash in `import gleam/`, closed it for good. Escape closes it, and an
+  answer still on its way from the server no longer opens it again.
+
+Language servers
+- **File watchers are real.** An extension that asks to be told when files change
+  (`createFileSystemWatcher`) is now told. This is how a language server hears that a
+  manifest changed: a dependency added to `Cargo.toml`, `go.mod` or `pyproject.toml` is
+  known without reloading the editor.
+- The Bea and Gleam servers do not take a changed manifest in while they run. Runes starts
+  them again when `bea.toml` or `gleam.toml` changes, through their extensions' own restart
+  command (`runes.restartServersOnManifestChange`, on by default).
+- **A module that cannot be found is an error**, whatever level its server reports it at.
+  Hints are no longer underlined in blue: a plain hint is a few dots, code that is not
+  needed is faded, code that is out of date is struck through, as in VS Code. Hints are not
+  listed among the problems, counted, or stopped at by F8.
+- A server's first answers are waited for (up to 45 seconds, not 8): the first list of
+  suggestions after a server starts no longer goes missing.
+
+Viewers
+- **Pictures, sound, film, PDFs, workbooks and CSV open to be looked at.** PNG, JPEG, GIF,
+  WebP, BMP, ICO and AVIF; MP3, WAV, OGG, Opus, FLAC, M4A and AAC; MP4, WebM, OGV, MOV and
+  MKV, in the engine's own players; PDF in the engine's own viewer; `.xlsx` workbooks and
+  CSV or TSV files as tables, with sheets, sorting by a column and any number of rows.
+  A CSV file is also text: `Edit as text` and `Show the table` go between the two.
+
+Explorer
+- **F2 renames the file in front**, and in the explorer the file that was clicked. It used to
+  rename the folder last opened.
+- **Ctrl+Z in the explorer brings back what was deleted**, a file or a folder with all that was
+  in it, the last twenty deletions, last first. What is not brought back goes to the system's
+  trash when Runes closes; so does anything whose place has been taken since. (Where the folder is on another disk than Runes' own data, large
+  things go straight to the trash, which can still give them back.)
+- Rows of the tree are kept as files and folders appear, go and open around them. Opening
+  an empty folder, or anything changing above an open one, no longer redraws what is below.
+
+Tabs
+- **A tab dropped on a group's strip of tabs joins that group**; dropped on a tab, it goes in
+  before that tab, which also puts the tabs of one group in another order. Before this a tab
+  could only be dropped on an editor, where all but the middle makes a new tile.
+
+Terminal
+- **A password or a token never becomes a terminal's name.** A terminal is named after the
+  last command typed at its shell: not after what was typed into a program the shell runs
+  (git asking for a password), not after what was typed and not shown, and not after anything
+  that reads as a secret. A command that carries one is named after its program alone.
+
+Rune Canvas
+- **Groups.** Several things chosen are made one with Ctrl+G, or from the panel of what is
+  chosen, and are then chosen, moved, copied and resized as one. Ctrl+Shift+G takes a group
+  apart again. A group can be grouped; Alt and a click chooses one thing inside a group.
+- **Writing of any size.** Pull the corner of a piece of writing to make it larger or smaller,
+  or step it from the panel; writing in a group is scaled with the group.
+- **Lines can be kept from sticking to shapes**: the magnet beside the grid button, or M.
+  Alt while dragging holds it off once. The choice is kept between sessions.
+
+Also
+- The logo no longer redraws itself when pointed at. Its own slow light stays.
+
 ## 1.2.0
 
 Editing

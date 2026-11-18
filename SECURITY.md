@@ -1,4 +1,4 @@
-# Security review of Runes 1.2.0
+# Security review of Runes 1.3.0
 
 What was checked, what was changed because of it, and what remains. Reviewed against the code
 in this repository; the automated checks named below are in `shell/shell.test.cjs` and
@@ -40,7 +40,14 @@ in this repository; the automated checks named below are in `shell/shell.test.cj
 | A session's fields, or a file name on the other machine, being read as a command or an option | Host and user are checked against strict patterns and may not start with `-`. Every word sent to the other machine's shell is single-quoted, and the tests use a folder with a quote in its name and a commit message with `$(...)` in it | unit test |
 | The window reaching this machine's files through the remote handlers, or the reverse | While connected, workspace paths go to the other machine; only paths inside Runes' own profile folder stay local. Git's checks that a path is inside the folder apply on both | unit test |
 | The explorer making, renaming or deleting something outside the open folder | The shell resolves every path it is given and refuses any that is not strictly inside the open folder (the folder itself cannot be renamed or deleted); creating never overwrites, and renaming never replaces an existing file | unit test, end-to-end: the handlers are called from the page with paths outside the folder |
-| Deleting by mistake | The shell asks in the window first. On this machine a file goes to the system trash; only if there is none is permanent deletion offered, with a second question. Over SSH the question says there is no trash | end-to-end |
+| Deleting by mistake | The shell asks in the window first. On this machine what is deleted is held aside in Runes' own data folder, where Ctrl+Z in the explorer puts it back; it goes to the system trash when twenty more have been deleted after it and when Runes closes. Over SSH the question says there is no trash | end-to-end, unit test |
+| Undoing a deletion used to write somewhere, or to bring back something else | `fileUndo` takes no arguments: only what Runes itself took out of the open folder comes back, only to the place it was taken from, and never over something that is there now. Links are moved as links and never followed | unit test, end-to-end |
+| A picture, a film, a PDF or a workbook being a way to run something, or to read other files | The window is given an address for one file (`runes://view/<random>/name`), never a path: only for a file of the open folder, on this machine, whose name ends in a kind that is looked at. The type served comes from the name, from a fixed list with nothing in it that can run (no HTML, no SVG), with `nosniff` and a policy of `default-src 'none'`, and `sandbox` for all but PDFs. A page named `.png` is a broken picture. The page's own policy lets pictures, sound, film and frames come from `runes://view` only | end-to-end, unit test |
+| A PDF reaching the network or the shell | It is drawn by the engine's own viewer in a frame. Frames may only be `runes://view`; the shell answers only the top frame of `runes://app/`; the PDF's response allows it to load nothing | end-to-end, review |
+| A workbook (`.xlsx`) or CSV made to exhaust or to run | Read as data by the page: only the parts of the zip that hold sheets are unpacked, none past 256 MB, no more than 100 sheets, 200,000 rows and 1,000 columns of each; nothing outside the workbook is followed; every value reaches the page as text | unit test |
+| A password or a token typed into a terminal ending up on show as its name | A terminal is named only after a line typed at the shell's own prompt (the shell's process group has the terminal, where the system can say), that the terminal showed as it was typed, and that does not read as a secret; a command that carries one is named after its program alone | end-to-end, unit test |
+| Extensions watching the disk | `createFileSystemWatcher` is real: the open folder is followed, one watch to a folder and at most 3,000; folders of built or fetched things (`node_modules`, `target`, `.git`…) only at their top. A folder an extension names outside the open one is watched itself and nothing under it. An extension could already read any file | unit test |
+| A changed manifest used to run something | When `bea.toml` or `gleam.toml` of the open folder changes, Runes runs the restart command of the Bea or Gleam extension, if it is installed, and nothing else; `runes.restartServersOnManifestChange` turns it off | extension host test |
 | Discard throwing away the wrong work | Only the named paths, which must lie inside the folder and may not start with `-`; git runs without a shell; the shell asks in the window first, every time | unit test, end-to-end |
 | A file name on the other machine read as a command when a folder is removed there | `rm -rf --` with the path single-quoted, after the same inside-the-folder check; without a shell the folder is taken apart over SFTP | unit test |
 | Watching for changes used to read outside the folder | Only folders inside the open folder are watched; the page is told which folder or file changed, never file contents | by reading |
@@ -71,6 +78,11 @@ in this repository; the automated checks named below are in `shell/shell.test.cj
   signing passphrases and the stand-ins for gpg and askpass), switching branch, changing git's
   settings, and the check for updates with its one outside address. The shell has fewer
   requests to answer, and none of them now reaches the network except the marketplace's.
+- 1.3.0 added one more place the window can load from, `runes://view`, for files that are
+  looked at, and turned on the engine's PDF viewer (`plugins`); both are held as the table
+  above says. A late find while testing it: the name of a terminal was whatever was last
+  typed into it, so a token pasted at git's prompt was shown as the tab's name. Fixed, with
+  tests.
 
 ## Known and accepted
 

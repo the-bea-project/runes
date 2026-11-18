@@ -578,6 +578,37 @@ pub def outdent(doc: Doc, lang: Lang) -> Doc {
   }))
 }
 
+/// Moves the lines the selection touches one step in, wherever the cursor is in them.
+pub def indent_lines(doc: Doc, lang: Lang) -> Doc {
+  rewrite(doc, list.map(_, fn(l) {
+    case string.trim(l) {
+      "" -> l
+      _ -> unit(lang) <> l
+    }
+  }))
+}
+
+/// Takes out the lines the selection touches. The cursor stays on the line that takes
+/// their place, as near to its column as that line allows.
+pub def delete_lines(doc: Doc) -> Doc {
+  (from, to) = selection(doc)
+  // A selection that ends at the very start of a line has not touched that line.
+  last = case to.col == 0 and to.line > from.line {
+    True -> to.line - 1
+    False -> to.line
+  }
+  (head, rest) = list.split(doc.lines, from.line)
+  tail = list.drop(rest, last - from.line + 1)
+  lines = case list.append(head, tail) {
+    [] -> [""]
+    left -> left
+  }
+  line = int.min(from.line, list.length(lines) - 1)
+  at = Pos(line, int.min(doc.cursor.col, buffer.len(buffer.line(lines, line))))
+  edited = edit(doc, lines, at, False)
+  Doc(edited | anchor: at)
+}
+
 pub def tab(doc: Doc, lang: Lang) -> Doc {
   (from, to) = selection(doc)
   line = buffer.line(doc.lines, doc.cursor.line)

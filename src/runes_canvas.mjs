@@ -22,7 +22,13 @@ export const TYPES = [...SHAPES, "line", "arrow", "draw", "text"];
 export const COLOURS = ["ink", "grey", "red", "orange", "amber", "green", "teal", "blue", "violet", "pink"];
 export const WIDTHS = [1, 2, 4];
 export const DASHES = ["solid", "dashed", "dotted"];
+// The sizes on offer by name. Writing can be any size between the two bounds: it is scaled
+// by pulling its corner, and stepped up and down from the panel.
 export const SIZES = [14, 20, 28, 40];
+export const SMALLEST = 6, LARGEST = 400;
+/** A size for writing: a whole number within bounds, or the usual one for what is not a size. */
+export const cleanSize = (value) => (typeof value === "number" && Number.isFinite(value) ? Math.min(LARGEST, Math.max(SMALLEST, Math.round(value))) : 20);
+export const MOST_GROUPS = 8;
 export const HEADS = ["none", "end", "both"];
 export const ALIGNS = ["left", "center", "right"];
 
@@ -65,9 +71,12 @@ export function cleanElement(raw, taken = new Set()) {
     stroke: oneOf(raw.stroke, COLOURS, "ink"), fill: oneOf(raw.fill, ["none", ...COLOURS], "none"),
     width: oneOf(raw.width, WIDTHS, 2), dash: oneOf(raw.dash, DASHES, "solid"),
     round: raw.round !== false, sketch: raw.sketch !== false, seed: Math.floor(number(raw.seed, 1, 0, 2 ** 31 - 1)),
-    text: words(raw.text, 4000), size: oneOf(raw.size, SIZES, 20), align: oneOf(raw.align, ALIGNS, raw.type === "text" ? "left" : "center"),
+    text: words(raw.text, 4000), size: cleanSize(raw.size), align: oneOf(raw.align, ALIGNS, raw.type === "text" ? "left" : "center"),
     link: cleanLink(raw.link),
   };
+  // The groups an element is part of, the innermost first: a group can be grouped again.
+  const groups = (Array.isArray(raw.groups) ? raw.groups : []).filter((g) => typeof g === "string" && /^[\w-]{1,40}$/.test(g));
+  if (groups.length) el.groups = [...new Set(groups)].slice(0, MOST_GROUPS);
   if (el.type === "arrow" || el.type === "line") {
     el.head = oneOf(raw.head, HEADS, el.type === "arrow" ? "end" : "none");
     el.from = typeof raw.from === "string" && /^[\w-]{1,40}$/.test(raw.from) ? raw.from : "";
@@ -111,7 +120,7 @@ export function parse(text) {
 
 // What is written for each kind, in this order; a field at its usual value is left out.
 const USUAL = { stroke: "ink", fill: "none", width: 2, dash: "solid", round: true, sketch: true, text: "", size: 20, link: "", from: "", to: "" };
-const ORDER = ["id", "type", "x", "y", "w", "h", "bends", "points", "text", "size", "align", "stroke", "fill", "width", "dash", "round", "sketch", "head", "from", "to", "link", "seed"];
+const ORDER = ["id", "type", "x", "y", "w", "h", "bends", "points", "text", "size", "align", "stroke", "fill", "width", "dash", "round", "sketch", "head", "from", "to", "link", "groups", "seed"];
 
 /** The drawing as the text of its file: one element to a line, fields in a fixed order, so a change shows as a small diff. */
 export function serialize(elements) {
@@ -123,6 +132,7 @@ export function serialize(elements) {
       if (key === "align" && el.align === (el.type === "text" ? "left" : "center")) continue;
       if (key === "head" && el.head === (el.type === "arrow" ? "end" : "none")) continue;
       if (key === "bends" && !el.bends?.length) continue;
+      if (key === "groups" && !el.groups?.length) continue;
       if ((key === "size" || key === "align") && !el.text) continue;
       if (key === "round" && !SHAPES.includes(el.type)) continue;
       if (key === "fill" && !SHAPES.includes(el.type)) continue;
@@ -377,8 +387,59 @@ export function fit(el, from, to) {
   const next = { ...el, x: round(to.x + (el.x - from.x) * sx), y: round(to.y + (el.y - from.y) * sy) };
   if (el.type === "draw") next.points = el.points.map(([px, py]) => [round(px * sx), round(py * sy)]);
   else if (el.type !== "text") { next.w = round(el.w * sx); next.h = round(el.h * sy); }
+  // Writing has no box of its own to stretch: it is made larger or smaller, by the lesser
+  // of the two ways the box changed, so that it still fits where it was.
+  else next.size = cleanSize(el.size * Math.min(sx, sy));
   if (el.bends?.length) next.bends = el.bends.map(([bx, by]) => [round(to.x + (bx - from.x) * sx), round(to.y + (by - from.y) * sy)]);
   return next;
+}
+
+// --- Groups --------------------------------------------------------------------------------------
+// Elements that are grouped are chosen, moved, copied and resized as one. Each carries the
+// names of the groups it is in, innermost first, so a group can itself be part of a group.
+
+/** The group an element is chosen with: its outermost, or "" when it is in none. */
+export const groupOf = (el) => el.groups?.[el.groups.length - 1] ?? "";
+
+/** A choice of elements, made whole: everything grouped with any of them is chosen with it. */
+export function withGroups(elements, ids) {
+  const picked = new Set(ids), groups = new Set();
+  for (const el of elements) if (picked.has(el.id) && groupOf(el)) groups.add(groupOf(el));
+  if (!groups.size) return picked;
+  for (const el of elements) if (groups.has(groupOf(el))) picked.add(el.id);
+  return picked;
+}
+
+/** Whether the chosen elements are exactly one group, whole. */
+export function isGroup(elements, ids) {
+  const chosen = elements.filter((el) => ids.has(el.id));
+  const name = chosen.length > 1 ? groupOf(chosen[0]) : "";
+  return !!name && chosen.every((el) => groupOf(el) === name) && elements.filter((el) => groupOf(el) === name).length === chosen.length;
+}
+
+/** The elements with the chosen ones made one group named `name`. Fewer than two is no group. */
+export function grouped(elements, ids, name) {
+  const chosen = elements.filter((el) => ids.has(el.id));
+  if (chosen.length < 2 || !/^[\w-]{1,40}$/.test(name) || chosen.some((el) => (el.groups?.length ?? 0) >= MOST_GROUPS)) return elements;
+  return elements.map((el) => (ids.has(el.id) ? { ...el, groups: [...(el.groups ?? []), name] } : el));
+}
+
+/** The elements with the chosen ones taken out of their outermost group: its parts are themselves again. */
+export function ungrouped(elements, ids) {
+  return elements.map((el) => {
+    if (!ids.has(el.id) || !el.groups?.length) return el;
+    const { groups, ...rest } = el;
+    return groups.length > 1 ? { ...rest, groups: groups.slice(0, -1) } : rest;
+  });
+}
+
+/** Copies of elements keep their grouping among themselves, under names of their own: a copy is not part of the group it was copied from. */
+export function regrouped(items, taken = new Set()) {
+  const names = new Map();
+  return items.map((el) => {
+    if (!el.groups?.length) return el;
+    return { ...el, groups: el.groups.map((g) => { if (!names.has(g)) { const name = freshId(taken); taken.add(name); names.set(g, name); } return names.get(g); }) };
+  });
 }
 
 // --- The look of a hand-drawn line ---

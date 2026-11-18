@@ -295,8 +295,8 @@ def explorer(model: Model) -> List(Element(Msg)) {
         html.button([class("mini"), event.on_click(app.ExplorerDid("collapse", "")), ..labelled("Collapse every folder")], [icon("collapse")]),
       ]),
     ]),
-    html.div(
-      [class("tree files"), attribute.role("tree"), attribute.attribute("aria-multiselectable", "true"), attribute.attribute("data-root", model.root)],
+    keyed.div(
+      [class("tree files"), attribute.role("tree"), attribute.attribute("tabindex", "-1"), attribute.attribute("aria-multiselectable", "true"), attribute.attribute("data-root", model.root)],
       tree(model, model.root, 0, git_marks(model)),
     ),
   ]
@@ -378,7 +378,11 @@ def glyph(name: String, folder: Bool, open: Bool, language: String) -> Element(M
   }
 }
 
-def tree(model: Model, path: String, depth: Int, marks: dict.Dict(String, String)) -> List(Element(Msg)) {
+/// The rows of a folder, each with the path it is the row of. The page keeps a row for as
+/// long as its path is listed: a file or folder that appears, goes, or opens above it moves
+/// it and no more. (Without the paths, every row below a change was drawn afresh, and each
+/// open folder among them unfolded again: the tree flickered.)
+def tree(model: Model, path: String, depth: Int, marks: dict.Dict(String, String)) -> List((String, Element(Msg))) {
   entries = case dict.get(model.tree, path) {
     Ok(found) -> found
     Error(_) -> []
@@ -386,7 +390,7 @@ def tree(model: Model, path: String, depth: Int, marks: dict.Dict(String, String
   active = app.group(model, model.focus).active
   // Something new is named at the top of the folder it will be in.
   fresh = case model.naming {
-    Some(n) if n.at == path and n.kind != "rename" -> [naming_row(n, depth)]
+    Some(n) if n.at == path and n.kind != "rename" -> [("naming:" <> path, naming_row(n, depth))]
     _ -> []
   }
   renaming = case model.naming {
@@ -450,9 +454,13 @@ def tree(model: Model, path: String, depth: Int, marks: dict.Dict(String, String
       ],
      )
     }
-    case folder and open {
-      True -> [row, html.div([class("children")], tree(model, full, depth + 1, marks))]
-      False -> [row]
+    case folder, open {
+      True, True -> case tree(model, full, depth + 1, marks) {
+        // Nothing in it: nothing to unfold.
+        [] -> [("row:" <> full, row)]
+        inside -> [("row:" <> full, row), ("in:" <> full, keyed.div([class("children")], inside))]
+      }
+      _, _ -> [("row:" <> full, row)]
     }
   }))
 }
@@ -1242,7 +1250,15 @@ def group_view(model: Model, g: Group) -> Element(Msg) {
     [
       html.div([class("tabbar")], [
         keyed.div(
-          [class("tabs"), attribute.role("tablist")],
+          [
+            attribute.classes([("tabs", True), ("drop-here", model.drag != None and model.drop == Some((g.id, layout.Middle)))]),
+            attribute.role("tablist"),
+            // A tab dropped on the strip of tabs joins this group; dropped on a tab, it goes
+            // in before that tab (see the tabs below). Before this the strip took no drops,
+            // so a tab could only ever be dropped on an editor, and mostly made a new tile.
+            event.on("dragover", decode.success(app.DropHover(g.id, layout.Middle))) |> event.prevent_default,
+            event.on("drop", decode.success(app.Dropped(g.id, layout.Middle))) |> event.prevent_default,
+          ],
           list.filter_map(g.tabs, fn(path) {
             case app.find_doc(model, path) {
               None -> Error(Nil)
@@ -1256,6 +1272,7 @@ def group_view(model: Model, g: Group) -> Element(Msg) {
                       attribute.attribute("data-path", path),
                       event.on("dragstart", decode.success(app.TabDragged(path, g.id))),
                       event.on("dragend", decode.success(app.DragEnded)),
+                      event.on("drop", decode.success(app.TabDroppedAt(g.id, path))) |> event.prevent_default |> event.stop_propagation,
                     ],
                     [
                       html.button(
@@ -1321,7 +1338,21 @@ def group_view(model: Model, g: Group) -> Element(Msg) {
             _ -> welcome(model)
           }
         }
-        Some(d) -> case string.starts_with(d.path, app.at_tab), app.is_canvas(model, d), d.language == app.canvas_language {
+        Some(d) -> {
+          past = string.starts_with(d.path, app.at_tab)
+          cond {
+          app.is_media(d) -> special(g, focused, media_view(model, d))
+          app.is_table(model, d) and not past -> special(g, focused, table_view(d))
+          // A table read as text says so, with the way back.
+          app.viewer_of(d.name) == "table" and not past and d.language != "runes" ->
+            element.fragment([
+              html.div([class("canvas-raw")], [
+                html.span([], [txt("This is the text of a table.")]),
+                html.button([class("link"), event.on_click(app.CanvasRaw(d.path))], [txt("Show the table")]),
+              ]),
+              editor(model, g, d, focused),
+            ])
+          _ -> case string.starts_with(d.path, app.at_tab), app.is_canvas(model, d), d.language == app.canvas_language {
           True, True, _ -> element.fragment([time_bar(model, string.drop_start(d.path, string.length(app.at_tab))), special(g, focused, canvas_view(d, True))])
           True, False, _ -> element.fragment([time_bar(model, string.drop_start(d.path, string.length(app.at_tab))), editor(model, g, d, focused)])
           False, True, _ -> special(g, focused, canvas_view(d, False))
@@ -1335,6 +1366,8 @@ def group_view(model: Model, g: Group) -> Element(Msg) {
               editor(model, g, d, focused),
             ])
           False, False, False -> editor(model, g, d, focused)
+        }
+          }
         }
         None -> welcome(model)
       },
@@ -1368,6 +1401,34 @@ def canvas_view(d: Doc, past: Bool) -> Element(Msg) {
             False -> []
           },
         ),
+        [],
+      ),
+    ),
+  ])
+}
+
+/// A picture, a sound, a film, a PDF or a workbook, looked at. One viewer to a file, so a
+/// film keeps playing where it was when tabs are changed and changed back.
+def media_view(model: Model, d: Doc) -> Element(Msg) {
+  keyed.div([class("viewer-tile")], [
+    (
+      d.path,
+      element.element("runes-viewer", [attribute.attribute("path", d.path), attribute.attribute("stamp", int.to_string(model.stamp)), attribute.attribute("kind", app.viewer_of(d.name))], []),
+    ),
+  ])
+}
+
+/// A CSV file as a table. The table is given the file's text, as a drawing's board is.
+def table_view(d: Doc) -> Element(Msg) {
+  keyed.div([class("viewer-tile")], [
+    (
+      d.path,
+      element.element(
+        "runes-table",
+        [
+          attribute.property("doc", json.object([("text", json.string(string.join(d.lines, "\n")))])),
+          event.on("table-raw", decode.success(app.CanvasRaw(d.path))),
+        ],
         [],
       ),
     ),
@@ -1853,7 +1914,7 @@ def editor(model: Model, g: Group, d: Doc, focused: Bool) -> Element(Msg) {
     }
   }
 
-  html.div([class("editor")], [
+  body = html.div([class("editor")], [
     html.div(
       [attribute.id("scroller-" <> int.to_string(g.id)), class("scroller"), event.on("scroll", decode.success(app.Scrolled(g.id)))],
       [
@@ -1948,14 +2009,12 @@ def editor(model: Model, g: Group, d: Doc, focused: Bool) -> Element(Msg) {
               Some(h) if h.group == g.id -> [
                 (
                   "hover",
-                  html.div(
+                  element.element(
+                    "runes-float",
                     [
                       class("hover"),
                       attribute.role("tooltip"),
-                      attribute.styles([
-                        ("top", px({ spot(lay, h.at.line, h.at.col).0 + 1 } * row + 4)),
-                        ("left", ch(gutter + spot(lay, h.at.line, h.at.col).1)),
-                      ]),
+                      ..floating(lay, h.at.line, h.at.col, gutter, row, False)
                     ],
                     [case h.rich {
                       True -> element.unsafe_raw_html("", "div", [class("markdown hover-doc")], rich_text(h.text, app.lang(model, d.language).scope))
@@ -1964,6 +2023,10 @@ def editor(model: Model, g: Group, d: Doc, focused: Bool) -> Element(Msg) {
                   ),
                 ),
               ]
+              _ -> []
+            },
+            case model.signature {
+              Some(s) if s.path == d.path and focused -> [("signature", signature_help(model, d, s, gutter, row, lay))]
               _ -> []
             },
           ]),
@@ -1997,6 +2060,109 @@ def editor(model: Model, g: Group, d: Doc, focused: Bool) -> Element(Msg) {
       False -> element.none()
     },
   ])
+  case model.settings.breadcrumbs {
+    True -> element.fragment([crumbs(model, d), body])
+    False -> body
+  }
+}
+
+/// The line above an editor: where the file is, and what the cursor is inside (the function,
+/// the type, the class). From the language server when it has said; otherwise worked out
+/// from how the lines are indented. A name that is clicked is gone to.
+def crumbs(model: Model, d: Doc) -> Element(Msg) {
+  shown = case string.starts_with(d.path, app.at_tab) {
+    True -> string.drop_start(d.path, string.length(app.at_tab))
+    False -> d.path
+  }
+  inside = app.within(shown, model.root) and model.root != ""
+  parts = case d.untitled and not string.starts_with(d.path, app.at_tab), inside {
+    True, _ -> [d.name]
+    False, True -> string.split(app.relative(model, shown), "/")
+    False, False -> string.split(shown, "/") |> list.filter(fn(p) { p != "" })
+  }
+  folders = list.take(parts, list.length(parts) - 1)
+  line = d.cursor.line
+  named = case dict.get(model.symbols, d.path) {
+    Ok((_, [first, ..rest])) ->
+      // Of the things that hold the cursor's line, one at each depth: the last that starts above it.
+      list.filter([first, ..rest], fn(s) { s.line <= line and line <= s.last })
+      |> list.fold(dict.new(), fn(by_depth, s) { dict.insert(by_depth, s.depth, s) })
+      |> dict.to_list
+      |> list.sort(fn(a, b) { int.compare(a.0, b.0) })
+      |> list.map(fn(entry) { ({ entry.1 }.name, { entry.1 }.kind, { entry.1 }.line) })
+    _ -> app.scopes_at(d.path, d.version, d.lines, line) |> list.map(fn(s) { (s.0, "", s.1) })
+  }
+  sep = html.span([class("crumb-sep"), attribute.attribute("aria-hidden", "true")], [txt("›")])
+  html.div(
+    [class("crumbs"), attribute.role("navigation"), attribute.attribute("aria-label", "Where this is"), attribute.title(shown)],
+    list.flatten([
+      list.flat_map(folders, fn(folder) { [html.span([class("crumb folder")], [txt(folder)]), sep] }),
+      [html.span([class("crumb file")], [glyph(d.name, False, False, d.language), txt(d.name)])],
+      list.flat_map(named, fn(s) {
+        [
+          sep,
+          html.button(
+            [class("crumb symbol"), event.on_click(app.Jumped(d.path, s.2, 0)), ..labelled("Go to " <> s.0)],
+            // Only a server says what kind of thing a name is.
+            [
+              case s.1 {
+                "" -> element.none()
+                kind -> html.span([class("kind")], [txt(kind_sign(kind))])
+              },
+              txt(s.0),
+            ],
+          ),
+        ]
+      }),
+    ]),
+  )
+}
+
+/// Where something floats over the text: see `Float` in the ffi.
+def floating(lay: Rows, line: Int, col: Int, gutter: Int, row: Int, above: Bool) -> List(attribute.Attribute(Msg)) {
+  (at_row, at_left) = spot(lay, line, col)
+  [
+    attribute.attribute("x", int.to_string(gutter + at_left)),
+    attribute.attribute("y", int.to_string(at_row * row)),
+    attribute.attribute("h", int.to_string(row)),
+    attribute.attribute("side", case above {
+      True -> "above"
+      False -> "below"
+    }),
+  ]
+}
+
+/// What the call being written expects: its signature with the argument in hand picked out,
+/// and what the server says of that argument and of the function.
+def signature_help(model: Model, d: Doc, s: app.Signature, gutter: Int, row: Int, lay: Rows) -> Element(Msg) {
+  marked = s.to > s.from
+  scope = app.lang(model, d.language).scope
+  element.element(
+    "runes-float",
+    [class("hover signature"), attribute.role("tooltip"), attribute.attribute("aria-label", "What this call expects"), ..floating(lay, s.at.line, s.at.col, gutter, row, True)],
+    [
+      html.pre([class("signature-label")], case marked {
+        True -> [
+          txt(buffer.cut(s.label, 0, s.from)),
+          html.b([class("signature-arg")], [txt(buffer.cut(s.label, s.from, s.to))]),
+          txt(buffer.cut(s.label, s.to, buffer.len(s.label))),
+        ]
+        False -> [txt(s.label)]
+      }),
+      case s.count > 1 {
+        True -> html.small([class("signature-count")], [txt(int.to_string(s.index + 1) <> " of " <> int.to_string(s.count))])
+        False -> element.none()
+      },
+      case s.about {
+        "" -> element.none()
+        text -> element.unsafe_raw_html("", "div", [class("markdown hover-doc signature-about")], rich_text(text, scope))
+      },
+      case s.doc {
+        "" -> element.none()
+        text -> element.unsafe_raw_html("", "div", [class("markdown hover-doc signature-doc")], rich_text(text, scope))
+      },
+    ],
+  )
 }
 
 /// Markdown from a language server, drawn. Code in it is coloured as the file's language.
@@ -2025,10 +2191,13 @@ def suggestions(model: Model, d: Doc, gutter: Int, row: Int, lay: Rows) -> Eleme
         Some(_), [item, .._] if item.doc != "" or item.detail != "" -> Some(item)
         _, _ -> None
       }
-      html.div(
+      element.element(
+        "runes-float",
         [
           class("suggest-box"),
-          attribute.styles([("top", px({ at_row + 1 } * row + 4)), ("left", ch(gutter + at_left))]),
+          attribute.attribute("x", int.to_string(gutter + at_left)),
+          attribute.attribute("y", int.to_string(at_row * row)),
+          attribute.attribute("h", int.to_string(row)),
         ],
         [
           html.div(
@@ -2139,6 +2308,8 @@ def find_widget(model: Model) -> Element(Msg) {
 def panel(model: Model) -> Element(Msg) {
   everything = dict.to_list(model.diagnostics)
     |> list.flat_map(fn(entry) { list.map(entry.1, fn(d) { (entry.0, d) }) })
+    // Hints (code that is not needed, or out of date) mark the text and are not listed.
+    |> list.filter(fn(entry) { (entry.1).severity < 4 })
     |> list.sort(fn(a, b) { int.compare((a.1).severity, (b.1).severity) })
   docked = list.filter(model.terminals, fn(t) { not list.contains(model.terminal_tabs, t) })
   tab = fn(name: String, label: String) {
@@ -2333,6 +2504,16 @@ def status(model: Model) -> Element(Msg) {
     case app.doc(model), option.map(app.doc(model), fn(d) { app.is_canvas(model, d) }) {
       None, _ -> []
       Some(d), _ if d.language == "runes" -> []
+      // What is looked at has no cursor, no indentation and no language to speak of.
+      Some(d), _ if d.language == app.media_language -> [
+        html.span([class("seg")], [txt(case app.viewer_of(d.name) {
+          "image" -> "Picture"
+          "audio" -> "Sound"
+          "video" -> "Film"
+          "pdf" -> "PDF"
+          _ -> "Workbook"
+        })]),
+      ]
       Some(d), Some(True) -> [
         html.button([class("seg link"), event.on_click(app.CanvasRaw(d.path)), ..labelled("Show this drawing as text")], [txt("Rune Canvas")]),
       ]
@@ -2745,6 +2926,7 @@ def settings_view(model: Model) -> Element(Msg) {
       setting("Folding", "A mark beside each block folds it away. Ctrl+Shift+[ folds and Ctrl+Shift+] unfolds.", switch("editor.folding", s.folding)),
       setting("Indent guides", "Faint lines that show how deep each line is indented.", switch("editor.guides.indentation", s.guides)),
       setting("Match brackets", "Marks the bracket that pairs with the one at the cursor.", switch("editor.matchBrackets", s.match_brackets)),
+      setting("Breadcrumbs", "A line above each editor that says where the file is and which function or type the cursor is inside.", switch("breadcrumbs.enabled", s.breadcrumbs)),
 
       html.h2([], [txt("Indentation")]),
       html.p([class("lede")], [

@@ -5,6 +5,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const Module = require("node:module");
 const shim = require("./vscode.cjs");
+const { level } = require("./problems.cjs");
+const watch = require("./watch.cjs");
 const { URI, TextDocument, Position, Range, EventEmitter, CancellationTokenSource } = shim;
 
 const port = process.parentPort
@@ -29,7 +31,7 @@ const host = {
       for (const d of collection.get(uri) ?? []) {
         items.push({
           line: d.range.start.line, col: d.range.start.character, endLine: d.range.end.line, endCol: d.range.end.character,
-          severity: (d.severity ?? 0) + 1, message: String(d.message), source: d.source ?? collection.name ?? "",
+          severity: level(d.severity, d.message, d.tags), message: String(d.message), source: d.source ?? collection.name ?? "",
         });
       }
     }
@@ -80,6 +82,80 @@ host.findFiles = async (glob, base, max = 2000) => {
   };
   await walk(base, "", 0);
   return found;
+};
+
+// --- File watchers --------------------------------------------------------------------------
+// vscode.workspace.createFileSystemWatcher, for real: this is how a language server hears
+// that a manifest or a source file changed outside the editor (see watch.cjs).
+const watchers = new Set();
+let disk = null;
+const slashed = (file) => (path.sep === "/" ? file : file.split(path.sep).join("/"));
+// Servers that do not take a changed manifest in while they run: the dependency just added
+// stays unknown to them until they are started again. Their extensions have a command for
+// that, and Runes runs it when the manifest changes, so that nobody has to reload the editor.
+// (Servers that do follow their manifest need nothing here: the watchers above tell them.)
+const RESTARTS = [{ manifest: /^(bea|gleam)\.toml$/, commands: ["bea.restartServer", "gleam.restartServer"] }];
+const manifests = new Map();
+let restarting = null;
+function manifestChanged(full) {
+  const rule = RESTARTS.find((r) => r.manifest.test(path.basename(full)));
+  if (!rule || host.settings?.["runes.restartServersOnManifestChange"] === false) return;
+  const rel = path.relative(host.root || full, full);
+  // The project's own manifest, not a copy a build keeps of it.
+  if (rel.startsWith("..") || rel.split(path.sep).some((part) => watch.SKIP.has(part))) return;
+  let text = "";
+  try { text = fs.readFileSync(full, "utf8"); } catch { return; }
+  // Saved again with nothing changed in it: nothing to do.
+  if (manifests.get(full) === text) return;
+  manifests.set(full, text);
+  clearTimeout(restarting);
+  restarting = setTimeout(async () => {
+    for (const command of rule.commands) {
+      const run = host.commands.get(command);
+      if (!run) continue;
+      note("log", `[Extension Host] ${path.basename(full)} changed: running ${command}`);
+      try { await run(); } catch (e) { note("log", `[Extension Host] ${command} failed: ${e?.message ?? e}`); }
+    }
+  }, 1200);
+  restarting.unref?.();
+}
+
+function diskEvent(kind, full) {
+  if (kind !== "delete") manifestChanged(full);
+  for (const w of watchers) {
+    if (w.ignore[kind]) continue;
+    const rel = path.relative(w.base, full);
+    const inside = rel && !rel.startsWith("..") && !path.isAbsolute(rel);
+    // A pattern with a base is about what is under it; a bare one may also be a whole path.
+    if (!(inside && w.test.test(slashed(rel))) && !(!w.relative && w.test.test(slashed(full)))) continue;
+    try { w.emit[kind].fire(URI.file(full)); } catch (e) { note("log", `[Extension Host] a file watcher failed: ${e?.message ?? e}`); }
+  }
+}
+host.watch = (pattern, ignoreCreate, ignoreChange, ignoreDelete) => {
+  const relative = !!pattern && typeof pattern === "object";
+  const base = relative ? String(pattern.base ?? pattern.baseUri?.fsPath ?? "") : host.root;
+  const made = {
+    base, relative, test: watch.globRegex(relative ? pattern.pattern : pattern),
+    emit: { create: new EventEmitter(), change: new EventEmitter(), delete: new EventEmitter() },
+    ignore: { create: !!ignoreCreate, change: !!ignoreChange, delete: !!ignoreDelete },
+  };
+  const api = {
+    onDidCreate: made.emit.create.event, onDidChange: made.emit.change.event, onDidDelete: made.emit.delete.event,
+    ignoreCreateEvents: made.ignore.create, ignoreChangeEvents: made.ignore.change, ignoreDeleteEvents: made.ignore.delete,
+    dispose() { watchers.delete(made); },
+  };
+  if (!made.test || !base || !path.isAbsolute(base)) return api;
+  watchers.add(made);
+  try {
+    disk ??= watch.create({ onEvent: diskEvent });
+    if (host.root) disk.add(host.root);
+    // A folder named outright that the walk from the open folder leaves out (it is outside,
+    // or inside something skipped, as a virtual environment is): that folder alone, not all under it.
+    const rel = host.root ? path.relative(host.root, base) : "..";
+    const outside = rel.startsWith("..") || path.isAbsolute(rel);
+    if (outside || rel.split(path.sep).some((part) => watch.SKIP.has(part))) disk.add(base, true);
+  } catch (e) { note("log", `[Extension Host] watching files failed: ${e?.message ?? e}`); }
+  return api;
 };
 
 /** The quick fixes last offered, so the one the user picks can be found again. */
@@ -317,6 +393,74 @@ async function resolveCompletion(id) {
   return { detail: String(entry.item.detail ?? "").slice(0, 300), doc: markdown(entry.item.documentation).slice(0, 6000), edits: edits(entry.item.additionalTextEdits) };
 }
 
+/**
+ * What a function being called expects, where the cursor is in the call: its signature, which
+ * of its arguments is being written, and what the server says of both. Null when the cursor
+ * is in no call that anything knows.
+ */
+async function signature(m, document, position, token) {
+  const all = (host.providers.signature ?? []).filter((p) => shim.matches(p.selector, document) > 0);
+  for (const { provider, rest } of all) {
+    // Either the characters themselves, or one object naming those that open the help and those that keep it going.
+    const meta = rest[0] && typeof rest[0] === "object" && !Array.isArray(rest[0]) ? rest[0] : { triggerCharacters: rest.flat().filter((c) => typeof c === "string"), retriggerCharacters: [] };
+    const typed = m.ch && (meta.triggerCharacters ?? []).includes(m.ch);
+    const again = m.ch && (meta.retriggerCharacters ?? []).includes(m.ch);
+    // A character the server did not ask for opens nothing; help that is open is kept up to date by any change.
+    if (m.ch && !typed && !again && !m.open) continue;
+    try {
+      const context = { triggerKind: m.ch ? (typed || again ? 2 : 3) : 1, triggerCharacter: typed || again ? m.ch : undefined, isRetrigger: !!m.open, activeSignatureHelp: undefined };
+      const help = await provider.provideSignatureHelp(document, position, token, context);
+      const list = help?.signatures ?? [];
+      if (!list.length) continue;
+      const index = Math.min(Math.max(help.activeSignature ?? 0, 0), list.length - 1);
+      const chosen = list[index];
+      const label = String(chosen.label ?? "");
+      const params = chosen.parameters ?? [];
+      const active = chosen.activeParameter ?? help.activeParameter ?? 0;
+      let from = 0, to = 0, about = "";
+      // Parameters are named by where they are in the label, or by their text: each is looked
+      // for after the one before, so that `a` is not found inside `data`.
+      let after = 0;
+      for (const [i, parameter] of params.entries()) {
+        let start = -1, end = -1;
+        if (Array.isArray(parameter.label)) [start, end] = parameter.label;
+        else if (typeof parameter.label === "string" && parameter.label) { start = label.indexOf(parameter.label, after); end = start + parameter.label.length; }
+        if (start >= 0 && end <= label.length) after = end;
+        if (i === active) { if (start >= 0 && end <= label.length) { from = start; to = end; } about = markdown(parameter.documentation); }
+      }
+      return { label: label.slice(0, 2000), from, to, about: about.slice(0, 3000), doc: markdown(chosen.documentation).slice(0, 6000), index, count: list.length };
+    } catch (e) {
+      note("log", `[Extension Host] signature help failed: ${e?.message ?? e}`);
+    }
+  }
+  return null;
+}
+
+/** The named things of a file (functions, types, methods), as a flat list with how deep each is nested. */
+async function symbols(document, token) {
+  const all = (host.providers.symbols ?? []).filter((p) => shim.matches(p.selector, document) > 0);
+  for (const { provider } of all) {
+    try {
+      const found = await provider.provideDocumentSymbols(document, token);
+      if (!found?.length) continue;
+      const out = [];
+      const add = (symbol, depth) => {
+        const range = symbol.range ?? symbol.location?.range;
+        if (!range || out.length >= 5000) return;
+        out.push({ name: String(symbol.name ?? "").slice(0, 200), kind: KINDS_OF_SYMBOLS[symbol.kind] ?? "", line: range.start.line, endLine: range.end.line, depth });
+        for (const child of symbol.children ?? []) add(child, depth + 1);
+      };
+      for (const symbol of found) add(symbol, 0);
+      return out;
+    } catch (e) {
+      note("log", `[Extension Host] document symbols failed: ${e?.message ?? e}`);
+    }
+  }
+  return null;
+}
+// vscode.SymbolKind, by number.
+const KINDS_OF_SYMBOLS = ["file", "module", "namespace", "package", "class", "method", "property", "field", "constructor", "enum", "interface", "function", "variable", "constant", "string", "number", "boolean", "array", "object", "key", "null", "enum-member", "struct", "event", "operator", "type-parameter"];
+
 async function codeActions(m, document) {
   const range = new Range(new Position(m.line, m.col), new Position(m.endLine ?? m.line, m.endCol ?? m.col));
   const diagnostics = [];
@@ -384,6 +528,8 @@ async function answer(m) {
   const position = new Position(m.line, m.col);
   const token = new CancellationTokenSource().token;
   if (m.kind === "completion") return completion(m, document, position, token);
+  if (m.kind === "signature") return signature(m, document, position, token);
+  if (m.kind === "symbols") return symbols(document, token);
   const providers = (host.providers[m.kind] ?? []).filter((p) => shim.matches(p.selector, document) > 0);
   for (const { provider } of providers) {
     try {
